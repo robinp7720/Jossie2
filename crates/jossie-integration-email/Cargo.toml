@@ -1,0 +1,20 @@
+[package]
+name = "jossie-integration-email"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+jossie-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+async-imap = "0.10"
+async-native-tls = "0.5"
+lettre = { version = "0.11", features = ["tokio1-native-tls", "builder"] }
+mailparse = "0.15"
+futures = { workspace = true }
+tokio-util = { version = "0.7", features = ["compat"] }

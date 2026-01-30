@@ -1,0 +1,18 @@
+[package]
+name = "jossie-telegram"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+jossie-core = { workspace = true }
+jossie-llm = { workspace = true }
+jossie-db = { workspace = true }
+jossie-server = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+teloxide = { version = "0.13", features = ["macros"] }

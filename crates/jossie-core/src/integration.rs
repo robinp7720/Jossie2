@@ -1,0 +1,173 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResult {
+    pub tool_call_id: String,
+    pub content: String,
+    pub is_error: bool,
+}
+
+#[async_trait::async_trait]
+pub trait Integration: Send + Sync {
+    fn name(&self) -> &str;
+    fn tools(&self) -> Vec<ToolDefinition>;
+    async fn execute(&self, tool_name: &str, arguments: &str) -> anyhow::Result<String>;
+}
+
+pub struct IntegrationRegistry {
+    integrations: Vec<Arc<dyn Integration>>,
+    tool_map: HashMap<String, usize>,
+}
+
+impl IntegrationRegistry {
+    pub fn new() -> Self {
+        Self {
+            integrations: Vec::new(),
+            tool_map: HashMap::new(),
+        }
+    }
+
+    pub fn register(&mut self, integration: Arc<dyn Integration>) {
+        let idx = self.integrations.len();
+        for tool in integration.tools() {
+            self.tool_map.insert(tool.name.clone(), idx);
+        }
+        self.integrations.push(integration);
+    }
+
+    pub fn all_tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.integrations.iter().flat_map(|i| i.tools()).collect()
+    }
+
+    pub async fn execute(&self, call: &ToolCall) -> ToolResult {
+        let Some(&idx) = self.tool_map.get(&call.name) else {
+            return ToolResult {
+                tool_call_id: call.id.clone(),
+                content: format!("Unknown tool: {}", call.name),
+                is_error: true,
+            };
+        };
+        match self.integrations[idx].execute(&call.name, &call.arguments).await {
+            Ok(content) => ToolResult {
+                tool_call_id: call.id.clone(),
+                content,
+                is_error: false,
+            },
+            Err(e) => ToolResult {
+                tool_call_id: call.id.clone(),
+                content: format!("Error: {e}"),
+                is_error: true,
+            },
+        }
+    }
+}
+
+impl Default for IntegrationRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    struct MockIntegration;
+
+    #[async_trait::async_trait]
+    impl Integration for MockIntegration {
+        fn name(&self) -> &str { "mock" }
+        fn tools(&self) -> Vec<ToolDefinition> {
+            vec![
+                ToolDefinition {
+                    name: "mock_tool".to_string(),
+                    description: "A mock tool".to_string(),
+                    parameters: serde_json::json!({"type": "object", "properties": {}}),
+                },
+                ToolDefinition {
+                    name: "mock_echo".to_string(),
+                    description: "Echoes input".to_string(),
+                    parameters: serde_json::json!({"type": "object", "properties": {"text": {"type": "string"}}}),
+                },
+            ]
+        }
+        async fn execute(&self, tool_name: &str, arguments: &str) -> anyhow::Result<String> {
+            match tool_name {
+                "mock_tool" => Ok("mock result".to_string()),
+                "mock_echo" => Ok(format!("echo: {arguments}")),
+                _ => anyhow::bail!("unknown tool"),
+            }
+        }
+    }
+
+    #[test]
+    fn registry_collects_tool_definitions() {
+        let mut reg = IntegrationRegistry::new();
+        assert_eq!(reg.all_tool_definitions().len(), 0);
+        reg.register(Arc::new(MockIntegration));
+        let tools = reg.all_tool_definitions();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name, "mock_tool");
+        assert_eq!(tools[1].name, "mock_echo");
+    }
+
+    #[tokio::test]
+    async fn registry_dispatches_to_correct_integration() {
+        let mut reg = IntegrationRegistry::new();
+        reg.register(Arc::new(MockIntegration));
+
+        let call = ToolCall {
+            id: "call_1".to_string(),
+            name: "mock_tool".to_string(),
+            arguments: "{}".to_string(),
+        };
+        let result = reg.execute(&call).await;
+        assert!(!result.is_error);
+        assert_eq!(result.content, "mock result");
+    }
+
+    #[tokio::test]
+    async fn registry_returns_error_for_unknown_tool() {
+        let reg = IntegrationRegistry::new();
+        let call = ToolCall {
+            id: "call_1".to_string(),
+            name: "nonexistent".to_string(),
+            arguments: "{}".to_string(),
+        };
+        let result = reg.execute(&call).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("Unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn registry_execute_echo() {
+        let mut reg = IntegrationRegistry::new();
+        reg.register(Arc::new(MockIntegration));
+
+        let call = ToolCall {
+            id: "call_2".to_string(),
+            name: "mock_echo".to_string(),
+            arguments: r#"{"text":"hello"}"#.to_string(),
+        };
+        let result = reg.execute(&call).await;
+        assert!(!result.is_error);
+        assert!(result.content.contains("hello"));
+    }
+}
