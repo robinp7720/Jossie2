@@ -52,6 +52,16 @@ async fn main() -> Result<()> {
         max_agent_iterations: config.llm.max_agent_iterations,
     });
 
+    // Start Telegram bot if configured
+    if !config.telegram.bot_token.is_empty() {
+        let bot = jossie_telegram::TelegramBot::new(&config.telegram.bot_token, state.clone());
+        tokio::spawn(async move {
+            if let Err(e) = bot.run().await {
+                tracing::error!("Telegram bot error: {e}");
+            }
+        });
+    }
+
     let app = jossie_server::router(state);
     let addr = format!("{}:{}", config.server.host, config.server.port);
     tracing::info!("Starting server on {addr}");

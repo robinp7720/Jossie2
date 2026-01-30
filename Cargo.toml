@@ -55,6 +55,7 @@ jossie-server = { workspace = true }
 jossie-integration-memory = { workspace = true }
 jossie-integration-email = { workspace = true }
 jossie-integration-google = { workspace = true }
+jossie-telegram = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -3,7 +3,7 @@ use axum::{
     Router,
     routing::{get, post},
     extract::{State, WebSocketUpgrade, Path, ws},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, Html},
     http::{StatusCode, HeaderMap},
     Json,
     middleware::{self, Next},
@@ -26,13 +26,18 @@ pub struct AppState {
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let api = Router::new()
         .route("/api/chat", post(chat_handler))
         .route("/api/chat/stream", get(ws_handler))
         .route("/api/conversations", get(list_conversations))
         .route("/api/conversations/{id}/messages", get(get_messages))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
-        .with_state(state)
+        .with_state(state);
+
+    // Web UI served without auth (it sends the token in WS/API calls)
+    Router::new()
+        .route("/", get(index_handler))
+        .merge(api)
 }
 
 // -- Error type for JSON error responses --
@@ -321,4 +326,10 @@ async fn get_messages(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<Message>>, AppError> {
     Ok(Json(state.db.get_messages(id).await?))
+}
+
+// -- Web UI --
+
+async fn index_handler() -> Html<&'static str> {
+    Html(include_str!("index.html"))
 }
