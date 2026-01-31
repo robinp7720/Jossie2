@@ -101,26 +101,11 @@ pub async fn oauth_callback_handler(
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty());
 
-    let is_default = account_name.is_none();
-    let account_id = if is_default {
-        "google-default".to_string()
-    } else {
-        Uuid::new_v4().to_string()
-    };
-    let account_label = account_name.unwrap_or_else(|| "Default Google Account".to_string());
+    let account_id = Uuid::new_v4().to_string();
+    let account_label = account_name.unwrap_or_else(|| format!("Google Account {}", &account_id[..8]));
 
     match GoogleIntegration::exchange_code(&state.google_config, &code, &redirect_uri).await {
         Ok(token) => {
-            if is_default {
-                if let Err(e) = state
-                    .db
-                    .set_integration_setting("google", "refresh_token", &token)
-                    .await
-                {
-                    return Html(format!("<h1>Error Saving Token</h1><p>{}</p>", e));
-                }
-            }
-
             if let Err(e) = state
                 .db
                 .upsert_integration_account(
@@ -130,8 +115,7 @@ pub async fn oauth_callback_handler(
                     &serde_json::json!({
                         "refresh_token": token,
                         "email": "",
-                        "source": "oauth",
-                        "default": is_default
+                        "source": "oauth"
                     }),
                 )
                 .await

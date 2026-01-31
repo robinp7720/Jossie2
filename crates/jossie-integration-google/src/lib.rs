@@ -95,34 +95,30 @@ impl GoogleIntegration {
         tr.refresh_token.ok_or_else(|| anyhow::anyhow!("No refresh token in response (did you already authorize? Try revoking access first)"))
     }
 
-    async fn get_refresh_token(&self, account_id: Option<&str>) -> anyhow::Result<String> {
-        let account_id = account_id.unwrap_or("default");
-
-        if account_id == "default" {
-            if !self.config.refresh_token.is_empty() {
-                return Ok(self.config.refresh_token.clone());
-            }
-            if let Some(db) = &self.db {
-                if let Ok(Some(val)) = db.get_integration_setting("google", "refresh_token").await {
-                    return Ok(val);
-                }
-            }
-            anyhow::bail!("No default Google account configured");
+    async fn get_refresh_token(&self, account_id: &str) -> anyhow::Result<String> {
+        if account_id.trim().is_empty() {
+            anyhow::bail!("account_id is required");
         }
 
-        // Look up in DB
         if let Some(db) = &self.db {
             if let Some(acc) = db.get_integration_account(account_id).await? {
                 let stored: StoredAccount = serde_json::from_str(&acc.data)?;
+                if stored.refresh_token.trim().is_empty() {
+                    anyhow::bail!("Refresh token is missing for account: {}", account_id);
+                }
                 return Ok(stored.refresh_token);
             }
+            anyhow::bail!("Account not found: {}", account_id);
         }
 
-        anyhow::bail!("Account not found: {}", account_id)
+        anyhow::bail!("Google integration database not configured")
     }
 
-    async fn get_access_token(&self, account_id: Option<&str>) -> anyhow::Result<String> {
-        let account_key = account_id.unwrap_or("default").to_string();
+    async fn get_access_token(&self, account_id: &str) -> anyhow::Result<String> {
+        let account_key = account_id.trim().to_string();
+        if account_key.is_empty() {
+            anyhow::bail!("account_id is required");
+        }
 
         // Check cached token
         {
@@ -134,7 +130,7 @@ impl GoogleIntegration {
             }
         }
 
-        let refresh_token = self.get_refresh_token(Some(&account_key)).await?;
+        let refresh_token = self.get_refresh_token(&account_key).await?;
 
         // Refresh token
         let resp = self.client
@@ -171,18 +167,6 @@ impl GoogleIntegration {
 
     async fn list_accounts(&self) -> anyhow::Result<String> {
         let mut accounts = Vec::new();
-        
-        // Default account
-        let has_default = !self.config.refresh_token.is_empty() || 
-            (self.db.is_some() && self.db.as_ref().unwrap().get_integration_setting("google", "refresh_token").await.unwrap_or(None).is_some());
-            
-        if has_default {
-            accounts.push(serde_json::json!({
-                "id": "default",
-                "name": "Default Account",
-                "type": "config/legacy"
-            }));
-        }
 
         if let Some(db) = &self.db {
             let db_accounts = db.list_integration_accounts("google").await?;
@@ -204,7 +188,7 @@ impl GoogleIntegration {
         Ok(serde_json::to_string_pretty(&accounts)?)
     }
 
-    async fn gmail_search(&self, account_id: Option<&str>, query: &str) -> anyhow::Result<String> {
+    async fn gmail_search(&self, account_id: &str, query: &str) -> anyhow::Result<String> {
         let token = self.get_access_token(account_id).await?;
         let resp = self.client
             .get("https://gmail.googleapis.com/gmail/v1/users/me/messages")
@@ -259,7 +243,7 @@ impl GoogleIntegration {
         Ok(serde_json::to_string_pretty(&results)?)
     }
 
-    async fn gmail_read(&self, account_id: Option<&str>, message_id: &str) -> anyhow::Result<String> {
+    async fn gmail_read(&self, account_id: &str, message_id: &str) -> anyhow::Result<String> {
         let token = self.get_access_token(account_id).await?;
         let url = format!("https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}");
         let resp = self.client
@@ -314,7 +298,7 @@ impl GoogleIntegration {
         }).to_string())
     }
 
-    async fn gmail_send(&self, account_id: Option<&str>, to: &str, subject: &str, body: &str) -> anyhow::Result<String> {
+    async fn gmail_send(&self, account_id: &str, to: &str, subject: &str, body: &str) -> anyhow::Result<String> {
         let token = self.get_access_token(account_id).await?;
 
         let raw_email = format!(
@@ -338,7 +322,7 @@ impl GoogleIntegration {
         Ok(format!("Email sent to {to}"))
     }
 
-    async fn drive_search(&self, account_id: Option<&str>, query: &str) -> anyhow::Result<String> {
+    async fn drive_search(&self, account_id: &str, query: &str) -> anyhow::Result<String> {
         let token = self.get_access_token(account_id).await?;
         let q = format!("name contains '{}'", query.replace('"', "\""));
         let resp = self.client
@@ -357,7 +341,7 @@ impl GoogleIntegration {
         Ok(serde_json::to_string_pretty(&data["files"])?)
     }
 
-    async fn drive_read(&self, account_id: Option<&str>, file_id: &str) -> anyhow::Result<String> {
+    async fn drive_read(&self, account_id: &str, file_id: &str) -> anyhow::Result<String> {
         let token = self.get_access_token(account_id).await?;
 
         // First get file metadata to check mime type
@@ -406,7 +390,7 @@ impl GoogleIntegration {
         }).to_string())
     }
 
-    async fn calendar_list_events(&self, account_id: Option<&str>, query: Option<String>, time_min: Option<String>) -> anyhow::Result<String> {
+    async fn calendar_list_events(&self, account_id: &str, query: Option<String>, time_min: Option<String>) -> anyhow::Result<String> {
         let token = self.get_access_token(account_id).await?;
         let mut req = self.client
             .get("https://www.googleapis.com/calendar/v3/calendars/primary/events")
@@ -433,7 +417,7 @@ impl GoogleIntegration {
         Ok(serde_json::to_string_pretty(&events)?)
     }
 
-    async fn calendar_create_event(&self, account_id: Option<&str>, summary: &str, start_time: &str, end_time: &str, description: Option<String>) -> anyhow::Result<String> {
+    async fn calendar_create_event(&self, account_id: &str, summary: &str, start_time: &str, end_time: &str, description: Option<String>) -> anyhow::Result<String> {
         let token = self.get_access_token(account_id).await?;
         
         let body = serde_json::json!({
@@ -530,10 +514,10 @@ impl Integration for GoogleIntegration {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "account_id": {"type": "string", "description": "Account ID (optional, defaults to default account)"},
+                        "account_id": {"type": "string", "description": "Account ID from google_list_accounts"},
                         "query": {"type": "string", "description": "Gmail search query (same syntax as Gmail search bar)"}
                     },
-                    "required": ["query"]
+                    "required": ["account_id", "query"]
                 }),
             },
             ToolDefinition {
@@ -542,10 +526,10 @@ impl Integration for GoogleIntegration {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "account_id": {"type": "string", "description": "Account ID"},
+                        "account_id": {"type": "string", "description": "Account ID from google_list_accounts"},
                         "message_id": {"type": "string", "description": "Gmail message ID from search results"}
                     },
-                    "required": ["message_id"]
+                    "required": ["account_id", "message_id"]
                 }),
             },
             ToolDefinition {
@@ -554,12 +538,12 @@ impl Integration for GoogleIntegration {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "account_id": {"type": "string", "description": "Account ID"},
+                        "account_id": {"type": "string", "description": "Account ID from google_list_accounts"},
                         "to": {"type": "string", "description": "Recipient email address"},
                         "subject": {"type": "string", "description": "Email subject"},
                         "body": {"type": "string", "description": "Email body text"}
                     },
-                    "required": ["to", "subject", "body"]
+                    "required": ["account_id", "to", "subject", "body"]
                 }),
             },
             ToolDefinition {
@@ -568,10 +552,10 @@ impl Integration for GoogleIntegration {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "account_id": {"type": "string", "description": "Account ID"},
+                        "account_id": {"type": "string", "description": "Account ID from google_list_accounts"},
                         "query": {"type": "string", "description": "Search term for file names"}
                     },
-                    "required": ["query"]
+                    "required": ["account_id", "query"]
                 }),
             },
             ToolDefinition {
@@ -580,10 +564,10 @@ impl Integration for GoogleIntegration {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "account_id": {"type": "string", "description": "Account ID"},
+                        "account_id": {"type": "string", "description": "Account ID from google_list_accounts"},
                         "file_id": {"type": "string", "description": "Google Drive file ID from search results"}
                     },
-                    "required": ["file_id"]
+                    "required": ["account_id", "file_id"]
                 }),
             },
             ToolDefinition {
@@ -592,10 +576,11 @@ impl Integration for GoogleIntegration {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "account_id": {"type": "string", "description": "Account ID"},
+                        "account_id": {"type": "string", "description": "Account ID from google_list_accounts"},
                         "query": {"type": "string", "description": "Filter events by text query"},
                         "time_min": {"type": "string", "description": "Start time (ISO 8601) to list events from. Defaults to now."}
-                    }
+                    },
+                    "required": ["account_id"]
                 }),
             },
             ToolDefinition {
@@ -604,13 +589,13 @@ impl Integration for GoogleIntegration {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "account_id": {"type": "string", "description": "Account ID"},
+                        "account_id": {"type": "string", "description": "Account ID from google_list_accounts"},
                         "summary": {"type": "string", "description": "Event title"},
                         "start_time": {"type": "string", "description": "Start time (ISO 8601)"},
                         "end_time": {"type": "string", "description": "End time (ISO 8601)"},
                         "description": {"type": "string", "description": "Event description (optional)"}
                     },
-                    "required": ["summary", "start_time", "end_time"]
+                    "required": ["account_id", "summary", "start_time", "end_time"]
                 }),
             },
         ]
@@ -626,53 +611,56 @@ impl Integration for GoogleIntegration {
         match tool_name {
             "gmail_search" => {
                 #[derive(Deserialize)]
-                struct Args { query: String, account_id: Option<String> }
+                struct Args { query: String, account_id: String }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.gmail_search(args.account_id.as_deref(), &args.query).await
+                self.gmail_search(&args.account_id, &args.query).await
             }
             "gmail_read" => {
                 #[derive(Deserialize)]
-                struct Args { message_id: String, account_id: Option<String> }
+                struct Args { message_id: String, account_id: String }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.gmail_read(args.account_id.as_deref(), &args.message_id).await
+                self.gmail_read(&args.account_id, &args.message_id).await
             }
             "gmail_send" => {
                 #[derive(Deserialize)]
-                struct Args { to: String, subject: String, body: String, account_id: Option<String> }
+                struct Args { to: String, subject: String, body: String, account_id: String }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.gmail_send(args.account_id.as_deref(), &args.to, &args.subject, &args.body).await
+                self.gmail_send(&args.account_id, &args.to, &args.subject, &args.body).await
             }
             "drive_search" => {
                 #[derive(Deserialize)]
-                struct Args { query: String, account_id: Option<String> }
+                struct Args { query: String, account_id: String }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.drive_search(args.account_id.as_deref(), &args.query).await
+                self.drive_search(&args.account_id, &args.query).await
             }
             "drive_read" => {
                 #[derive(Deserialize)]
-                struct Args { file_id: String, account_id: Option<String> }
+                struct Args { file_id: String, account_id: String }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.drive_read(args.account_id.as_deref(), &args.file_id).await
+                self.drive_read(&args.account_id, &args.file_id).await
             }
             "calendar_list_events" => {
                 #[derive(Deserialize)]
-                struct Args { query: Option<String>, time_min: Option<String>, account_id: Option<String> }
+                struct Args { query: Option<String>, time_min: Option<String>, account_id: String }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.calendar_list_events(args.account_id.as_deref(), args.query, args.time_min).await
+                self.calendar_list_events(&args.account_id, args.query, args.time_min).await
             }
             "calendar_create_event" => {
                 #[derive(Deserialize)]
-                struct Args { summary: String, start_time: String, end_time: String, description: Option<String>, account_id: Option<String> }
+                struct Args { summary: String, start_time: String, end_time: String, description: Option<String>, account_id: String }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.calendar_create_event(args.account_id.as_deref(), &args.summary, &args.start_time, &args.end_time, args.description).await
+                self.calendar_create_event(&args.account_id, &args.summary, &args.start_time, &args.end_time, args.description).await
             }
             _ => anyhow::bail!("Unknown google tool: {tool_name}"),
         }
     }
 
     async fn check_onboarding(&self) -> anyhow::Result<OnboardingStatus> {
-        if !self.get_refresh_token(None).await.unwrap_or_default().is_empty() {
-            return Ok(OnboardingStatus::Configured);
+        if let Some(db) = &self.db {
+            let accounts = db.list_integration_accounts("google").await?;
+            if !accounts.is_empty() {
+                return Ok(OnboardingStatus::Configured);
+            }
         }
 
         let redirect_uri = "http://localhost:3000/oauth/callback"; 

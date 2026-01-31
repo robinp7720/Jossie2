@@ -745,9 +745,9 @@ const App = () => {
                   <div className="callout">
                     <p>
                       Use OAuth to connect Google. Click Connect in the integration
-                      card or open {googleOauthUrl}. The OAuth flow stores the
-                      default account. Add a friendly name and click Login with
-                      Google to create an additional account.
+                      card or open {googleOauthUrl}. The OAuth flow creates a
+                      Google account entry. Add a friendly name and click Login
+                      with Google to label the account.
                     </p>
                     <button
                       className="button primary"
@@ -838,16 +838,12 @@ const App = () => {
                       <h3>{account.name}</h3>
                       <p className="muted">{account.integration}</p>
                     </div>
-                    {account.id !== 'google-default' ? (
-                      <button
-                        className="button ghost"
-                        onClick={() => handleDeleteAccount(account.id)}
-                      >
-                        Remove
-                      </button>
-                    ) : (
-                      <span className="chip">Default</span>
-                    )}
+                    <button
+                      className="button ghost"
+                      onClick={() => handleDeleteAccount(account.id)}
+                    >
+                      Remove
+                    </button>
                   </div>
                   <pre className="code">
                     {JSON.stringify(account.details ?? {}, null, 2)}
