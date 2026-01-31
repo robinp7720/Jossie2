@@ -99,6 +99,7 @@
                 currentAssistantMessage = null; // Reset for next assistant chunk/message
             } else if (data.type === 'done') {
                 currentAssistantMessage = null;
+                if (data.conversation_id) conversationId = data.conversation_id;
             } else if (data.type === 'error') {
                 appendSystemMessage(`Error: ${data.error}`);
             } else if (data.type === 'message') {

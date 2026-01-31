@@ -98,12 +98,36 @@ impl LlmClient {
     }
 
     fn build_messages(messages: &[Message]) -> Vec<ChatMessage> {
-        messages.iter().map(|m| ChatMessage {
-            role: m.role.to_string(),
-            content: if m.content.is_empty() && m.role != Role::Tool { None } else { Some(m.content.clone()) },
-            tool_calls: m.tool_calls.clone(),
-            tool_call_id: m.tool_call_id.clone(),
-            name: m.name.clone(),
+        messages.iter().map(|m| {
+            let tool_calls = if let Some(tc_val) = &m.tool_calls {
+                // Check if it's our internal flat format (Vec<ToolCall>)
+                if let Ok(flat_calls) = serde_json::from_value::<Vec<ToolCall>>(tc_val.clone()) {
+                    // Convert to API format: [{ "id": "...", "type": "function", "function": { ... } }]
+                    Some(serde_json::to_value(flat_calls.into_iter().map(|fc| {
+                        serde_json::json!({
+                            "id": fc.id,
+                            "type": "function",
+                            "function": {
+                                "name": fc.name,
+                                "arguments": fc.arguments
+                            }
+                        })
+                    }).collect::<Vec<_>>()).unwrap_or(tc_val.clone()))
+                } else {
+                    // Already correct or unknown format
+                    Some(tc_val.clone())
+                }
+            } else {
+                None
+            };
+
+            ChatMessage {
+                role: m.role.to_string(),
+                content: if m.content.is_empty() && m.role != Role::Tool { None } else { Some(m.content.clone()) },
+                tool_calls,
+                tool_call_id: m.tool_call_id.clone(),
+                name: m.name.clone(),
+            }
         }).collect()
     }
 

@@ -236,7 +236,7 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
             
             // Send done message after stream ends
             let _ = socket.send(ws::Message::Text(
-                serde_json::json!({"type": "done"}).to_string().into()
+                serde_json::json!({"type": "done", "conversation_id": conv_id}).to_string().into()
             )).await;
 
             if !tool_calls.is_empty() {
