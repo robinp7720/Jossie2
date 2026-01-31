@@ -43,7 +43,7 @@ const getDefaultBaseUrl = () => {
   const isVitePort = port === '5173' || port === '5174' || port === '4173'
 
   if (isLocalHost && isVitePort) {
-    return `${protocol}//${hostname}:8080`
+    return `${protocol}//${hostname}:3000`
   }
 
   return window.location.origin
