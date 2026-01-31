@@ -40,7 +40,11 @@ impl GoogleIntegration {
         self.db = Some(db);
     }
 
-    pub fn generate_auth_url(config: &GoogleConfig, redirect_uri: &str) -> String {
+    pub fn generate_auth_url(
+        config: &GoogleConfig,
+        redirect_uri: &str,
+        state: Option<&str>,
+    ) -> String {
         let scopes = [
             "https://mail.google.com/",
             "https://www.googleapis.com/auth/drive",
@@ -48,12 +52,19 @@ impl GoogleIntegration {
             "https://www.googleapis.com/auth/calendar"
         ].join(" ");
 
-        format!(
+        let mut url = format!(
             "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent",
             config.client_id,
             redirect_uri,
             scopes
-        )
+        );
+
+        if let Some(state) = state {
+            url.push_str("&state=");
+            url.push_str(state);
+        }
+
+        url
     }
 
     pub async fn exchange_code(config: &GoogleConfig, code: &str, redirect_uri: &str) -> anyhow::Result<String> {
@@ -665,7 +676,7 @@ impl Integration for GoogleIntegration {
         }
 
         let redirect_uri = "http://localhost:3000/oauth/callback"; 
-        let url = Self::generate_auth_url(&self.config, redirect_uri);
+        let url = Self::generate_auth_url(&self.config, redirect_uri, None);
         
         Ok(OnboardingStatus::RequiresAction {
             fields: vec![

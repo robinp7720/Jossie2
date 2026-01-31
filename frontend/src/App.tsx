@@ -413,8 +413,21 @@ const App = () => {
     return `${base}/setup/google?token=${encoded}`
   }, [apiConfig.baseUrl, apiConfig.token])
 
-  const handleGoogleConnect = () => {
-    window.open(googleOauthUrl, '_blank')
+  const buildGoogleOauthUrl = (accountName?: string) => {
+    try {
+      const url = new URL(googleOauthUrl)
+      const trimmed = accountName?.trim()
+      if (trimmed) {
+        url.searchParams.set('account_name', trimmed)
+      }
+      return url.toString()
+    } catch {
+      return googleOauthUrl
+    }
+  }
+
+  const handleGoogleConnect = (accountName?: string) => {
+    window.open(buildGoogleOauthUrl(accountName), '_blank')
   }
 
   return (
@@ -564,7 +577,7 @@ const App = () => {
                 <p>Track onboarding status and launch new connections.</p>
               </div>
               <div className="chip-row">
-                <button className="button primary" onClick={handleGoogleConnect}>
+                <button className="button primary" onClick={() => handleGoogleConnect()}>
                   Login with Google
                 </button>
                 <button className="button ghost" onClick={refreshOnboarding}>
@@ -588,7 +601,7 @@ const App = () => {
                     {integration.name === 'google' && (
                       <button
                         className="button primary"
-                        onClick={handleGoogleConnect}
+                        onClick={() => handleGoogleConnect()}
                       >
                         Connect
                       </button>
@@ -733,10 +746,14 @@ const App = () => {
                     <p>
                       Use OAuth to connect Google. Click Connect in the integration
                       card or open {googleOauthUrl}. The OAuth flow stores the
-                      default account. Use the fields below to add an extra account
-                      by refresh token.
+                      default account. Add a friendly name and click Login with
+                      Google to create an additional account.
                     </p>
-                    <button className="button primary" type="button" onClick={handleGoogleConnect}>
+                    <button
+                      className="button primary"
+                      type="button"
+                      onClick={() => handleGoogleConnect(accountForm.name)}
+                    >
                       Login with Google
                     </button>
                   </div>
