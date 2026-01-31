@@ -25,6 +25,49 @@ impl GoogleIntegration {
         }
     }
 
+    pub fn generate_auth_url(config: &GoogleConfig, redirect_uri: &str) -> String {
+        let scopes = [
+            "https://mail.google.com/",
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/gmail.send"
+        ].join(" ");
+
+        format!(
+            "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent",
+            config.client_id,
+            redirect_uri,
+            scopes
+        )
+    }
+
+    pub async fn exchange_code(config: &GoogleConfig, code: &str, redirect_uri: &str) -> anyhow::Result<String> {
+        let client = reqwest::Client::new();
+        let resp = client
+            .post("https://oauth2.googleapis.com/token")
+            .form(&[
+                ("client_id", &config.client_id),
+                ("client_secret", &config.client_secret),
+                ("code", &code.to_string()),
+                ("grant_type", &"authorization_code".to_string()),
+                ("redirect_uri", &redirect_uri.to_string()),
+            ])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Token exchange failed: {body}");
+        }
+
+        #[derive(Deserialize)]
+        struct TokenResponse {
+            refresh_token: Option<String>,
+        }
+
+        let tr: TokenResponse = resp.json().await?;
+        tr.refresh_token.ok_or_else(|| anyhow::anyhow!("No refresh token in response (did you already authorize? Try revoking access first)"))
+    }
+
     async fn get_access_token(&self) -> anyhow::Result<String> {
         // Check cached token
         {

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use axum::{
     Router,
     routing::{get, post},
-    extract::{State, WebSocketUpgrade, Path, ws},
+    extract::{State, WebSocketUpgrade, Path, ws, Query},
     response::{IntoResponse, Response, Html},
     http::{StatusCode, HeaderMap},
     Json,
@@ -12,6 +12,7 @@ use jossie_core::integration::IntegrationRegistry;
 use jossie_core::types::{Message, Role};
 use jossie_db::Database;
 use jossie_llm::LlmClient;
+use jossie_integration_google::GoogleIntegration;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use chrono::Utc;
@@ -23,6 +24,7 @@ pub struct AppState {
     pub auth_token: String,
     pub system_prompt: String,
     pub max_agent_iterations: usize,
+    pub google_config: jossie_core::config::GoogleConfig,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -32,12 +34,30 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/conversations", get(list_conversations))
         .route("/api/conversations/{id}/messages", get(get_messages))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
-        .with_state(state);
+        .with_state(state.clone());
 
-    // Web UI served without auth (it sends the token in WS/API calls)
-    Router::new()
+    // Web UI and Setup routes (no auth required for setup to make it easy, or maybe require it?
+    // Let's require auth for setup initiation, but callback is public from Google.
+    // Actually, ease of use: leave setup public but obscure URL? No, stick to auth for initiation.
+    
+    // Wait, callback comes from Google user's browser, it won't have the Bearer token header.
+    // So callback MUST be public.
+    
+    // Initiation can be protected.
+    
+    let setup = Router::new()
+        .route("/setup/google", get(setup_google_handler))
+        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
+
+    let public = Router::new()
         .route("/", get(index_handler))
+        .route("/oauth/callback", get(oauth_callback_handler));
+
+    Router::new()
+        .merge(public)
+        .merge(setup)
         .merge(api)
+        .with_state(state)
 }
 
 // -- Error type for JSON error responses --
@@ -373,4 +393,60 @@ async fn get_messages(
 
 async fn index_handler() -> Html<&'static str> {
     Html(include_str!("index.html"))
+}
+
+// -- Google Setup --
+
+async fn setup_google_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> axum::response::Redirect {
+    let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost:3000");
+    // Assuming HTTP for local setup. If behind HTTPS proxy, this might break, but good enough for onboarding.
+    let redirect_uri = format!("http://{}/oauth/callback", host);
+    
+    let url = GoogleIntegration::generate_auth_url(&state.google_config, &redirect_uri);
+    axum::response::Redirect::to(&url)
+}
+
+#[derive(Deserialize)]
+struct CallbackQuery {
+    code: Option<String>,
+    error: Option<String>,
+}
+
+async fn oauth_callback_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<CallbackQuery>,
+) -> impl IntoResponse {
+    if let Some(error) = query.error {
+        return Html(format!("<h1>Google Auth Error</h1><p>{}</p>", error));
+    }
+    
+    let Some(code) = query.code else {
+        return Html("<h1>Error</h1><p>No code received.</p>".to_string());
+    };
+
+    let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost:3000");
+    let redirect_uri = format!("http://{}/oauth/callback", host);
+
+    match GoogleIntegration::exchange_code(&state.google_config, &code, &redirect_uri).await {
+        Ok(token) => Html(format!(
+            r#"
+            <h1>Success!</h1>
+            <p>Here is your Google Refresh Token:</p>
+            <pre style="background: #f4f4f4; padding: 10px; border-radius: 5px;">{}</pre>
+            <p><strong>Instructions:</strong></p>
+            <ol>
+                <li>Copy the token above.</li>
+                <li>Add it to your <code>.env</code> file: <code>JOSSIE_GOOGLE_REFRESH_TOKEN=...</code></li>
+                <li>Or update your <code>config.toml</code>.</li>
+                <li>Restart Jossie.</li>
+            </ol>
+            "#,
+            token
+        )),
+        Err(e) => Html(format!("<h1>Exchange Error</h1><p>{}</p>", e)),
+    }
 }

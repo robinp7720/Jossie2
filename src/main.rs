@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
         auth_token: config.server.auth_token.clone(),
         system_prompt: config.llm.system_prompt.clone(),
         max_agent_iterations: config.llm.max_agent_iterations,
+        google_config: config.google.clone(),
     });
 
     // Start Telegram bot if configured

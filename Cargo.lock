@@ -1560,6 +1560,7 @@ dependencies = [
  "futures",
  "jossie-core",
  "jossie-db",
+ "jossie-integration-google",
  "jossie-llm",
  "serde",
  "serde_json",
