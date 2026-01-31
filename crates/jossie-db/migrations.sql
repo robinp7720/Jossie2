@@ -35,3 +35,18 @@ CREATE TABLE IF NOT EXISTS telegram_chats (
     conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS integration_settings (
+    integration TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (integration, key)
+);
+
+CREATE TABLE IF NOT EXISTS integration_accounts (
+    id TEXT PRIMARY KEY,
+    integration TEXT NOT NULL,
+    name TEXT NOT NULL,
+    data TEXT NOT NULL, -- JSON configuration
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

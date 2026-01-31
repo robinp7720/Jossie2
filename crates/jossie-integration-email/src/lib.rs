@@ -1,33 +1,63 @@
 use jossie_core::config::EmailConfig;
-use jossie_core::integration::{Integration, ToolDefinition};
-use serde::Deserialize;
+use jossie_core::integration::{Integration, ToolDefinition, OnboardingStatus, OnboardingField};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use jossie_db::Database;
 
 type ImapSession = async_imap::Session<async_native_tls::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>>;
 
 pub struct EmailIntegration {
-    config: EmailConfig,
+    default_config: Option<EmailConfig>,
+    db: Option<Arc<Database>>,
 }
 
 impl EmailIntegration {
     pub fn new(config: &EmailConfig) -> Self {
+        let default_config = if !config.imap_host.is_empty() {
+            Some(config.clone())
+        } else {
+            None
+        };
         Self {
-            config: config.clone(),
+            default_config,
+            db: None,
         }
     }
 
-    async fn imap_connect(&self) -> anyhow::Result<ImapSession> {
+    pub fn set_db(&mut self, db: Arc<Database>) {
+        self.db = Some(db);
+    }
+
+    async fn get_account_config(&self, account_id: Option<&str>) -> anyhow::Result<EmailConfig> {
+        match account_id {
+            Some(id) if id != "default" => {
+                if let Some(db) = &self.db {
+                    if let Some(acc) = db.get_integration_account(id).await? {
+                        let config: EmailConfig = serde_json::from_str(&acc.data)?;
+                        return Ok(config);
+                    }
+                }
+                anyhow::bail!("Account not found: {}", id)
+            }
+            _ => {
+                self.default_config.clone().ok_or_else(|| anyhow::anyhow!("No default email account configured"))
+            }
+        }
+    }
+
+    async fn imap_connect(config: &EmailConfig) -> anyhow::Result<ImapSession> {
         use tokio_util::compat::TokioAsyncReadCompatExt;
-        let tcp = tokio::net::TcpStream::connect((&*self.config.imap_host, self.config.imap_port)).await?;
+        let tcp = tokio::net::TcpStream::connect((&*config.imap_host, config.imap_port)).await?;
         let tls = async_native_tls::TlsConnector::new();
-        let tls_stream = tls.connect(&self.config.imap_host, tcp.compat()).await?;
+        let tls_stream = tls.connect(&config.imap_host, tcp.compat()).await?;
         let client = async_imap::Client::new(tls_stream);
-        let session = client.login(&self.config.username, &self.config.password).await
+        let session = client.login(&config.username, &config.password).await
             .map_err(|e| anyhow::anyhow!("IMAP login failed: {}", e.0))?;
         Ok(session)
     }
 
-    async fn do_email_search(&self, query: &str, folder: &str) -> anyhow::Result<String> {
-        let mut session = self.imap_connect().await?;
+    async fn do_email_search(&self, config: &EmailConfig, query: &str, folder: &str) -> anyhow::Result<String> {
+        let mut session = Self::imap_connect(config).await?;
         session.select(folder).await?;
 
         let search_query = format!("OR SUBJECT \"{}\" FROM \"{}\"", query, query);
@@ -38,14 +68,12 @@ impl EmailIntegration {
             return Ok("No matching emails found.".to_string());
         }
 
-        // HashSet -> sorted Vec (most recent UIDs first)
         let mut uid_vec: Vec<u32> = uids.into_iter().collect();
         uid_vec.sort_unstable_by(|a, b| b.cmp(a));
         uid_vec.truncate(20);
         let uid_set: String = uid_vec.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
 
         let fetch_stream = session.uid_fetch(&uid_set, "BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)]").await?;
-        // Collect all results before dropping the borrow on session
         let fetched: Vec<_> = {
             use futures::TryStreamExt;
             fetch_stream.try_collect().await?
@@ -66,8 +94,8 @@ impl EmailIntegration {
         Ok(serde_json::to_string_pretty(&results)?)
     }
 
-    async fn do_email_read(&self, uid: u32, folder: &str) -> anyhow::Result<String> {
-        let mut session = self.imap_connect().await?;
+    async fn do_email_read(&self, config: &EmailConfig, uid: u32, folder: &str) -> anyhow::Result<String> {
+        let mut session = Self::imap_connect(config).await?;
         session.select(folder).await?;
 
         let fetch_stream = session.uid_fetch(uid.to_string(), "RFC822").await?;
@@ -111,7 +139,7 @@ impl EmailIntegration {
         Ok(result)
     }
 
-    async fn do_email_send(&self, to: &str, subject: &str, body: &str) -> anyhow::Result<String> {
+    async fn do_email_send(&self, config: &EmailConfig, to: &str, subject: &str, body: &str) -> anyhow::Result<String> {
         use lettre::{
             Message as LettreMessage, AsyncSmtpTransport, AsyncTransport,
             transport::smtp::authentication::Credentials,
@@ -119,18 +147,18 @@ impl EmailIntegration {
         };
 
         let email = LettreMessage::builder()
-            .from(self.config.username.parse()?)
+            .from(config.username.parse()?)
             .to(to.parse()?)
             .subject(subject)
             .body(body.to_string())?;
 
         let creds = Credentials::new(
-            self.config.username.clone(),
-            self.config.password.clone(),
+            config.username.clone(),
+            config.password.clone(),
         );
 
-        let mailer: AsyncSmtpTransport<Tokio1Executor> = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&self.config.smtp_host)?
-            .port(self.config.smtp_port)
+        let mailer: AsyncSmtpTransport<Tokio1Executor> = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)?
+            .port(config.smtp_port)
             .credentials(creds)
             .build();
 
@@ -138,8 +166,8 @@ impl EmailIntegration {
         Ok(format!("Email sent to {to}"))
     }
 
-    async fn do_list_folders(&self) -> anyhow::Result<String> {
-        let mut session = self.imap_connect().await?;
+    async fn do_list_folders(&self, config: &EmailConfig) -> anyhow::Result<String> {
+        let mut session = Self::imap_connect(config).await?;
 
         let list_stream = session.list(None, Some("*")).await?;
         let mailboxes: Vec<_> = {
@@ -152,6 +180,30 @@ impl EmailIntegration {
         session.logout().await.ok();
         Ok(serde_json::to_string_pretty(&folders)?)
     }
+
+    async fn list_accounts(&self) -> anyhow::Result<String> {
+        let mut accounts = Vec::new();
+        if let Some(config) = &self.default_config {
+            accounts.push(serde_json::json!({
+                "id": "default",
+                "name": "Default Config",
+                "email": config.username
+            }));
+        }
+        if let Some(db) = &self.db {
+            let db_accounts = db.list_integration_accounts("email").await?;
+            for acc in db_accounts {
+                if let Ok(cfg) = serde_json::from_str::<EmailConfig>(&acc.data) {
+                    accounts.push(serde_json::json!({
+                        "id": acc.id,
+                        "name": acc.name,
+                        "email": cfg.username
+                    }));
+                }
+            }
+        }
+        Ok(serde_json::to_string_pretty(&accounts)?)
+    }
 }
 
 #[async_trait::async_trait]
@@ -163,11 +215,17 @@ impl Integration for EmailIntegration {
     fn tools(&self) -> Vec<ToolDefinition> {
         vec![
             ToolDefinition {
+                name: "email_list_accounts".to_string(),
+                description: "List configured email accounts".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            },
+            ToolDefinition {
                 name: "email_search".to_string(),
                 description: "Search emails by query in subject or sender".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
+                        "account_id": {"type": "string", "description": "Account ID (optional, defaults to default account)"},
                         "query": {"type": "string", "description": "Search term"},
                         "folder": {"type": "string", "description": "IMAP folder to search (default: INBOX)"}
                     },
@@ -180,6 +238,7 @@ impl Integration for EmailIntegration {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
+                        "account_id": {"type": "string", "description": "Account ID"},
                         "uid": {"type": "integer", "description": "Email UID from search results"},
                         "folder": {"type": "string", "description": "IMAP folder (default: INBOX)"}
                     },
@@ -192,6 +251,7 @@ impl Integration for EmailIntegration {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
+                        "account_id": {"type": "string", "description": "Account ID"},
                         "to": {"type": "string", "description": "Recipient email address"},
                         "subject": {"type": "string", "description": "Email subject"},
                         "body": {"type": "string", "description": "Email body text"}
@@ -204,7 +264,9 @@ impl Integration for EmailIntegration {
                 description: "List all email folders/mailboxes".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
-                    "properties": {}
+                    "properties": {
+                        "account_id": {"type": "string", "description": "Account ID"}
+                    }
                 }),
             },
         ]
@@ -212,31 +274,69 @@ impl Integration for EmailIntegration {
 
     async fn execute(&self, tool_name: &str, arguments: &str) -> anyhow::Result<String> {
         tracing::debug!("email.execute: {tool_name}");
+        if tool_name == "email_list_accounts" {
+            return self.list_accounts().await;
+        }
+
+        // Common args struct for account extraction
+        #[derive(Deserialize)]
+        struct AccountArgs { account_id: Option<String> }
+        let base_args: AccountArgs = serde_json::from_str(arguments).unwrap_or(AccountArgs { account_id: None });
+        let config = self.get_account_config(base_args.account_id.as_deref()).await?;
+
         match tool_name {
             "email_search" => {
                 #[derive(Deserialize)]
                 struct Args { query: String, #[serde(default = "default_folder")] folder: String }
                 fn default_folder() -> String { "INBOX".to_string() }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.do_email_search(&args.query, &args.folder).await
+                self.do_email_search(&config, &args.query, &args.folder).await
             }
             "email_read" => {
                 #[derive(Deserialize)]
                 struct Args { uid: u32, #[serde(default = "default_folder")] folder: String }
                 fn default_folder() -> String { "INBOX".to_string() }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.do_email_read(args.uid, &args.folder).await
+                self.do_email_read(&config, args.uid, &args.folder).await
             }
             "email_send" => {
                 #[derive(Deserialize)]
                 struct Args { to: String, subject: String, body: String }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.do_email_send(&args.to, &args.subject, &args.body).await
+                self.do_email_send(&config, &args.to, &args.subject, &args.body).await
             }
             "email_list_folders" => {
-                self.do_list_folders().await
+                self.do_list_folders(&config).await
             }
             _ => anyhow::bail!("Unknown email tool: {tool_name}"),
         }
     }
+
+    async fn check_onboarding(&self) -> anyhow::Result<OnboardingStatus> {
+        // If default config exists, we are good.
+        if self.default_config.is_some() {
+            return Ok(OnboardingStatus::Configured);
+        }
+        // If DB has accounts, we are good.
+        if let Some(db) = &self.db {
+            let accounts = db.list_integration_accounts("email").await?;
+            if !accounts.is_empty() {
+                return Ok(OnboardingStatus::Configured);
+            }
+        }
+
+        // Otherwise, need setup
+        Ok(OnboardingStatus::RequiresAction {
+            fields: vec![
+                OnboardingField {
+                    name: "note".to_string(),
+                    label: "Setup Email".to_string(),
+                    input_type: "info".to_string(),
+                    value: None,
+                    description: Some("No email accounts configured. Add one via the settings API (implementation pending) or config.toml.".to_string()),
+                }
+            ]
+        })
+    }
 }
+

@@ -8,7 +8,7 @@ use axum::{
     Json,
     middleware::{self, Next},
 };
-use jossie_core::integration::IntegrationRegistry;
+use jossie_core::integration::{IntegrationRegistry, OnboardingStatus};
 use jossie_core::types::{Message, Role};
 use jossie_db::Database;
 use jossie_llm::LlmClient;
@@ -33,18 +33,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/chat/stream", get(ws_handler))
         .route("/api/conversations", get(list_conversations))
         .route("/api/conversations/{id}/messages", get(get_messages))
+        .route("/api/onboarding", get(onboarding_status_handler))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         .with_state(state.clone());
 
-    // Web UI and Setup routes (no auth required for setup to make it easy, or maybe require it?
-    // Let's require auth for setup initiation, but callback is public from Google.
-    // Actually, ease of use: leave setup public but obscure URL? No, stick to auth for initiation.
-    
-    // Wait, callback comes from Google user's browser, it won't have the Bearer token header.
-    // So callback MUST be public.
-    
-    // Initiation can be protected.
-    
+    // Web UI and Setup routes
     let setup = Router::new()
         .route("/setup/google", get(setup_google_handler))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
@@ -60,8 +53,30 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-// -- Error type for JSON error responses --
+// -- Onboarding --
 
+#[derive(Serialize)]
+struct IntegrationStatus {
+    name: String,
+    #[serde(flatten)]
+    status: OnboardingStatus,
+}
+
+async fn onboarding_status_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<IntegrationStatus>>, AppError> {
+    let mut statuses = Vec::new();
+    for integration in state.registry.get_integrations() {
+        let status = integration.check_onboarding().await?;
+        statuses.push(IntegrationStatus {
+            name: integration.name().to_string(),
+            status,
+        });
+    }
+    Ok(Json(statuses))
+}
+
+// -- Error type for JSON error responses --
 #[derive(Serialize)]
 struct ErrorBody {
     error: String,
@@ -194,7 +209,7 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
 
         let tools = state.registry.all_tool_definitions();
         let mut messages = state.db.get_messages(conv_id).await.unwrap_or_default();
-        prepend_system_prompt(&state.system_prompt, &mut messages);
+        prepend_system_prompt(&state, &mut messages).await;
 
         let max_iters = state.max_agent_iterations;
         for iteration in 0..max_iters {
@@ -300,15 +315,33 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
 
 // -- Agent loop --
 
-pub fn prepend_system_prompt(system_prompt: &str, messages: &mut Vec<Message>) {
-    if system_prompt.is_empty() {
+async fn build_system_prompt(state: &AppState) -> String {
+    let mut prompt = state.system_prompt.clone();
+
+    // Dynamically append agent and user profiles from memory
+    if let Ok(Some(entry)) = state.db.get_memory("agent_profile").await {
+        prompt.push_str("\n\n## Agent Description (Jossie)\n");
+        prompt.push_str(&entry.content);
+    }
+    
+    if let Ok(Some(entry)) = state.db.get_memory("user_profile").await {
+        prompt.push_str("\n\n## User Description\n");
+        prompt.push_str(&entry.content);
+    }
+
+    prompt
+}
+
+pub async fn prepend_system_prompt(state: &AppState, messages: &mut Vec<Message>) {
+    let content = build_system_prompt(state).await;
+    if content.is_empty() {
         return;
     }
     let sys_msg = Message {
         id: Uuid::nil(),
         conversation_id: Uuid::nil(),
         role: Role::System,
-        content: system_prompt.to_string(),
+        content,
         tool_calls: None,
         tool_call_id: None,
         name: None,
@@ -320,7 +353,7 @@ pub fn prepend_system_prompt(system_prompt: &str, messages: &mut Vec<Message>) {
 pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<String> {
     let tools = state.registry.all_tool_definitions();
     let mut messages = state.db.get_messages(conv_id).await?;
-    prepend_system_prompt(&state.system_prompt, &mut messages);
+    prepend_system_prompt(state, &mut messages).await;
 
     for _iteration in 0..state.max_agent_iterations {
         let (content, tool_calls) = state.llm.complete(&messages, &tools).await?;
@@ -432,21 +465,19 @@ async fn oauth_callback_handler(
     let redirect_uri = format!("http://{}/oauth/callback", host);
 
     match GoogleIntegration::exchange_code(&state.google_config, &code, &redirect_uri).await {
-        Ok(token) => Html(format!(
-            r#"
-            <h1>Success!</h1>
-            <p>Here is your Google Refresh Token:</p>
-            <pre style="background: #f4f4f4; padding: 10px; border-radius: 5px;">{}</pre>
-            <p><strong>Instructions:</strong></p>
-            <ol>
-                <li>Copy the token above.</li>
-                <li>Add it to your <code>.env</code> file: <code>JOSSIE_GOOGLE_REFRESH_TOKEN=...</code></li>
-                <li>Or update your <code>config.toml</code>.</li>
-                <li>Restart Jossie.</li>
-            </ol>
-            "#,
-            token
-        )),
+        Ok(token) => {
+            if let Err(e) = state.db.set_integration_setting("google", "refresh_token", &token).await {
+                return Html(format!("<h1>Error Saving Token</h1><p>{}</p>", e));
+            }
+            Html(format!(
+                r#"
+                <h1>Success!</h1>
+                <p>Google integration configured successfully.</p>
+                <p>You can close this window.</p>
+                <script>setTimeout(() => window.close(), 3000);</script>
+                "#
+            ))
+        },
         Err(e) => Html(format!("<h1>Exchange Error</h1><p>{}</p>", e)),
     }
 }

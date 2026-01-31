@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 jossie-core = { workspace = true }
+jossie-db = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

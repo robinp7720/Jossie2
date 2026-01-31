@@ -6,6 +6,7 @@
     <title>Jossie Chat</title>
     <style>
         body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; display: flex; flex-direction: column; height: 100vh; box-sizing: border-box; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
         #chat-history { flex-grow: 1; overflow-y: auto; border: 1px solid #ccc; padding: 10px; margin-bottom: 10px; border-radius: 4px; }
         .message { margin-bottom: 10px; padding: 8px; border-radius: 4px; }
         .role-user { background-color: #e3f2fd; align-self: flex-end; text-align: right; }
@@ -15,27 +16,118 @@
         #message-input { flex-grow: 1; padding: 8px; }
         #token-input { margin-bottom: 10px; padding: 8px; width: 100%; box-sizing: border-box; }
         pre { white-space: pre-wrap; margin: 0; }
+        
+        #settings-panel { display: none; flex-grow: 1; border: 1px solid #ccc; padding: 20px; border-radius: 4px; overflow-y: auto; }
+        .integration-item { border-bottom: 1px solid #eee; padding: 15px 0; }
+        .status-configured { color: green; font-weight: bold; }
+        .status-action { color: orange; font-weight: bold; }
+        .action-btn { background-color: #2196f3; color: white; padding: 8px 16px; text-decoration: none; border-radius: 4px; display: inline-block; margin-top: 10px; }
     </style>
 </head>
 <body>
+    <div class="header">
+        <h2>Jossie</h2>
+        <button id="settings-btn">Settings</button>
+    </div>
+    
     <input type="password" id="token-input" placeholder="Enter Auth Token (saved in localStorage)" />
+    
     <div id="chat-history"></div>
-    <div class="controls">
+    
+    <div id="settings-panel">
+        <h2>Integrations</h2>
+        <div id="integrations-list">Loading...</div>
+        <button id="back-btn" style="margin-top: 20px;">Back to Chat</button>
+    </div>
+
+    <div class="controls" id="chat-controls">
         <input type="text" id="message-input" placeholder="Type a message..." disabled />
         <button id="send-btn" disabled>Send</button>
     </div>
 
     <script>
         const chatHistory = document.getElementById('chat-history');
+        const settingsPanel = document.getElementById('settings-panel');
+        const chatControls = document.getElementById('chat-controls');
+        const integrationsList = document.getElementById('integrations-list');
         const messageInput = document.getElementById('message-input');
         const sendBtn = document.getElementById('send-btn');
         const tokenInput = document.getElementById('token-input');
+        const settingsBtn = document.getElementById('settings-btn');
+        const backBtn = document.getElementById('back-btn');
 
         let socket = null;
         let currentAssistantMessage = null;
         let conversationId = null;
 
-        // Load token from localStorage
+        // Settings Logic
+        settingsBtn.addEventListener('click', () => {
+            chatHistory.style.display = 'none';
+            chatControls.style.display = 'none';
+            settingsPanel.style.display = 'block';
+            loadSettings();
+        });
+
+        backBtn.addEventListener('click', () => {
+            settingsPanel.style.display = 'none';
+            chatHistory.style.display = 'block';
+            chatControls.style.display = 'flex';
+        });
+
+        async function loadSettings() {
+            const token = tokenInput.value.trim();
+            if (!token) {
+                integrationsList.innerHTML = '<p>Please enter an auth token first.</p>';
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/onboarding', {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (!res.ok) throw new Error('Failed to load settings');
+                const data = await res.json();
+                renderIntegrations(data);
+            } catch (e) {
+                integrationsList.innerHTML = `<p style="color:red">Error: ${e.message}</p>`;
+            }
+        }
+
+        function renderIntegrations(data) {
+            integrationsList.innerHTML = '';
+            if (data.length === 0) {
+                integrationsList.innerHTML = '<p>No integrations found.</p>';
+                return;
+            }
+
+            data.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'integration-item';
+                
+                let statusHtml = '';
+                if (item.status === 'Configured') {
+                    statusHtml = '<span class="status-configured">✓ Configured</span>';
+                } else if (item.details && item.details.fields) { // RequiresAction
+                    statusHtml = '<span class="status-action">⚠ Setup Required</span>';
+                    item.details.fields.forEach(field => {
+                        if (field.input_type === 'oauth') {
+                            statusHtml += `
+                                <div style="margin-top:10px">
+                                    <p>${field.description || ''}</p>
+                                    <a href="${field.value}" class="action-btn" target="_blank">${field.label}</a>
+                                </div>`;
+                        } else {
+                            statusHtml += `<p>Field ${field.name} (${field.input_type}) not supported in UI yet.</p>`;
+                        }
+                    });
+                }
+
+                div.innerHTML = `<h3>${item.name}</h3>${statusHtml}`;
+                integrationsList.appendChild(div);
+            });
+        }
+
+        // Chat Logic
         const savedToken = localStorage.getItem('jossie_token');
         if (savedToken) {
             tokenInput.value = savedToken;

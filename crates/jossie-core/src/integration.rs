@@ -23,11 +23,32 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnboardingField {
+    pub name: String,
+    pub label: String,
+    pub input_type: String, // "text", "password", "oauth", "info"
+    pub value: Option<String>, // Current value or auth URL
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", content = "details")]
+pub enum OnboardingStatus {
+    Configured,
+    RequiresAction {
+        fields: Vec<OnboardingField>,
+    },
+}
+
 #[async_trait::async_trait]
 pub trait Integration: Send + Sync {
     fn name(&self) -> &str;
     fn tools(&self) -> Vec<ToolDefinition>;
     async fn execute(&self, tool_name: &str, arguments: &str) -> anyhow::Result<String>;
+    async fn check_onboarding(&self) -> anyhow::Result<OnboardingStatus> {
+        Ok(OnboardingStatus::Configured)
+    }
 }
 
 pub struct IntegrationRegistry {
@@ -53,6 +74,10 @@ impl IntegrationRegistry {
 
     pub fn all_tool_definitions(&self) -> Vec<ToolDefinition> {
         self.integrations.iter().flat_map(|i| i.tools()).collect()
+    }
+
+    pub fn get_integrations(&self) -> &[Arc<dyn Integration>] {
+        &self.integrations
     }
 
     pub async fn execute(&self, call: &ToolCall) -> ToolResult {

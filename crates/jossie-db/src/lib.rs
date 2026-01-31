@@ -2,6 +2,7 @@ use jossie_core::types::{Conversation, Message, Role};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use uuid::Uuid;
 use chrono::Utc;
+use std::collections::HashMap;
 
 pub struct Database {
     pool: SqlitePool,
@@ -121,6 +122,14 @@ impl Database {
         Ok(rows.into_iter().map(|r| MemoryEntry { key: r.key, content: r.content, tags: r.tags }).collect())
     }
 
+    pub async fn get_memory(&self, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
+        let row = sqlx::query_as::<_, MemoryRow>("SELECT key, content, tags FROM memory WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| MemoryEntry { key: r.key, content: r.content, tags: r.tags }))
+    }
+
     // Telegram
     pub async fn get_telegram_conversation(&self, chat_id: i64) -> anyhow::Result<Option<Uuid>> {
         let row = sqlx::query_as::<_, TelegramChatRow>("SELECT conversation_id FROM telegram_chats WHERE telegram_chat_id = ?")
@@ -139,9 +148,84 @@ impl Database {
             .await?;
         Ok(())
     }
+
+    // Integration Settings
+    pub async fn get_integration_setting(&self, integration: &str, key: &str) -> anyhow::Result<Option<String>> {
+        let row = sqlx::query_as::<_, SettingsRow>("SELECT value FROM integration_settings WHERE integration = ? AND key = ?")
+            .bind(integration)
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.value))
+    }
+
+    pub async fn set_integration_setting(&self, integration: &str, key: &str, value: &str) -> anyhow::Result<()> {
+        sqlx::query("INSERT OR REPLACE INTO integration_settings (integration, key, value) VALUES (?, ?, ?)")
+            .bind(integration)
+            .bind(key)
+            .bind(value)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_all_integration_settings(&self, integration: &str) -> anyhow::Result<HashMap<String, String>> {
+        let rows = sqlx::query_as::<_, SettingsRowAll>("SELECT key, value FROM integration_settings WHERE integration = ?")
+            .bind(integration)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(|r| (r.key, r.value)).collect())
+    }
+
+    // Integration Accounts
+    pub async fn add_integration_account(&self, integration: &str, name: &str, data: &serde_json::Value) -> anyhow::Result<String> {
+        let id = Uuid::new_v4().to_string();
+        let data_str = serde_json::to_string(data)?;
+        sqlx::query("INSERT INTO integration_accounts (id, integration, name, data) VALUES (?, ?, ?, ?)")
+            .bind(&id)
+            .bind(integration)
+            .bind(name)
+            .bind(&data_str)
+            .execute(&self.pool)
+            .await?;
+        Ok(id)
+    }
+
+    pub async fn get_integration_account(&self, id: &str) -> anyhow::Result<Option<IntegrationAccount>> {
+        let row = sqlx::query_as::<_, IntegrationAccount>("SELECT id, integration, name, data, created_at FROM integration_accounts WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row)
+    }
+
+    pub async fn list_integration_accounts(&self, integration: &str) -> anyhow::Result<Vec<IntegrationAccount>> {
+        let rows = sqlx::query_as::<_, IntegrationAccount>("SELECT id, integration, name, data, created_at FROM integration_accounts WHERE integration = ? ORDER BY created_at ASC")
+            .bind(integration)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    pub async fn delete_integration_account(&self, id: &str) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM integration_accounts WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 // Row types for sqlx
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct IntegrationAccount {
+    pub id: String,
+    pub integration: String,
+    pub name: String,
+    pub data: String,
+    pub created_at: String,
+}
+
 #[derive(sqlx::FromRow)]
 struct ConversationRow {
     id: String,
@@ -205,6 +289,17 @@ struct MemoryRow {
 #[derive(sqlx::FromRow)]
 struct TelegramChatRow {
     conversation_id: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct SettingsRow {
+    value: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct SettingsRowAll {
+    key: String,
+    value: String,
 }
 
 #[cfg(test)]
@@ -318,5 +413,39 @@ mod tests {
 
         let unknown = db.get_telegram_conversation(987654321).await.unwrap();
         assert!(unknown.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_integration_settings() {
+        let db = test_db().await;
+        let integration = "google";
+        db.set_integration_setting(integration, "refresh_token", "abc").await.unwrap();
+        db.set_integration_setting(integration, "other", "123").await.unwrap();
+
+        let val = db.get_integration_setting(integration, "refresh_token").await.unwrap();
+        assert_eq!(val.as_deref(), Some("abc"));
+
+        let all = db.get_all_integration_settings(integration).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all.get("refresh_token").map(|s| s.as_str()), Some("abc"));
+    }
+
+    #[tokio::test]
+    async fn test_integration_accounts() {
+        let db = test_db().await;
+        let data = serde_json::json!({"foo": "bar"});
+        let id = db.add_integration_account("test_int", "My Account", &data).await.unwrap();
+
+        let acc = db.get_integration_account(&id).await.unwrap().unwrap();
+        assert_eq!(acc.name, "My Account");
+        assert_eq!(acc.data, data.to_string());
+
+        let list = db.list_integration_accounts("test_int").await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, id);
+
+        db.delete_integration_account(&id).await.unwrap();
+        let list = db.list_integration_accounts("test_int").await.unwrap();
+        assert!(list.is_empty());
     }
 }

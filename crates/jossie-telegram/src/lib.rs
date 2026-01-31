@@ -10,7 +10,7 @@ pub struct TelegramBot {
 impl TelegramBot {
     pub fn new(token: &str, state: Arc<AppState>) -> Self {
         Self {
-            token: token.to_string(),
+            token: token.trim().to_string(),
             state,
         }
     }
@@ -30,7 +30,7 @@ impl TelegramBot {
                 let state = state.clone();
                 async move {
                     let respond = |e: &dyn std::fmt::Display| -> teloxide::RequestError {
-                        tracing::error!("{e}");
+                        tracing::error!("Telegram handler error: {e}");
                         teloxide::RequestError::Api(teloxide::ApiError::Unknown(e.to_string()))
                     };
 
@@ -39,10 +39,15 @@ impl TelegramBot {
                     };
 
                     let chat_id = msg.chat.id.0;
+                    tracing::info!("Received Telegram message from {chat_id}: {:.20}...", text);
 
                     let conv_id = match state.db.get_telegram_conversation(chat_id).await {
-                        Ok(Some(id)) => id,
+                        Ok(Some(id)) => {
+                            tracing::debug!("Found existing conversation {id} for chat {chat_id}");
+                            id
+                        },
                         Ok(None) => {
+                            tracing::info!("Creating new conversation for chat {chat_id}");
                             let title = format!("Telegram chat {}", chat_id);
                             match state.db.create_conversation(Some(&title)).await {
                                 Ok(conv) => {
@@ -71,22 +76,33 @@ impl TelegramBot {
                         return Err(respond(&e));
                     }
 
-                    let response = jossie_server::run_agent_loop(&state, conv_id).await
-                        .unwrap_or_else(|e| format!("Error: {e}"));
+                    tracing::info!("Running agent loop for conversation {conv_id}...");
+                    let response = match jossie_server::run_agent_loop(&state, conv_id).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::error!("Agent loop failed: {e}");
+                            format!("Error: {e}")
+                        }
+                    };
+                    tracing::info!("Agent response length: {}", response.len());
 
                     // Split long messages (Telegram 4096 char limit)
                     for chunk in split_message(&response, 4096) {
-                        bot.send_message(msg.chat.id, chunk).await?;
+                        if let Err(e) = bot.send_message(msg.chat.id, chunk).await {
+                            tracing::error!("Failed to send message to {chat_id}: {e}");
+                            return Err(e);
+                        }
                     }
+                    tracing::info!("Response sent to {chat_id}");
 
                     respond_ok()
                 }
             },
         );
 
-        tracing::info!("Starting Telegram bot...");
+        tracing::info!("Starting Telegram bot... Instance ID: {}", Uuid::new_v4());
+        bot.delete_webhook().await?;
         Dispatcher::builder(bot, handler)
-            .enable_ctrlc_handler()
             .build()
             .dispatch()
             .await;

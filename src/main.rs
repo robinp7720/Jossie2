@@ -37,13 +37,15 @@ async fn main() -> Result<()> {
     let mut registry = IntegrationRegistry::new();
     registry.register(Arc::new(MemoryIntegration::new(db.clone())));
 
-    if !config.email.imap_host.is_empty() {
-        registry.register(Arc::new(jossie_integration_email::EmailIntegration::new(&config.email)));
-        tracing::info!("Registered email integration");
-    }
+    let mut email = jossie_integration_email::EmailIntegration::new(&config.email);
+    email.set_db(db.clone());
+    registry.register(Arc::new(email));
+    tracing::info!("Registered email integration");
 
     if !config.google.client_id.is_empty() {
-        registry.register(Arc::new(jossie_integration_google::GoogleIntegration::new(&config.google)));
+        let mut google = jossie_integration_google::GoogleIntegration::new(&config.google);
+        google.set_db(db.clone());
+        registry.register(Arc::new(google));
         tracing::info!("Registered Google integration");
     }
 
@@ -83,7 +85,8 @@ fn override_config_from_env(config: &mut AppConfig) {
 
     if let Ok(val) = env::var("JOSSIE_SERVER_AUTH_TOKEN") { config.server.auth_token = val; }
     if let Ok(val) = env::var("JOSSIE_LLM_API_KEY") { config.llm.api_key = val; }
-    if let Ok(val) = env::var("JOSSIE_TELEGRAM_BOT_TOKEN") { config.telegram.bot_token = val; }
+    if let Ok(val) = env::var("JOSSIE_LLM_SYSTEM_PROMPT") { config.llm.system_prompt = val; }
+    if let Ok(val) = env::var("JOSSIE_TELEGRAM_BOT_TOKEN") { config.telegram.bot_token = val.trim().to_string(); }
     
     // Email
     if let Ok(val) = env::var("JOSSIE_EMAIL_USERNAME") { config.email.username = val; }

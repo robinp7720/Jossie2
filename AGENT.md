@@ -154,6 +154,15 @@ There's no system prompt injected into conversations. Add a configurable system 
 ### 8. Web UI
 Serve a static web UI from axum. Consider a simple HTML/JS chat interface that connects via WebSocket.
 
+## Development Workflow
+
+### Committing Changes
+
+After making changes to the codebase, you MUST commit them using `git commit`. Ensure that:
+1. All relevant files are added (`git add`).
+2. The commit message is descriptive and follows project conventions (if any).
+3. Changes are committed incrementally where appropriate (e.g., separate commits for different features or bug fixes).
+
 ## Build & Run
 
 ```sh
