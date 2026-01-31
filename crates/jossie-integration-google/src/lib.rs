@@ -29,7 +29,8 @@ impl GoogleIntegration {
         let scopes = [
             "https://mail.google.com/",
             "https://www.googleapis.com/auth/drive",
-            "https://www.googleapis.com/auth/gmail.send"
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/calendar"
         ].join(" ");
 
         format!(
@@ -303,6 +304,61 @@ impl GoogleIntegration {
             "content": content,
         }).to_string())
     }
+
+    async fn calendar_list_events(&self, query: Option<String>, time_min: Option<String>) -> anyhow::Result<String> {
+        let token = self.get_access_token().await?;
+        let mut req = self.client
+            .get("https://www.googleapis.com/calendar/v3/calendars/primary/events")
+            .bearer_auth(&token)
+            .query(&[("maxResults", "10"), ("singleEvents", "true"), ("orderBy", "startTime")]);
+        
+        if let Some(q) = query {
+            req = req.query(&[("q", q)]);
+        }
+        if let Some(tm) = time_min {
+            req = req.query(&[("timeMin", tm)]);
+        } else {
+            req = req.query(&[("timeMin", chrono::Utc::now().to_rfc3339())]);
+        }
+
+        let resp = req.send().await?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Calendar list failed: {body}");
+        }
+
+        let data: serde_json::Value = resp.json().await?;
+        let events = data.get("items").unwrap_or(&serde_json::json!([])).clone();
+        
+        Ok(serde_json::to_string_pretty(&events)?)
+    }
+
+    async fn calendar_create_event(&self, summary: &str, start_time: &str, end_time: &str, description: Option<String>) -> anyhow::Result<String> {
+        let token = self.get_access_token().await?;
+        
+        let body = serde_json::json!({
+            "summary": summary,
+            "description": description.unwrap_or_default(),
+            "start": { "dateTime": start_time },
+            "end": { "dateTime": end_time }
+        });
+
+        let resp = self.client
+            .post("https://www.googleapis.com/calendar/v3/calendars/primary/events")
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Calendar create failed: {body}");
+        }
+
+        let event: serde_json::Value = resp.json().await?;
+        Ok(serde_json::to_string_pretty(&event)?)
+    }
 }
 
 fn extract_body_from_payload(payload: &serde_json::Value) -> String {
@@ -396,6 +452,31 @@ impl Integration for GoogleIntegration {
                     "required": ["file_id"]
                 }),
             },
+            ToolDefinition {
+                name: "calendar_list_events".to_string(),
+                description: "List upcoming Google Calendar events".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Filter events by text query"},
+                        "time_min": {"type": "string", "description": "Start time (ISO 8601) to list events from. Defaults to now."}
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "calendar_create_event".to_string(),
+                description: "Create a new Google Calendar event".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "summary": {"type": "string", "description": "Event title"},
+                        "start_time": {"type": "string", "description": "Start time (ISO 8601)"},
+                        "end_time": {"type": "string", "description": "End time (ISO 8601)"},
+                        "description": {"type": "string", "description": "Event description (optional)"}
+                    },
+                    "required": ["summary", "start_time", "end_time"]
+                }),
+            },
         ]
     }
 
@@ -431,6 +512,18 @@ impl Integration for GoogleIntegration {
                 struct Args { file_id: String }
                 let args: Args = serde_json::from_str(arguments)?;
                 self.drive_read(&args.file_id).await
+            }
+            "calendar_list_events" => {
+                #[derive(Deserialize)]
+                struct Args { query: Option<String>, time_min: Option<String> }
+                let args: Args = serde_json::from_str(arguments)?;
+                self.calendar_list_events(args.query, args.time_min).await
+            }
+            "calendar_create_event" => {
+                #[derive(Deserialize)]
+                struct Args { summary: String, start_time: String, end_time: String, description: Option<String> }
+                let args: Args = serde_json::from_str(arguments)?;
+                self.calendar_create_event(&args.summary, &args.start_time, &args.end_time, args.description).await
             }
             _ => anyhow::bail!("Unknown google tool: {tool_name}"),
         }
