@@ -7,6 +7,8 @@ use jossie_llm::LlmClient;
 use jossie_integration_memory::MemoryIntegration;
 use jossie_server::AppState;
 
+mod event_loop;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load .env file if it exists
@@ -45,10 +47,13 @@ async fn main() -> Result<()> {
     registry.register(Arc::new(email));
     tracing::info!("Registered email integration");
 
+    let mut google_integration: Option<Arc<jossie_integration_google::GoogleIntegration>> = None;
     if !config.google.client_id.is_empty() {
         let mut google = jossie_integration_google::GoogleIntegration::new(&config.google);
         google.set_db(db.clone());
-        registry.register(Arc::new(google));
+        let google = Arc::new(google);
+        registry.register(google.clone());
+        google_integration = Some(google);
         tracing::info!("Registered Google integration");
     }
 
@@ -62,6 +67,8 @@ async fn main() -> Result<()> {
         system_prompt: config.llm.system_prompt.clone(),
         max_agent_iterations: config.llm.max_agent_iterations,
         google_config: config.google.clone(),
+        google_integration,
+        telegram_token: config.telegram.bot_token.clone(),
     });
 
     // Start Telegram bot if configured
@@ -70,6 +77,15 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             if let Err(e) = bot.run().await {
                 tracing::error!("Telegram bot error: {e}");
+            }
+        });
+    }
+
+    if state.google_integration.is_some() && !state.telegram_token.is_empty() {
+        let event_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = event_loop::start_event_loop(event_state).await {
+                tracing::error!("Event loop error: {e}");
             }
         });
     }

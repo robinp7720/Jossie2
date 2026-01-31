@@ -5,6 +5,7 @@ use crate::state::AppState;
 use std::sync::Arc;
 use serde::Deserialize;
 use std::collections::HashSet;
+use jossie_db::IntegrationEvent;
 
 async fn build_system_prompt(state: &AppState, user_message: Option<&str>) -> String {
     let mut prompt = state.system_prompt.clone();
@@ -192,6 +193,63 @@ If nothing to extract, output {{ "nodes": [], "edges": [] }}"#
         }
         Err(e) => tracing::error!("KG Extraction LLM failed: {e}"),
     }
+}
+
+pub async fn generate_event_message(
+    state: &AppState,
+    conversation_id: Uuid,
+    event: &IntegrationEvent,
+) -> anyhow::Result<Option<String>> {
+    let mut messages = state.db.get_messages(conversation_id).await?;
+
+    let mut prompt = build_system_prompt(state, None).await;
+    prompt.push_str(
+        "\n\n## Event Mode\nYou are receiving integration events.\nDecide whether to proactively message the user.\nIf yes, respond with a short, friendly message as the assistant.\nIf not, respond exactly: NO_ACTION"
+    );
+
+    let sys_msg = Message {
+        id: Uuid::nil(),
+        conversation_id: Uuid::nil(),
+        role: Role::System,
+        content: prompt,
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+        created_at: Utc::now(),
+    };
+    messages.insert(0, sys_msg);
+
+    let event_payload = serde_json::json!({
+        "integration": event.integration,
+        "type": event.event_type,
+        "payload": event.payload,
+        "created_at": event.created_at,
+    });
+
+    let event_msg = Message {
+        id: Uuid::nil(),
+        conversation_id: Uuid::nil(),
+        role: Role::Tool,
+        content: serde_json::to_string_pretty(&event_payload)?,
+        tool_calls: None,
+        tool_call_id: None,
+        name: Some("integration_event".to_string()),
+        created_at: Utc::now(),
+    };
+    messages.push(event_msg);
+
+    let (content, tool_calls) = state.llm.complete(&messages, &[]).await?;
+    if !tool_calls.is_empty() {
+        tracing::warn!("Event loop returned tool calls; ignoring for now");
+    }
+
+    let trimmed = content.trim();
+    let normalized = trimmed.trim_matches(|c| c == '"' || c == '`').trim();
+    if normalized.eq_ignore_ascii_case("no_action") || normalized.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(trimmed.to_string()))
 }
 
 async fn build_graph_context(state: &AppState, user_message: &str) -> String {

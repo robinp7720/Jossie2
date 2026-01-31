@@ -51,6 +51,24 @@ CREATE TABLE IF NOT EXISTS integration_accounts (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS integration_events (
+    id TEXT PRIMARY KEY,
+    integration TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    dedupe_key TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'new',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    processed_at TEXT,
+    last_error TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_integration_events_dedupe
+    ON integration_events(integration, account_id, dedupe_key);
+CREATE INDEX IF NOT EXISTS idx_integration_events_status
+    ON integration_events(status, created_at);
+
 -- Graph Nodes
 CREATE TABLE IF NOT EXISTS graph_nodes (
     id TEXT PRIMARY KEY, -- Normalized label or UUID

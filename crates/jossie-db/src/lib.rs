@@ -149,6 +149,21 @@ impl Database {
         Ok(())
     }
 
+    pub async fn get_latest_telegram_chat(&self) -> anyhow::Result<Option<TelegramChatLink>> {
+        let row = sqlx::query_as::<_, TelegramChatLatestRow>(
+            "SELECT telegram_chat_id, conversation_id FROM telegram_chats ORDER BY created_at DESC LIMIT 1"
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|r| {
+            let conv_id = r.conversation_id.parse().ok()?;
+            Some(TelegramChatLink {
+                chat_id: r.telegram_chat_id,
+                conversation_id: conv_id,
+            })
+        }))
+    }
+
     // Integration Settings
     pub async fn get_integration_setting(&self, integration: &str, key: &str) -> anyhow::Result<Option<String>> {
         let row = sqlx::query_as::<_, SettingsRow>("SELECT value FROM integration_settings WHERE integration = ? AND key = ?")
@@ -221,6 +236,65 @@ impl Database {
 
     pub async fn delete_integration_account(&self, id: &str) -> anyhow::Result<()> {
         sqlx::query("DELETE FROM integration_accounts WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // Integration Events
+
+    pub async fn insert_integration_event(
+        &self,
+        integration: &str,
+        account_id: &str,
+        event_type: &str,
+        dedupe_key: &str,
+        payload: &serde_json::Value,
+    ) -> anyhow::Result<bool> {
+        let id = Uuid::new_v4().to_string();
+        let payload_str = serde_json::to_string(payload)?;
+        let res = sqlx::query(
+            "INSERT OR IGNORE INTO integration_events (id, integration, account_id, event_type, dedupe_key, payload) VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        .bind(&id)
+        .bind(integration)
+        .bind(account_id)
+        .bind(event_type)
+        .bind(dedupe_key)
+        .bind(&payload_str)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn list_pending_integration_events(&self, limit: usize) -> anyhow::Result<Vec<IntegrationEvent>> {
+        let rows = sqlx::query_as::<_, IntegrationEventRow>(
+            "SELECT id, integration, account_id, event_type, dedupe_key, payload, status, created_at, processed_at, last_error
+             FROM integration_events
+             WHERE status = 'new'
+             ORDER BY created_at ASC
+             LIMIT ?"
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn mark_integration_event_processed(&self, id: &str) -> anyhow::Result<()> {
+        let now_str = Utc::now().to_rfc3339();
+        sqlx::query("UPDATE integration_events SET status = 'processed', processed_at = ?, last_error = NULL WHERE id = ?")
+            .bind(&now_str)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn mark_integration_event_failed(&self, id: &str, error: &str) -> anyhow::Result<()> {
+        sqlx::query("UPDATE integration_events SET status = 'failed', last_error = ? WHERE id = ?")
+            .bind(error)
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -463,6 +537,26 @@ pub struct IntegrationAccount {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IntegrationEvent {
+    pub id: String,
+    pub integration: String,
+    pub account_id: String,
+    pub event_type: String,
+    pub dedupe_key: String,
+    pub payload: serde_json::Value,
+    pub status: String,
+    pub created_at: String,
+    pub processed_at: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TelegramChatLink {
+    pub chat_id: i64,
+    pub conversation_id: Uuid,
+}
+
 #[derive(sqlx::FromRow)]
 struct ConversationRow {
     id: String,
@@ -526,6 +620,43 @@ struct MemoryRow {
 #[derive(sqlx::FromRow)]
 struct TelegramChatRow {
     conversation_id: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct TelegramChatLatestRow {
+    telegram_chat_id: i64,
+    conversation_id: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct IntegrationEventRow {
+    id: String,
+    integration: String,
+    account_id: String,
+    event_type: String,
+    dedupe_key: String,
+    payload: String,
+    status: String,
+    created_at: String,
+    processed_at: Option<String>,
+    last_error: Option<String>,
+}
+
+impl From<IntegrationEventRow> for IntegrationEvent {
+    fn from(r: IntegrationEventRow) -> Self {
+        IntegrationEvent {
+            id: r.id,
+            integration: r.integration,
+            account_id: r.account_id,
+            event_type: r.event_type,
+            dedupe_key: r.dedupe_key,
+            payload: serde_json::from_str(&r.payload).unwrap_or_default(),
+            status: r.status,
+            created_at: r.created_at,
+            processed_at: r.processed_at,
+            last_error: r.last_error,
+        }
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -684,6 +815,32 @@ mod tests {
         db.delete_integration_account(&id).await.unwrap();
         let list = db.list_integration_accounts("test_int").await.unwrap();
         assert!(list.is_empty());
+    }
+
+    #[tokio::test]
+    async fn integration_event_dedupe_and_processing() {
+        let db = test_db().await;
+        let payload = serde_json::json!({"foo": "bar"});
+
+        let inserted = db
+            .insert_integration_event("google", "acc1", "gmail_new_message", "msg1", &payload)
+            .await
+            .unwrap();
+        assert!(inserted);
+
+        let dup = db
+            .insert_integration_event("google", "acc1", "gmail_new_message", "msg1", &payload)
+            .await
+            .unwrap();
+        assert!(!dup);
+
+        let pending = db.list_pending_integration_events(10).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].dedupe_key, "msg1");
+
+        db.mark_integration_event_processed(&pending[0].id).await.unwrap();
+        let pending_after = db.list_pending_integration_events(10).await.unwrap();
+        assert!(pending_after.is_empty());
     }
 
     #[tokio::test]

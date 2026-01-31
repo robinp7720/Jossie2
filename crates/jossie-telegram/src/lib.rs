@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use jossie_server::AppState;
 use uuid::Uuid;
+use teloxide::prelude::*;
 
 pub struct TelegramBot {
     token: String,
@@ -20,8 +21,6 @@ impl TelegramBot {
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
-        use teloxide::prelude::*;
-
         let bot = Bot::new(&self.token);
         let state = self.state;
 
@@ -109,6 +108,17 @@ impl TelegramBot {
 
         Ok(())
     }
+}
+
+pub async fn send_message(token: &str, chat_id: i64, text: &str) -> anyhow::Result<()> {
+    if token.trim().is_empty() {
+        anyhow::bail!("Telegram bot token is missing");
+    }
+    let bot = Bot::new(token.trim());
+    for chunk in split_message(text, 4096) {
+        bot.send_message(ChatId(chat_id), chunk).await?;
+    }
+    Ok(())
 }
 
 fn respond_ok() -> Result<(), teloxide::RequestError> {

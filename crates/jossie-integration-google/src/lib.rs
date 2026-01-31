@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use jossie_db::Database;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use reqwest::StatusCode;
 
 pub struct GoogleIntegration {
     config: GoogleConfig,
@@ -24,6 +25,44 @@ struct StoredAccount {
     refresh_token: String,
     #[serde(default)]
     email: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GmailProfile {
+    pub history_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GmailMessageSummary {
+    pub id: String,
+    pub thread_id: String,
+    pub from: String,
+    pub subject: String,
+    pub date: String,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GmailHistoryPollResult {
+    pub history_id: String,
+    pub messages: Vec<GmailMessageSummary>,
+}
+
+#[derive(Debug, Clone)]
+pub enum GmailHistoryOutcome {
+    Updated(GmailHistoryPollResult),
+    Reset { history_id: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct CalendarEventSummary {
+    pub id: String,
+    pub summary: String,
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub status: String,
+    pub updated: String,
+    pub location: Option<String>,
 }
 
 impl GoogleIntegration {
@@ -186,6 +225,242 @@ impl GoogleIntegration {
             }
         }
         Ok(serde_json::to_string_pretty(&accounts)?)
+    }
+
+    pub async fn gmail_get_profile(&self, account_id: &str) -> anyhow::Result<GmailProfile> {
+        let token = self.get_access_token(account_id).await?;
+        let resp = self.client
+            .get("https://gmail.googleapis.com/gmail/v1/users/me/profile")
+            .bearer_auth(&token)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Gmail profile fetch failed: {body}");
+        }
+
+        #[derive(Deserialize)]
+        struct ProfileResp {
+            #[serde(rename = "historyId")]
+            history_id: String,
+        }
+
+        let profile: ProfileResp = resp.json().await?;
+        Ok(GmailProfile { history_id: profile.history_id })
+    }
+
+    pub async fn gmail_list_history(
+        &self,
+        account_id: &str,
+        start_history_id: &str,
+    ) -> anyhow::Result<GmailHistoryOutcome> {
+        let token = self.get_access_token(account_id).await?;
+        let mut page_token: Option<String> = None;
+        let mut message_ids: HashSet<String> = HashSet::new();
+        let mut latest_history_id: Option<String> = None;
+
+        loop {
+            let mut req = self.client
+                .get("https://gmail.googleapis.com/gmail/v1/users/me/history")
+                .bearer_auth(&token)
+                .query(&[
+                    ("startHistoryId", start_history_id),
+                    ("historyTypes", "messageAdded"),
+                    ("maxResults", "100"),
+                ]);
+
+            if let Some(ref token) = page_token {
+                req = req.query(&[("pageToken", token)]);
+            }
+
+            let resp = req.send().await?;
+            if resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::BAD_REQUEST {
+                let profile = self.gmail_get_profile(account_id).await?;
+                return Ok(GmailHistoryOutcome::Reset { history_id: profile.history_id });
+            }
+
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Gmail history list failed: {body}");
+            }
+
+            #[derive(Deserialize)]
+            struct HistoryList {
+                #[serde(rename = "historyId")]
+                history_id: Option<String>,
+                #[serde(rename = "nextPageToken")]
+                next_page_token: Option<String>,
+                #[serde(default)]
+                history: Vec<HistoryItem>,
+            }
+
+            #[derive(Deserialize)]
+            struct HistoryItem {
+                #[serde(rename = "messagesAdded")]
+                messages_added: Option<Vec<MessageAdded>>,
+            }
+
+            #[derive(Deserialize)]
+            struct MessageAdded {
+                message: Option<MessageRef>,
+            }
+
+            #[derive(Deserialize)]
+            struct MessageRef {
+                id: String,
+            }
+
+            let list: HistoryList = resp.json().await?;
+            if let Some(hid) = list.history_id {
+                latest_history_id = Some(hid);
+            }
+
+            for item in list.history {
+                if let Some(added) = item.messages_added {
+                    for entry in added {
+                        if let Some(message) = entry.message {
+                            message_ids.insert(message.id);
+                        }
+                    }
+                }
+            }
+
+            if let Some(next) = list.next_page_token {
+                page_token = Some(next);
+            } else {
+                break;
+            }
+        }
+
+        let mut messages = Vec::new();
+        for message_id in message_ids {
+            if let Ok(summary) = self.gmail_fetch_message_summary(account_id, &message_id).await {
+                messages.push(summary);
+            }
+        }
+
+        Ok(GmailHistoryOutcome::Updated(GmailHistoryPollResult {
+            history_id: latest_history_id.unwrap_or_else(|| start_history_id.to_string()),
+            messages,
+        }))
+    }
+
+    async fn gmail_fetch_message_summary(
+        &self,
+        account_id: &str,
+        message_id: &str,
+    ) -> anyhow::Result<GmailMessageSummary> {
+        let token = self.get_access_token(account_id).await?;
+        let resp = self.client
+            .get(format!("https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}"))
+            .bearer_auth(&token)
+            .query(&[
+                ("format", "metadata"),
+                ("metadataHeaders", "From"),
+                ("metadataHeaders", "Subject"),
+                ("metadataHeaders", "Date"),
+            ])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Gmail message fetch failed: {body}");
+        }
+
+        #[derive(Deserialize)]
+        struct MessageResp {
+            id: String,
+            #[serde(rename = "threadId")]
+            thread_id: String,
+            snippet: Option<String>,
+            payload: Option<MessagePayload>,
+        }
+
+        #[derive(Deserialize)]
+        struct MessagePayload {
+            #[serde(default)]
+            headers: Vec<MessageHeader>,
+        }
+
+        #[derive(Deserialize)]
+        struct MessageHeader {
+            name: String,
+            value: String,
+        }
+
+        let msg: MessageResp = resp.json().await?;
+        let headers = msg.payload.map(|p| p.headers).unwrap_or_default();
+        let header_value = |name: &str| {
+            headers
+                .iter()
+                .find(|h| h.name.eq_ignore_ascii_case(name))
+                .map(|h| h.value.clone())
+                .unwrap_or_default()
+        };
+
+        Ok(GmailMessageSummary {
+            id: msg.id,
+            thread_id: msg.thread_id,
+            from: header_value("From"),
+            subject: header_value("Subject"),
+            date: header_value("Date"),
+            snippet: msg.snippet.unwrap_or_default(),
+        })
+    }
+
+    pub async fn calendar_list_updated_events(
+        &self,
+        account_id: &str,
+        updated_min: &str,
+    ) -> anyhow::Result<Vec<CalendarEventSummary>> {
+        let token = self.get_access_token(account_id).await?;
+        let resp = self.client
+            .get("https://www.googleapis.com/calendar/v3/calendars/primary/events")
+            .bearer_auth(&token)
+            .query(&[
+                ("maxResults", "20"),
+                ("singleEvents", "true"),
+                ("orderBy", "updated"),
+                ("updatedMin", updated_min),
+            ])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Calendar updated events failed: {body}");
+        }
+
+        let data: serde_json::Value = resp.json().await?;
+        let items = data.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+
+        let mut events = Vec::new();
+        for item in items {
+            let id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            if id.is_empty() {
+                continue;
+            }
+            let summary = item.get("summary").and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
+            let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("confirmed").to_string();
+            let updated = item.get("updated").and_then(|v| v.as_str()).unwrap_or(updated_min).to_string();
+            let location = item.get("location").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let start = extract_event_time(item.get("start"));
+            let end = extract_event_time(item.get("end"));
+
+            events.push(CalendarEventSummary {
+                id,
+                summary,
+                start,
+                end,
+                status,
+                updated,
+                location,
+            });
+        }
+
+        Ok(events)
     }
 
     async fn gmail_search(&self, account_id: &str, query: &str) -> anyhow::Result<String> {
@@ -491,6 +766,17 @@ fn extract_content(payload: &serde_json::Value, target_mime: &str) -> Option<Str
                 return Some(content);
             }
         }
+    }
+    None
+}
+
+fn extract_event_time(value: Option<&serde_json::Value>) -> Option<String> {
+    let v = value?;
+    if let Some(dt) = v.get("dateTime").and_then(|x| x.as_str()) {
+        return Some(dt.to_string());
+    }
+    if let Some(date) = v.get("date").and_then(|x| x.as_str()) {
+        return Some(date.to_string());
     }
     None
 }
