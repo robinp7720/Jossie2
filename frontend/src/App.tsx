@@ -28,8 +28,29 @@ type ActivityItem = {
   at: string
 }
 
+const getDefaultBaseUrl = () => {
+  if (typeof window === 'undefined') {
+    return ''
+  }
+
+  const envBase = import.meta.env.VITE_API_BASE as string | undefined
+  if (envBase) {
+    return envBase
+  }
+
+  const { hostname, port, protocol } = window.location
+  const isLocalHost = hostname === 'localhost' || hostname === '127.0.0.1'
+  const isVitePort = port === '5173' || port === '5174' || port === '4173'
+
+  if (isLocalHost && isVitePort) {
+    return `${protocol}//${hostname}:8080`
+  }
+
+  return window.location.origin
+}
+
 const DEFAULT_CONFIG: ApiConfig = {
-  baseUrl: typeof window === 'undefined' ? '' : window.location.origin,
+  baseUrl: getDefaultBaseUrl(),
   token: '',
 }
 
