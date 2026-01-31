@@ -27,27 +27,30 @@ pub async fn list_accounts(
 ) -> Result<Json<Vec<AccountConfig>>, AppError> {
     let mut accounts = Vec::new();
 
-    // Default Google account (stored as integration setting)
-    if let Some(token) = state
-        .db
-        .get_integration_setting("google", "refresh_token")
-        .await?
-    {
-        if !token.is_empty() {
-            accounts.push(AccountConfig {
-                id: "google-default".to_string(),
-                integration: "google".to_string(),
-                name: "Default Google Account".to_string(),
-                details: serde_json::json!({
-                    "configured": true,
-                    "source": "oauth"
-                }),
-            });
+    // List Google Accounts
+    let google_accounts = state.db.list_integration_accounts("google").await?;
+    let has_default = google_accounts.iter().any(|acc| acc.id == "google-default");
+
+    if !has_default {
+        if let Some(token) = state
+            .db
+            .get_integration_setting("google", "refresh_token")
+            .await?
+        {
+            if !token.is_empty() {
+                accounts.push(AccountConfig {
+                    id: "google-default".to_string(),
+                    integration: "google".to_string(),
+                    name: "Default Google Account".to_string(),
+                    details: serde_json::json!({
+                        "configured": true,
+                        "source": "oauth"
+                    }),
+                });
+            }
         }
     }
 
-    // List Google Accounts
-    let google_accounts = state.db.list_integration_accounts("google").await?;
     for acc in google_accounts {
         accounts.push(AccountConfig {
             id: acc.id,

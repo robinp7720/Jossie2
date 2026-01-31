@@ -70,6 +70,22 @@ pub async fn oauth_callback_handler(
             if let Err(e) = state.db.set_integration_setting("google", "refresh_token", &token).await {
                 return Html(format!("<h1>Error Saving Token</h1><p>{}</p>", e));
             }
+
+            if let Err(e) = state
+                .db
+                .upsert_integration_account(
+                    "google-default",
+                    "google",
+                    "Default Google Account",
+                    &serde_json::json!({
+                        "configured": true,
+                        "source": "oauth"
+                    }),
+                )
+                .await
+            {
+                return Html(format!("<h1>Error Saving Account</h1><p>{}</p>", e));
+            }
             Html(format!(
                 r#"
                 <h1>Success!</h1>

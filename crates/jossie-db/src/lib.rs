@@ -191,6 +191,18 @@ impl Database {
         Ok(id)
     }
 
+    pub async fn upsert_integration_account(&self, id: &str, integration: &str, name: &str, data: &serde_json::Value) -> anyhow::Result<()> {
+        let data_str = serde_json::to_string(data)?;
+        sqlx::query("INSERT OR REPLACE INTO integration_accounts (id, integration, name, data) VALUES (?, ?, ?, ?)")
+            .bind(id)
+            .bind(integration)
+            .bind(name)
+            .bind(&data_str)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn get_integration_account(&self, id: &str) -> anyhow::Result<Option<IntegrationAccount>> {
         let row = sqlx::query_as::<_, IntegrationAccount>("SELECT id, integration, name, data, created_at FROM integration_accounts WHERE id = ?")
             .bind(id)
