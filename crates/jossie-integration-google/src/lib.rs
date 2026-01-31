@@ -554,7 +554,14 @@ impl GoogleIntegration {
         };
 
         // Extract body - prefer the most informative part (fetch attachment-backed parts if needed)
-        let mut body_text = extract_body_from_payload(&self.client, &token, message_id, &msg["payload"]).await;
+        let mut body_text = extract_body_from_payload(
+            &self.client,
+            &token,
+            message_id,
+            &msg["payload"],
+            self.config.debug_gmail_payload,
+        )
+        .await;
         let mut debug_info = String::new();
 
         if body_text.trim().is_empty() {
@@ -763,11 +770,12 @@ async fn extract_body_from_payload(
     token: &str,
     message_id: &str,
     payload: &serde_json::Value,
+    debug: bool,
 ) -> String {
-    let text = extract_content(client, token, message_id, payload, "text/plain")
+    let text = extract_content(client, token, message_id, payload, "text/plain", debug)
         .await
         .unwrap_or_default();
-    let html = extract_content(client, token, message_id, payload, "text/html")
+    let html = extract_content(client, token, message_id, payload, "text/html", debug)
         .await
         .unwrap_or_default();
 
@@ -852,6 +860,7 @@ async fn extract_content(
     message_id: &str,
     payload: &serde_json::Value,
     target_mime: &str,
+    debug: bool,
 ) -> Option<String> {
     let mut stack = vec![payload];
     while let Some(part) = stack.pop() {
@@ -861,9 +870,10 @@ async fn extract_content(
                     if let Some(decoded) = decode_base64_url(data) {
                         return Some(decoded);
                     }
+                    log_decode_failure("body.data", message_id, mime, data, debug);
                 }
                 if let Some(att_id) = part.pointer("/body/attachmentId").and_then(|a| a.as_str()) {
-                    if let Some(decoded) = fetch_attachment_text(client, token, message_id, att_id).await {
+                    if let Some(decoded) = fetch_attachment_text(client, token, message_id, att_id, mime, debug).await {
                         return Some(decoded);
                     }
                 }
@@ -883,6 +893,8 @@ async fn fetch_attachment_text(
     token: &str,
     message_id: &str,
     attachment_id: &str,
+    mime: &str,
+    debug: bool,
 ) -> Option<String> {
     if attachment_id.trim().is_empty() {
         return None;
@@ -919,9 +931,59 @@ async fn fetch_attachment_text(
         }
     };
 
-    data.get("data")
-        .and_then(|d| d.as_str())
-        .and_then(decode_base64_url)
+    let Some(raw) = data.get("data").and_then(|d| d.as_str()) else {
+        return None;
+    };
+    let decoded = decode_base64_url(raw);
+    if decoded.is_none() {
+        log_decode_failure("attachment.data", message_id, mime, raw, debug);
+    }
+    decoded
+}
+
+fn log_decode_failure(source: &str, message_id: &str, mime: &str, raw: &str, debug: bool) {
+    if !debug {
+        return;
+    }
+
+    let mut whitespace = 0usize;
+    let mut invalid = 0usize;
+    let mut url_safe = 0usize;
+    let mut cleaned_len = 0usize;
+    let mut prefix = String::new();
+
+    for ch in raw.chars() {
+        if ch.is_ascii_whitespace() {
+            whitespace += 1;
+            continue;
+        }
+        cleaned_len += 1;
+        if prefix.len() < 12 {
+            prefix.push(ch);
+        }
+        let valid = ch.is_ascii_alphanumeric() || ch == '+' || ch == '/' || ch == '=' || ch == '-' || ch == '_';
+        if !valid {
+            invalid += 1;
+        }
+        if ch == '-' || ch == '_' {
+            url_safe += 1;
+        }
+    }
+
+    let has_padding = raw.contains('=');
+    let mime = if mime.is_empty() { "unknown" } else { mime };
+
+    tracing::warn!(
+        "Gmail base64 decode failed ({source}) msg={} mime={} len={} whitespace={} invalid={} urlsafe={} padding={} prefix={}",
+        message_id,
+        mime,
+        cleaned_len,
+        whitespace,
+        invalid,
+        url_safe,
+        has_padding,
+        prefix
+    );
 }
 
 fn extract_event_time(value: Option<&serde_json::Value>) -> Option<String> {

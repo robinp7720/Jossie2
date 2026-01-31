@@ -110,4 +110,6 @@ pub struct GoogleConfig {
     pub client_secret: String,
     #[serde(default)]
     pub refresh_token: String,
+    #[serde(default)]
+    pub debug_gmail_payload: bool,
 }
