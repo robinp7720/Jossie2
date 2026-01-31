@@ -7,7 +7,10 @@ members = [
     "crates/jossie-telegram",
     "crates/jossie-integration-email",
     "crates/jossie-integration-google",
-    "crates/jossie-integration-memory",
+    "crates/jossie-integration-graph",
+    "crates/jossie-llm",
+    "crates/jossie-server",
+    "crates/jossie-telegram",
 ]
 resolver = "3"
 
@@ -19,6 +22,7 @@ jossie-server = { path = "crates/jossie-server" }
 jossie-telegram = { path = "crates/jossie-telegram" }
 jossie-integration-email = { path = "crates/jossie-integration-email" }
 jossie-integration-google = { path = "crates/jossie-integration-google" }
+jossie-integration-graph = { path = "crates/jossie-integration-graph" }
 jossie-integration-memory = { path = "crates/jossie-integration-memory" }
 
 tokio = { version = "1", features = ["full"] }
@@ -49,19 +53,20 @@ name = "jossie2"
 path = "src/main.rs"
 
 [dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+dotenvy = "0.15"
+axum = { workspace = true }
 jossie-core = { workspace = true }
-jossie-llm = { workspace = true }
 jossie-db = { workspace = true }
+jossie-llm = { workspace = true }
 jossie-server = { workspace = true }
 jossie-integration-memory = { workspace = true }
 jossie-integration-email = { workspace = true }
 jossie-integration-google = { workspace = true }
+jossie-integration-graph = { workspace = true }
 jossie-telegram = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-anyhow = { workspace = true }
-toml = { workspace = true }
-serde = { workspace = true }
-axum = { workspace = true }
-dotenvy = { workspace = true }

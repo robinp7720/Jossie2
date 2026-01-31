@@ -50,3 +50,28 @@ CREATE TABLE IF NOT EXISTS integration_accounts (
     data TEXT NOT NULL, -- JSON configuration
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Graph Nodes
+CREATE TABLE IF NOT EXISTS graph_nodes (
+    id TEXT PRIMARY KEY, -- Normalized label or UUID
+    label TEXT NOT NULL,
+    type TEXT NOT NULL, -- Person, Project, etc.
+    properties TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Graph Edges
+CREATE TABLE IF NOT EXISTS graph_edges (
+    id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+    target_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+    relation TEXT NOT NULL, -- WORKS_ON, CREATED, etc.
+    weight REAL NOT NULL DEFAULT 1.0,
+    properties TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_id);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_id);

@@ -71,6 +71,7 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
             },
         };
 
+        let last_user_msg = req.message.clone();
         let user_msg = Message {
             id: Uuid::new_v4(),
             conversation_id: conv_id,
@@ -85,7 +86,7 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
 
         let tools = state.registry.all_tool_definitions();
         let mut messages = state.db.get_messages(conv_id).await.unwrap_or_default();
-        prepend_system_prompt(&state, &mut messages).await;
+        prepend_system_prompt(&state, &mut messages, Some(&last_user_msg)).await;
 
         let max_iters = state.max_agent_iterations;
         for iteration in 0..max_iters {
@@ -184,6 +185,13 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
                 created_at: Utc::now(),
             };
             let _ = state.db.save_message(&assistant_msg).await;
+            let db = state.db.clone();
+            let llm = state.llm.clone();
+            let assistant_reply = assistant_msg.content.clone();
+            let user_for_extraction = last_user_msg.clone();
+            tokio::spawn(async move {
+                crate::agent::spawn_knowledge_extraction(db, llm, user_for_extraction, assistant_reply).await;
+            });
             break;
         }
     }

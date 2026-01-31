@@ -36,6 +36,9 @@ async fn main() -> Result<()> {
 
     let mut registry = IntegrationRegistry::new();
     registry.register(Arc::new(MemoryIntegration::new(db.clone())));
+    
+    // Knowledge Graph
+    registry.register(Arc::new(jossie_integration_graph::GraphIntegration::new(db.clone())));
 
     let mut email = jossie_integration_email::EmailIntegration::new(&config.email);
     email.set_db(db.clone());

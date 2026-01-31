@@ -1,0 +1,13 @@
+[package]
+name = "jossie-integration-graph"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+jossie-core = { workspace = true }
+jossie-db = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }

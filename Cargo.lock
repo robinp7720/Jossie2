@@ -1522,6 +1522,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jossie-integration-graph"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "jossie-core",
+ "jossie-db",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "jossie-integration-memory"
 version = "0.1.0"
 dependencies = [
@@ -1603,6 +1616,7 @@ dependencies = [
  "jossie-db",
  "jossie-integration-email",
  "jossie-integration-google",
+ "jossie-integration-graph",
  "jossie-integration-memory",
  "jossie-llm",
  "jossie-server",

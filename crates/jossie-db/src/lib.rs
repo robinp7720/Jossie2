@@ -214,9 +214,234 @@ impl Database {
             .await?;
         Ok(())
     }
+
+    // Knowledge Graph
+
+    pub async fn graph_upsert_node(&self, id: &str, label: &str, node_type: &str, properties: &serde_json::Value) -> anyhow::Result<()> {
+        let props_str = serde_json::to_string(properties)?;
+        let now_str = Utc::now().to_rfc3339();
+        
+        // Use normalized ID if provided, otherwise generate one (but usually ID is derived from label for deduplication)
+        // Here we assume caller provides a stable ID (e.g. lowercase label)
+        
+        sqlx::query(
+            "INSERT INTO graph_nodes (id, label, type, properties, created_at, updated_at) 
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET 
+                label = excluded.label, 
+                type = excluded.type,
+                properties = excluded.properties,
+                updated_at = excluded.updated_at"
+        )
+        .bind(id)
+        .bind(label)
+        .bind(node_type)
+        .bind(&props_str)
+        .bind(&now_str)
+        .bind(&now_str)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn graph_upsert_edge(&self, source_id: &str, target_id: &str, relation: &str, weight: f64, properties: &serde_json::Value) -> anyhow::Result<String> {
+        // Check if edge exists with same source, target, relation
+        // We'll treat (source, target, relation) as unique for simplicity in this iteration, 
+        // though the DB schema uses a UUID PK.
+        
+        let props_str = serde_json::to_string(properties)?;
+        let now_str = Utc::now().to_rfc3339();
+
+        let existing = sqlx::query_as::<_, GraphEdgeRow>(
+            "SELECT * FROM graph_edges WHERE source_id = ? AND target_id = ? AND relation = ?"
+        )
+        .bind(source_id)
+        .bind(target_id)
+        .bind(relation)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(edge) = existing {
+            sqlx::query(
+                "UPDATE graph_edges SET weight = ?, properties = ?, updated_at = ? WHERE id = ?"
+            )
+            .bind(weight)
+            .bind(&props_str)
+            .bind(&now_str)
+            .bind(&edge.id)
+            .execute(&self.pool)
+            .await?;
+            Ok(edge.id)
+        } else {
+            let id = Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO graph_edges (id, source_id, target_id, relation, weight, properties, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            .bind(&id)
+            .bind(source_id)
+            .bind(target_id)
+            .bind(relation)
+            .bind(weight)
+            .bind(&props_str)
+            .bind(&now_str)
+            .bind(&now_str)
+            .execute(&self.pool)
+            .await?;
+            Ok(id)
+        }
+    }
+
+    pub async fn graph_get_node(&self, id: &str) -> anyhow::Result<Option<GraphNode>> {
+        let row = sqlx::query_as::<_, GraphNodeRow>("SELECT * FROM graph_nodes WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(Into::into))
+    }
+
+    pub async fn graph_find_nodes(&self, query: &str) -> anyhow::Result<Vec<GraphNode>> {
+        let search = format!("%{}%", query);
+        let rows = sqlx::query_as::<_, GraphNodeRow>("SELECT * FROM graph_nodes WHERE label LIKE ? LIMIT 20")
+            .bind(search)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn graph_get_neighbors(&self, node_id: &str) -> anyhow::Result<Vec<GraphNeighbor>> {
+        // Outgoing edges
+        let outgoing = sqlx::query_as::<_, GraphNeighborRow>(
+            r#"
+            SELECT e.id as edge_id, e.relation, e.weight, 
+                   n.id as node_id, n.label, n.type as node_type, n.properties as node_properties
+            FROM graph_edges e
+            JOIN graph_nodes n ON e.target_id = n.id
+            WHERE e.source_id = ?
+            "#
+        )
+        .bind(node_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        // Incoming edges
+        let incoming = sqlx::query_as::<_, GraphNeighborRow>(
+            r#"
+            SELECT e.id as edge_id, e.relation, e.weight, 
+                   n.id as node_id, n.label, n.type as node_type, n.properties as node_properties
+            FROM graph_edges e
+            JOIN graph_nodes n ON e.source_id = n.id
+            WHERE e.target_id = ?
+            "#
+        )
+        .bind(node_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut results = Vec::new();
+        for r in outgoing {
+            results.push(GraphNeighbor {
+                edge_id: r.edge_id,
+                relation: r.relation,
+                direction: "outgoing".to_string(),
+                node: GraphNode {
+                    id: r.node_id,
+                    label: r.label,
+                    node_type: r.node_type,
+                    properties: serde_json::from_str(&r.node_properties).unwrap_or_default(),
+                }
+            });
+        }
+        for r in incoming {
+             results.push(GraphNeighbor {
+                edge_id: r.edge_id,
+                relation: r.relation,
+                direction: "incoming".to_string(),
+                node: GraphNode {
+                    id: r.node_id,
+                    label: r.label,
+                    node_type: r.node_type,
+                    properties: serde_json::from_str(&r.node_properties).unwrap_or_default(),
+                }
+            });
+        }
+
+        Ok(results)
+    }
 }
 
 // Row types for sqlx
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GraphNode {
+    pub id: String,
+    pub label: String,
+    pub node_type: String,
+    pub properties: serde_json::Value,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GraphNeighbor {
+    pub edge_id: String,
+    pub relation: String,
+    pub direction: String, // "incoming" or "outgoing"
+    pub node: GraphNode,
+}
+
+#[derive(sqlx::FromRow)]
+struct GraphNodeRow {
+    id: String,
+    label: String,
+    #[sqlx(rename = "type")]
+    node_type: String,
+    properties: String,
+    #[allow(dead_code)]
+    created_at: String,
+    #[allow(dead_code)]
+    updated_at: String,
+}
+
+impl From<GraphNodeRow> for GraphNode {
+    fn from(r: GraphNodeRow) -> Self {
+        GraphNode {
+            id: r.id,
+            label: r.label,
+            node_type: r.node_type,
+            properties: serde_json::from_str(&r.properties).unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct GraphEdgeRow {
+    id: String,
+    #[allow(dead_code)]
+    source_id: String,
+    #[allow(dead_code)]
+    target_id: String,
+    #[allow(dead_code)]
+    relation: String,
+    #[allow(dead_code)]
+    weight: f64,
+    #[allow(dead_code)]
+    properties: String,
+    #[allow(dead_code)]
+    created_at: String,
+    #[allow(dead_code)]
+    updated_at: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct GraphNeighborRow {
+    edge_id: String,
+    relation: String,
+    #[allow(dead_code)]
+    weight: f64,
+    node_id: String,
+    label: String,
+    node_type: String,
+    node_properties: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
 pub struct IntegrationAccount {
     pub id: String,
@@ -447,5 +672,36 @@ mod tests {
         db.delete_integration_account(&id).await.unwrap();
         let list = db.list_integration_accounts("test_int").await.unwrap();
         assert!(list.is_empty());
+    }
+
+    #[tokio::test]
+    async fn graph_upsert_and_search_nodes() {
+        let db = test_db().await;
+        db.graph_upsert_node("robin", "Robin Decker", "Person", &serde_json::json!({"email": "robin@example.com"}))
+            .await
+            .unwrap();
+
+        let found = db.graph_find_nodes("Robin").await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "robin");
+        assert_eq!(found[0].label, "Robin Decker");
+        assert_eq!(found[0].node_type, "Person");
+    }
+
+    #[tokio::test]
+    async fn graph_edges_and_neighbors() {
+        let db = test_db().await;
+        db.graph_upsert_node("robin", "Robin", "Person", &serde_json::json!({})).await.unwrap();
+        db.graph_upsert_node("apollo", "Apollo", "Project", &serde_json::json!({})).await.unwrap();
+
+        db.graph_upsert_edge("robin", "apollo", "WORKS_ON", 0.9, &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let robin_neighbors = db.graph_get_neighbors("robin").await.unwrap();
+        assert!(robin_neighbors.iter().any(|n| n.node.id == "apollo" && n.direction == "outgoing"));
+
+        let apollo_neighbors = db.graph_get_neighbors("apollo").await.unwrap();
+        assert!(apollo_neighbors.iter().any(|n| n.node.id == "robin" && n.direction == "incoming"));
     }
 }
