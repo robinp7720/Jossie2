@@ -821,12 +821,16 @@ const App = () => {
                       <h3>{account.name}</h3>
                       <p className="muted">{account.integration}</p>
                     </div>
-                    <button
-                      className="button ghost"
-                      onClick={() => handleDeleteAccount(account.id)}
-                    >
-                      Remove
-                    </button>
+                    {account.id !== 'google-default' ? (
+                      <button
+                        className="button ghost"
+                        onClick={() => handleDeleteAccount(account.id)}
+                      >
+                        Remove
+                      </button>
+                    ) : (
+                      <span className="chip">Default</span>
+                    )}
                   </div>
                   <pre className="code">
                     {JSON.stringify(account.details ?? {}, null, 2)}
