@@ -3,6 +3,7 @@ use jossie_core::integration::{ToolCall, ToolDefinition};
 use jossie_core::types::{Message, Role};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct LlmClient {
@@ -13,70 +14,87 @@ pub struct LlmClient {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ChatRequest {
+struct ResponseRequest {
     model: String,
-    messages: Vec<ChatMessage>,
+    input: Vec<InputItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<ToolSchema>>,
+    tools: Option<Vec<ResponseTool>>,
     stream: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ChatMessage {
-    role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+enum InputItem {
+    #[serde(rename = "message")]
+    Message { role: String, content: Vec<InputContent> },
+    #[serde(rename = "function_call")]
+    FunctionCall { call_id: String, name: String, arguments: String },
+    #[serde(rename = "function_call_output")]
+    FunctionCallOutput { call_id: String, output: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ToolSchema {
+#[serde(tag = "type")]
+enum InputContent {
+    #[serde(rename = "input_text")]
+    InputText { text: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+enum ResponseTool {
+    #[serde(rename = "function")]
+    Function {
+        name: String,
+        description: String,
+        parameters: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        strict: Option<bool>,
+    },
+    #[serde(rename = "web_search")]
+    WebSearch {},
+    #[serde(rename = "code_interpreter")]
+    CodeInterpreter { container: CodeInterpreterContainer },
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CodeInterpreterContainer {
     r#type: String,
-    function: FunctionSchema,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct FunctionSchema {
-    name: String,
-    description: String,
-    parameters: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct Choice {
-    message: Option<ResponseMessage>,
-    delta: Option<ResponseMessage>,
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ResponseMessage {
+struct ResponseBody {
     #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    tool_calls: Option<Vec<ResponseToolCall>>,
+    output: Vec<ResponseOutputItem>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ResponseToolCall {
-    id: Option<String>,
-    function: Option<ResponseFunction>,
+#[serde(tag = "type")]
+enum ResponseOutputItem {
+    #[serde(rename = "message")]
+    Message { #[serde(default)] content: Vec<ResponseContentPart> },
+    #[serde(rename = "function_call")]
+    FunctionCall {
+        #[serde(default)]
+        call_id: Option<String>,
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        arguments: Option<String>,
+    },
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ResponseFunction {
-    name: Option<String>,
-    arguments: Option<String>,
+#[serde(tag = "type")]
+enum ResponseContentPart {
+    #[serde(rename = "output_text")]
+    OutputText { text: String },
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone)]
@@ -97,52 +115,72 @@ impl LlmClient {
         }
     }
 
-    fn build_messages(messages: &[Message]) -> Vec<ChatMessage> {
-        messages.iter().map(|m| {
-            let tool_calls = if let Some(tc_val) = &m.tool_calls {
-                // Check if it's our internal flat format (Vec<ToolCall>)
-                if let Ok(flat_calls) = serde_json::from_value::<Vec<ToolCall>>(tc_val.clone()) {
-                    // Convert to API format: [{ "id": "...", "type": "function", "function": { ... } }]
-                    Some(serde_json::to_value(flat_calls.into_iter().map(|fc| {
-                        serde_json::json!({
-                            "id": fc.id,
-                            "type": "function",
-                            "function": {
-                                "name": fc.name,
-                                "arguments": fc.arguments
-                            }
-                        })
-                    }).collect::<Vec<_>>()).unwrap_or(tc_val.clone()))
-                } else {
-                    // Already correct or unknown format
-                    Some(tc_val.clone())
-                }
-            } else {
-                None
-            };
+    fn build_input(messages: &[Message]) -> Vec<InputItem> {
+        let mut items = Vec::new();
 
-            ChatMessage {
-                role: m.role.to_string(),
-                content: if m.content.is_empty() && m.role != Role::Tool { None } else { Some(m.content.clone()) },
-                tool_calls,
-                tool_call_id: m.tool_call_id.clone(),
-                name: m.name.clone(),
+        for m in messages {
+            match m.role {
+                Role::Tool => {
+                    if let Some(call_id) = &m.tool_call_id {
+                        items.push(InputItem::FunctionCallOutput {
+                            call_id: call_id.clone(),
+                            output: m.content.clone(),
+                        });
+                    } else if !m.content.is_empty() {
+                        items.push(InputItem::Message {
+                            role: m.role.to_string(),
+                            content: vec![InputContent::InputText { text: m.content.clone() }],
+                        });
+                    }
+                }
+                _ => {
+                    if !m.content.is_empty() {
+                        items.push(InputItem::Message {
+                            role: m.role.to_string(),
+                            content: vec![InputContent::InputText { text: m.content.clone() }],
+                        });
+                    }
+
+                    if let Some(tc_val) = &m.tool_calls {
+                        if let Ok(flat_calls) = serde_json::from_value::<Vec<ToolCall>>(tc_val.clone()) {
+                            for call in flat_calls {
+                                items.push(InputItem::FunctionCall {
+                                    call_id: call.id,
+                                    name: call.name,
+                                    arguments: call.arguments,
+                                });
+                            }
+                        }
+                    }
+                }
             }
-        }).collect()
+        }
+
+        items
     }
 
-    fn build_tools(tools: &[ToolDefinition]) -> Option<Vec<ToolSchema>> {
-        if tools.is_empty() {
-            return None;
-        }
-        Some(tools.iter().map(|t| ToolSchema {
-            r#type: "function".to_string(),
-            function: FunctionSchema {
+    fn build_tools(tools: &[ToolDefinition]) -> Option<Vec<ResponseTool>> {
+        let mut built = Vec::new();
+
+        built.push(ResponseTool::WebSearch {});
+        built.push(ResponseTool::CodeInterpreter {
+            container: CodeInterpreterContainer { r#type: "auto".to_string() },
+        });
+
+        for t in tools {
+            built.push(ResponseTool::Function {
                 name: t.name.clone(),
                 description: t.description.clone(),
                 parameters: t.parameters.clone(),
-            },
-        }).collect())
+                strict: Some(true),
+            });
+        }
+
+        if built.is_empty() {
+            None
+        } else {
+            Some(built)
+        }
     }
 
     /// Non-streaming completion. Returns content and optional tool calls.
@@ -151,15 +189,15 @@ impl LlmClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> anyhow::Result<(String, Vec<ToolCall>)> {
-        let req = ChatRequest {
+        let req = ResponseRequest {
             model: self.model.clone(),
-            messages: Self::build_messages(messages),
+            input: Self::build_input(messages),
             tools: Self::build_tools(tools),
             stream: false,
         };
 
         let resp = self.client
-            .post(format!("{}/chat/completions", self.api_url))
+            .post(format!("{}/responses", self.api_url))
             .bearer_auth(&self.api_key)
             .json(&req)
             .send()
@@ -171,20 +209,31 @@ impl LlmClient {
             anyhow::bail!("LLM API error {status}: {body}");
         }
 
-        let chat_resp: ChatResponse = resp.json().await?;
-        let choice = chat_resp.choices.into_iter().next()
-            .ok_or_else(|| anyhow::anyhow!("No choices in response"))?;
-        let msg = choice.message.unwrap_or(ResponseMessage { content: None, tool_calls: None });
+        let response: ResponseBody = resp.json().await?;
+        let mut content = String::new();
+        let mut tool_calls = Vec::new();
 
-        let content = msg.content.unwrap_or_default();
-        let tool_calls = msg.tool_calls.unwrap_or_default().into_iter().map(|tc| {
-            let func = tc.function.unwrap_or(ResponseFunction { name: None, arguments: None });
-            ToolCall {
-                id: tc.id.unwrap_or_default(),
-                name: func.name.unwrap_or_default(),
-                arguments: func.arguments.unwrap_or_default(),
+        for item in response.output {
+            match item {
+                ResponseOutputItem::Message { content: parts } => {
+                    for part in parts {
+                        if let ResponseContentPart::OutputText { text } = part {
+                            content.push_str(&text);
+                        }
+                    }
+                }
+                ResponseOutputItem::FunctionCall { call_id, id, name, arguments } => {
+                    let Some(name) = name else { continue };
+                    let call_id = call_id.or(id).unwrap_or_default();
+                    tool_calls.push(ToolCall {
+                        id: call_id,
+                        name,
+                        arguments: arguments.unwrap_or_default(),
+                    });
+                }
+                ResponseOutputItem::Other => {}
             }
-        }).collect();
+        }
 
         Ok((content, tool_calls))
     }
@@ -196,15 +245,15 @@ impl LlmClient {
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamEvent>,
     ) -> anyhow::Result<()> {
-        let req = ChatRequest {
+        let req = ResponseRequest {
             model: self.model.clone(),
-            messages: Self::build_messages(messages),
+            input: Self::build_input(messages),
             tools: Self::build_tools(tools),
             stream: true,
         };
 
         let resp = self.client
-            .post(format!("{}/chat/completions", self.api_url))
+            .post(format!("{}/responses", self.api_url))
             .bearer_auth(&self.api_key)
             .json(&req)
             .send()
@@ -219,7 +268,7 @@ impl LlmClient {
 
         let mut stream = resp.bytes_stream();
         let mut buffer = String::new();
-        let mut accumulated_tool_calls: Vec<AccumulatedToolCall> = Vec::new();
+        let mut pending_calls: HashMap<String, PendingToolCall> = HashMap::new();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
@@ -234,66 +283,125 @@ impl LlmClient {
                 }
                 let data = &line[6..];
                 if data == "[DONE]" {
-                    if !accumulated_tool_calls.is_empty() {
-                        let calls: Vec<ToolCall> = accumulated_tool_calls.into_iter().map(|atc| ToolCall {
-                            id: atc.id,
-                            name: atc.name,
-                            arguments: atc.arguments,
-                        }).collect();
+                    let calls = collect_tool_calls(pending_calls);
+                    if !calls.is_empty() {
                         let _ = tx.send(StreamEvent::ToolCalls(calls)).await;
                     }
                     let _ = tx.send(StreamEvent::Done).await;
                     return Ok(());
                 }
 
-                if let Ok(resp) = serde_json::from_str::<ChatResponse>(data) {
-                    if let Some(choice) = resp.choices.into_iter().next() {
-                        if let Some(delta) = choice.delta {
-                            if let Some(content) = delta.content {
-                                if !content.is_empty() {
-                                    let _ = tx.send(StreamEvent::Delta(content)).await;
-                                }
-                            }
-                            if let Some(tcs) = delta.tool_calls {
-                                for tc in tcs {
-                                    let func = tc.function.unwrap_or(ResponseFunction { name: None, arguments: None });
-                                    if let Some(id) = tc.id {
-                                        accumulated_tool_calls.push(AccumulatedToolCall {
-                                            id,
-                                            name: func.name.unwrap_or_default(),
-                                            arguments: func.arguments.unwrap_or_default(),
-                                        });
-                                    } else if let Some(last) = accumulated_tool_calls.last_mut() {
-                                        if let Some(args) = func.arguments {
-                                            last.arguments.push_str(&args);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if choice.finish_reason.as_deref() == Some("tool_calls") {
-                            if !accumulated_tool_calls.is_empty() {
-                                let calls: Vec<ToolCall> = accumulated_tool_calls.into_iter().map(|atc| ToolCall {
-                                    id: atc.id,
-                                    name: atc.name,
-                                    arguments: atc.arguments,
-                                }).collect();
-                                let _ = tx.send(StreamEvent::ToolCalls(calls)).await;
-                                accumulated_tool_calls = Vec::new();
+                let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
+                    continue;
+                };
+                let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+                match event_type {
+                    "response.output_text.delta" => {
+                        if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
+                            if !delta.is_empty() {
+                                let _ = tx.send(StreamEvent::Delta(delta.to_string())).await;
                             }
                         }
                     }
+                    "response.output_item.added" => {
+                        let item_id = event.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
+                        if item_id.is_empty() {
+                            continue;
+                        }
+                        if let Some(item) = event.get("item") {
+                            let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            if item_type == "function_call" {
+                                let call_id = item.get("call_id").and_then(|v| v.as_str())
+                                    .or_else(|| item.get("id").and_then(|v| v.as_str()))
+                                    .map(|s| s.to_string());
+                                let name = item.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                let arguments = item.get("arguments").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let entry = pending_calls.entry(item_id.to_string()).or_default();
+                                if entry.call_id.is_none() {
+                                    entry.call_id = call_id;
+                                }
+                                if entry.name.is_none() {
+                                    entry.name = name;
+                                }
+                                if !arguments.is_empty() {
+                                    entry.arguments.push_str(&arguments);
+                                }
+                            }
+                        }
+                    }
+                    "response.function_call_arguments.delta" => {
+                        let item_id = event.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
+                        if item_id.is_empty() {
+                            continue;
+                        }
+                        if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
+                            let entry = pending_calls.entry(item_id.to_string()).or_default();
+                            entry.arguments.push_str(delta);
+                        }
+                    }
+                    "response.function_call_arguments.done" => {
+                        let item_id = event.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
+                        if item_id.is_empty() {
+                            continue;
+                        }
+                        let entry = pending_calls.entry(item_id.to_string()).or_default();
+                        if let Some(call_id) = event.get("call_id").and_then(|v| v.as_str()) {
+                            entry.call_id = Some(call_id.to_string());
+                        }
+                        if let Some(name) = event.get("name").and_then(|v| v.as_str()) {
+                            entry.name = Some(name.to_string());
+                        }
+                        if let Some(arguments) = event.get("arguments").and_then(|v| v.as_str()) {
+                            entry.arguments = arguments.to_string();
+                        }
+                    }
+                    "response.completed" => {
+                        let calls = collect_tool_calls(pending_calls);
+                        if !calls.is_empty() {
+                            let _ = tx.send(StreamEvent::ToolCalls(calls)).await;
+                        }
+                        let _ = tx.send(StreamEvent::Done).await;
+                        return Ok(());
+                    }
+                    "error" => {
+                        let message = event.get("message").and_then(|v| v.as_str())
+                            .or_else(|| event.get("error").and_then(|e| e.get("message")).and_then(|v| v.as_str()));
+                        if let Some(message) = message {
+                            let _ = tx.send(StreamEvent::Error(message.to_string())).await;
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
 
+        let calls = collect_tool_calls(pending_calls);
+        if !calls.is_empty() {
+            let _ = tx.send(StreamEvent::ToolCalls(calls)).await;
+        }
         let _ = tx.send(StreamEvent::Done).await;
         Ok(())
     }
 }
 
-struct AccumulatedToolCall {
-    id: String,
-    name: String,
+#[derive(Default)]
+struct PendingToolCall {
+    call_id: Option<String>,
+    name: Option<String>,
     arguments: String,
+}
+
+fn collect_tool_calls(pending: HashMap<String, PendingToolCall>) -> Vec<ToolCall> {
+    let mut calls = Vec::new();
+    for (item_id, pending_call) in pending {
+        let Some(name) = pending_call.name else { continue };
+        let id = pending_call.call_id.unwrap_or(item_id);
+        calls.push(ToolCall {
+            id,
+            name,
+            arguments: pending_call.arguments,
+        });
+    }
+    calls
 }
