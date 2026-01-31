@@ -743,9 +743,18 @@ fn summarize_structure(payload: &serde_json::Value, depth: usize) -> String {
 
 fn decode_base64_url(data: &str) -> Option<String> {
     use base64::Engine;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(data)
-        .ok()
+
+    // Gmail sometimes includes line breaks or padding; normalize before decode.
+    let cleaned: String = data.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+
+    let try_decode = |engine: base64::engine::general_purpose::GeneralPurpose| {
+        engine.decode(cleaned.as_bytes()).ok()
+    };
+
+    try_decode(base64::engine::general_purpose::URL_SAFE_NO_PAD)
+        .or_else(|| try_decode(base64::engine::general_purpose::URL_SAFE))
+        .or_else(|| try_decode(base64::engine::general_purpose::STANDARD_NO_PAD))
+        .or_else(|| try_decode(base64::engine::general_purpose::STANDARD))
         .map(|decoded| String::from_utf8_lossy(&decoded).to_string())
 }
 
