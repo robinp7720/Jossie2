@@ -9,11 +9,18 @@ use axum::{
     Router,
     routing::{get, post, delete},
     middleware as axum_middleware,
+    http::{header, Method},
 };
+use tower_http::cors::{CorsLayer, Any};
 pub use state::AppState;
 pub use agent::{run_agent_loop, prepend_system_prompt};
 
 pub fn router(state: Arc<AppState>) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+
     let api = Router::new()
         // Chat
         .route("/api/chat", post(handlers::chat::chat_handler))
@@ -42,5 +49,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(public)
         .merge(setup)
         .merge(api)
+        .layer(cors)
         .with_state(state)
 }
