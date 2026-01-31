@@ -34,12 +34,30 @@ export const request = async <T>(
     },
   })
 
+  const contentType = response.headers.get('content-type') ?? ''
+  const text = await response.text()
+
   if (!response.ok) {
-    const text = await response.text()
     throw new Error(text || `Request failed with status ${response.status}`)
   }
 
-  return (await response.json()) as T
+  if (!text) {
+    return undefined as T
+  }
+
+  const isJson =
+    contentType.includes('application/json') ||
+    text.trim().startsWith('{') ||
+    text.trim().startsWith('[')
+
+  if (!isJson) {
+    const snippet = text.trim().slice(0, 200)
+    throw new Error(
+      `Non-JSON response. Check the API base URL. Received: ${snippet || 'empty body'}`,
+    )
+  }
+
+  return JSON.parse(text) as T
 }
 
 export const listConversations = (config: ApiConfig) =>
