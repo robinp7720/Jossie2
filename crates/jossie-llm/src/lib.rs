@@ -3,7 +3,7 @@ use jossie_core::integration::{ToolCall, ToolDefinition};
 use jossie_core::types::{Message, Role};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
 pub struct LlmClient {
@@ -19,6 +19,10 @@ struct ResponseRequest {
     input: Vec<InputItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<ResponseTool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    include: Option<Vec<String>>,
     stream: bool,
 }
 
@@ -73,6 +77,8 @@ struct ResponseBody {
 enum ResponseOutputItem {
     #[serde(rename = "message")]
     Message { #[serde(default)] content: Vec<ResponseContentPart> },
+    #[serde(rename = "web_search_call")]
+    WebSearchCall { #[serde(default)] action: Option<WebSearchAction> },
     #[serde(rename = "function_call")]
     FunctionCall {
         #[serde(default)]
@@ -92,9 +98,39 @@ enum ResponseOutputItem {
 #[serde(tag = "type")]
 enum ResponseContentPart {
     #[serde(rename = "output_text")]
-    OutputText { text: String },
+    OutputText {
+        text: String,
+        #[serde(default)]
+        annotations: Vec<ResponseAnnotation>,
+    },
     #[serde(other)]
     Other,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+enum ResponseAnnotation {
+    #[serde(rename = "url_citation")]
+    UrlCitation {
+        url: String,
+        #[serde(default)]
+        title: Option<String>,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WebSearchAction {
+    #[serde(default)]
+    sources: Vec<WebSearchSource>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WebSearchSource {
+    url: String,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +229,8 @@ impl LlmClient {
             model: self.model.clone(),
             input: Self::build_input(messages),
             tools: Self::build_tools(tools),
+            tool_choice: Some(serde_json::Value::String("auto".to_string())),
+            include: Some(vec!["web_search_call.action.sources".to_string()]),
             stream: false,
         };
 
@@ -212,14 +250,26 @@ impl LlmClient {
         let response: ResponseBody = resp.json().await?;
         let mut content = String::new();
         let mut tool_calls = Vec::new();
+        let mut sources: Vec<WebSearchSource> = Vec::new();
+        let mut annotations: Vec<WebSearchSource> = Vec::new();
 
         for item in response.output {
             match item {
                 ResponseOutputItem::Message { content: parts } => {
                     for part in parts {
-                        if let ResponseContentPart::OutputText { text } = part {
+                        if let ResponseContentPart::OutputText { text, annotations: ann } = part {
                             content.push_str(&text);
+                            for annotation in ann {
+                                if let ResponseAnnotation::UrlCitation { url, title } = annotation {
+                                    annotations.push(WebSearchSource { url, title });
+                                }
+                            }
                         }
+                    }
+                }
+                ResponseOutputItem::WebSearchCall { action } => {
+                    if let Some(action) = action {
+                        sources.extend(action.sources);
                     }
                 }
                 ResponseOutputItem::FunctionCall { call_id, id, name, arguments } => {
@@ -233,6 +283,11 @@ impl LlmClient {
                 }
                 ResponseOutputItem::Other => {}
             }
+        }
+
+        let merged_sources = merge_sources(sources, annotations);
+        if !merged_sources.is_empty() {
+            append_sources(&mut content, &merged_sources);
         }
 
         Ok((content, tool_calls))
@@ -249,6 +304,8 @@ impl LlmClient {
             model: self.model.clone(),
             input: Self::build_input(messages),
             tools: Self::build_tools(tools),
+            tool_choice: Some(serde_json::Value::String("auto".to_string())),
+            include: Some(vec!["web_search_call.action.sources".to_string()]),
             stream: true,
         };
 
@@ -357,6 +414,14 @@ impl LlmClient {
                         }
                     }
                     "response.completed" => {
+                        if let Some(response_val) = event.get("response") {
+                            let sources = sources_from_response_value(response_val);
+                            if !sources.is_empty() {
+                                let mut suffix = String::new();
+                                append_sources(&mut suffix, &sources);
+                                let _ = tx.send(StreamEvent::Delta(suffix)).await;
+                            }
+                        }
                         let calls = collect_tool_calls(pending_calls);
                         if !calls.is_empty() {
                             let _ = tx.send(StreamEvent::ToolCalls(calls)).await;
@@ -404,4 +469,73 @@ fn collect_tool_calls(pending: HashMap<String, PendingToolCall>) -> Vec<ToolCall
         });
     }
     calls
+}
+
+fn append_sources(content: &mut String, sources: &[WebSearchSource]) {
+    if sources.is_empty() {
+        return;
+    }
+    content.push_str("\n\nSources: ");
+    for (idx, source) in sources.iter().enumerate() {
+        if idx > 0 {
+            content.push_str("; ");
+        }
+        if let Some(title) = &source.title {
+            if !title.is_empty() {
+                content.push_str(title);
+                content.push_str(" (");
+                content.push_str(&source.url);
+                content.push(')');
+                continue;
+            }
+        }
+        content.push_str(&source.url);
+    }
+}
+
+fn merge_sources(primary: Vec<WebSearchSource>, secondary: Vec<WebSearchSource>) -> Vec<WebSearchSource> {
+    let mut seen = HashSet::new();
+    let mut merged = Vec::new();
+    for source in primary.into_iter().chain(secondary) {
+        if seen.insert(source.url.clone()) {
+            merged.push(source);
+        }
+    }
+    merged
+}
+
+fn sources_from_response_value(value: &serde_json::Value) -> Vec<WebSearchSource> {
+    let Ok(body) = serde_json::from_value::<ResponseBody>(value.clone()) else {
+        return Vec::new();
+    };
+    sources_from_response_body(body)
+}
+
+fn sources_from_response_body(body: ResponseBody) -> Vec<WebSearchSource> {
+    let mut sources = Vec::new();
+    let mut annotations = Vec::new();
+
+    for item in body.output {
+        match item {
+            ResponseOutputItem::Message { content: parts } => {
+                for part in parts {
+                    if let ResponseContentPart::OutputText { annotations: ann, .. } = part {
+                        for annotation in ann {
+                            if let ResponseAnnotation::UrlCitation { url, title } = annotation {
+                                annotations.push(WebSearchSource { url, title });
+                            }
+                        }
+                    }
+                }
+            }
+            ResponseOutputItem::WebSearchCall { action } => {
+                if let Some(action) = action {
+                    sources.extend(action.sources);
+                }
+            }
+            ResponseOutputItem::FunctionCall { .. } | ResponseOutputItem::Other => {}
+        }
+    }
+
+    merge_sources(sources, annotations)
 }
