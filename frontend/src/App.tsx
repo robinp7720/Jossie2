@@ -126,6 +126,8 @@ const App = () => {
     imap_port: '993',
     smtp_host: '',
     smtp_port: '587',
+    refresh_token: '',
+    google_email: '',
     customJson: '{\n  "key": "value"\n}',
   })
 
@@ -342,6 +344,14 @@ const App = () => {
     }
 
     try {
+      if (
+        accountForm.integration === 'google' &&
+        !accountForm.refresh_token.trim()
+      ) {
+        setStatusMessage('Google refresh token is required for manual setup.')
+        return
+      }
+
       let payload: { integration: string; name: string; config: Record<string, unknown> }
 
       if (accountForm.integration === 'email') {
@@ -355,6 +365,15 @@ const App = () => {
             imap_port: Number(accountForm.imap_port),
             smtp_host: accountForm.smtp_host,
             smtp_port: Number(accountForm.smtp_port),
+          },
+        }
+      } else if (accountForm.integration === 'google') {
+        payload = {
+          integration: 'google',
+          name: accountForm.name || 'Google Account',
+          config: {
+            refresh_token: accountForm.refresh_token,
+            email: accountForm.google_email,
           },
         }
       } else {
@@ -700,13 +719,45 @@ const App = () => {
                   <div className="callout">
                     <p>
                       Use OAuth to connect Google. Click Connect in the integration
-                      card or open {googleOauthUrl}. You can also provide a refresh
-                      token below.
+                      card or open {googleOauthUrl}. The OAuth flow stores the
+                      default account. Use the fields below to add an extra account
+                      by refresh token.
                     </p>
                   </div>
                 )}
 
-                {accountForm.integration !== 'email' && (
+                {accountForm.integration === 'google' && (
+                  <div className="field-grid">
+                    <label>
+                      Refresh token
+                      <input
+                        value={accountForm.refresh_token}
+                        onChange={(event) =>
+                          setAccountForm((prev) => ({
+                            ...prev,
+                            refresh_token: event.target.value,
+                          }))
+                        }
+                        placeholder="Paste Google refresh token"
+                      />
+                    </label>
+                    <label>
+                      Account email (optional)
+                      <input
+                        value={accountForm.google_email}
+                        onChange={(event) =>
+                          setAccountForm((prev) => ({
+                            ...prev,
+                            google_email: event.target.value,
+                          }))
+                        }
+                        placeholder="name@gmail.com"
+                      />
+                    </label>
+                  </div>
+                )}
+
+                {accountForm.integration === 'custom' && (
                   <label>
                     Config JSON
                     <textarea
