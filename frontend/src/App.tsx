@@ -406,8 +406,12 @@ const App = () => {
 
   const googleOauthUrl = useMemo(() => {
     const base = apiConfig.baseUrl.replace(/\/+$/, '')
-    return `${base}/setup/google`
-  }, [apiConfig.baseUrl])
+    if (!apiConfig.token) {
+      return `${base}/setup/google`
+    }
+    const encoded = encodeURIComponent(apiConfig.token)
+    return `${base}/setup/google?token=${encoded}`
+  }, [apiConfig.baseUrl, apiConfig.token])
 
   const handleGoogleConnect = () => {
     window.open(googleOauthUrl, '_blank')
