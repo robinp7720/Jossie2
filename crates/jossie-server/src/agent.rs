@@ -171,14 +171,20 @@ If nothing to extract, output {{ "nodes": [], "edges": [] }}"#
             let clean_json = response.trim().trim_start_matches("```json").trim_end_matches("```");
             match serde_json::from_str::<ExtractionResult>(clean_json) {
                 Ok(data) => {
-                    for node in data.nodes {
-                        let _ = db.graph_upsert_node(&node.id, &node.label, &node.node_type, &serde_json::json!({})).await;
+                    let node_count = data.nodes.len();
+                    let edge_count = data.edges.len();
+                    for node in &data.nodes {
+                        let _ = db
+                            .graph_upsert_node(&node.id, &node.label, &node.node_type, &serde_json::json!({}))
+                            .await;
                     }
-                    for edge in data.edges {
-                        let _ = db.graph_upsert_edge(&edge.source, &edge.target, &edge.relation, 1.0, &serde_json::json!({})).await;
+                    for edge in &data.edges {
+                        let _ = db
+                            .graph_upsert_edge(&edge.source, &edge.target, &edge.relation, 1.0, &serde_json::json!({}))
+                            .await;
                     }
-                    if !data.nodes.is_empty() {
-                        tracing::info!("Extracted {} nodes and {} edges", data.nodes.len(), data.edges.len());
+                    if node_count > 0 || edge_count > 0 {
+                        tracing::info!("Extracted {} nodes and {} edges", node_count, edge_count);
                     }
                 }
                 Err(e) => tracing::warn!("Failed to parse KG extraction JSON: {e}"),
