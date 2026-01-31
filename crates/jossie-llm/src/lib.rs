@@ -42,6 +42,8 @@ enum InputItem {
 enum InputContent {
     #[serde(rename = "input_text")]
     InputText { text: String },
+    #[serde(rename = "output_text")]
+    OutputText { text: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -165,7 +167,7 @@ impl LlmClient {
                     } else if !m.content.is_empty() {
                         items.push(InputItem::Message {
                             role: m.role.to_string(),
-                            content: vec![InputContent::InputText { text: m.content.clone() }],
+                            content: vec![input_content_for_role(&m.role, &m.content)],
                         });
                     }
                 }
@@ -173,7 +175,7 @@ impl LlmClient {
                     if !m.content.is_empty() {
                         items.push(InputItem::Message {
                             role: m.role.to_string(),
-                            content: vec![InputContent::InputText { text: m.content.clone() }],
+                            content: vec![input_content_for_role(&m.role, &m.content)],
                         });
                     }
 
@@ -285,10 +287,11 @@ impl LlmClient {
             }
         }
 
+        /*
         let merged_sources = merge_sources(sources, annotations);
         if !merged_sources.is_empty() {
             append_sources(&mut content, &merged_sources);
-        }
+        }*/
 
         Ok((content, tool_calls))
     }
@@ -450,6 +453,14 @@ impl LlmClient {
     }
 }
 
+fn input_content_for_role(role: &Role, text: &str) -> InputContent {
+    match role {
+        Role::Assistant | Role::Tool => InputContent::OutputText { text: text.to_string() },
+        Role::System | Role::User => InputContent::InputText { text: text.to_string() },
+    }
+}
+
+
 #[derive(Default)]
 struct PendingToolCall {
     call_id: Option<String>,
@@ -475,21 +486,44 @@ fn append_sources(content: &mut String, sources: &[WebSearchSource]) {
     if sources.is_empty() {
         return;
     }
-    content.push_str("\n\nSources: ");
-    for (idx, source) in sources.iter().enumerate() {
-        if idx > 0 {
-            content.push_str("; ");
+    let mut rendered = Vec::with_capacity(sources.len());
+    for source in sources {
+        rendered.push(format_source(source));
+    }
+    let list = join_natural_list(&rendered);
+    content.push_str("\n\nFor reference, I checked ");
+    content.push_str(&list);
+    content.push('.');
+}
+
+fn format_source(source: &WebSearchSource) -> String {
+    if let Some(title) = &source.title {
+        if !title.is_empty() {
+            return format!("{title} ({})", source.url);
         }
-        if let Some(title) = &source.title {
-            if !title.is_empty() {
-                content.push_str(title);
-                content.push_str(" (");
-                content.push_str(&source.url);
-                content.push(')');
-                continue;
+    }
+    source.url.clone()
+}
+
+fn join_natural_list(items: &[String]) -> String {
+    match items.len() {
+        0 => String::new(),
+        1 => items[0].clone(),
+        2 => format!("{} and {}", items[0], items[1]),
+        _ => {
+            let mut combined = String::new();
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    if idx + 1 == items.len() {
+                        combined.push_str(", and ");
+                    } else {
+                        combined.push_str(", ");
+                    }
+                }
+                combined.push_str(item);
             }
+            combined
         }
-        content.push_str(&source.url);
     }
 }
 
