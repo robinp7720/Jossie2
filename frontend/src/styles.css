@@ -425,6 +425,10 @@ textarea {
   color: var(--ink-soft);
 }
 
+.callout .button {
+  margin-top: 10px;
+}
+
 .field-list {
   display: grid;
   gap: 8px;

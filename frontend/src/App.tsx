@@ -409,6 +409,10 @@ const App = () => {
     return `${base}/setup/google`
   }, [apiConfig.baseUrl])
 
+  const handleGoogleConnect = () => {
+    window.open(googleOauthUrl, '_blank')
+  }
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -555,9 +559,14 @@ const App = () => {
                 <h1>Integrations control</h1>
                 <p>Track onboarding status and launch new connections.</p>
               </div>
-              <button className="button ghost" onClick={refreshOnboarding}>
-                Refresh
-              </button>
+              <div className="chip-row">
+                <button className="button primary" onClick={handleGoogleConnect}>
+                  Login with Google
+                </button>
+                <button className="button ghost" onClick={refreshOnboarding}>
+                  Refresh
+                </button>
+              </div>
             </header>
 
             <div className="grid">
@@ -575,7 +584,7 @@ const App = () => {
                     {integration.name === 'google' && (
                       <button
                         className="button primary"
-                        onClick={() => window.open(googleOauthUrl, '_blank')}
+                        onClick={handleGoogleConnect}
                       >
                         Connect
                       </button>
@@ -723,6 +732,9 @@ const App = () => {
                       default account. Use the fields below to add an extra account
                       by refresh token.
                     </p>
+                    <button className="button primary" type="button" onClick={handleGoogleConnect}>
+                      Login with Google
+                    </button>
                   </div>
                 )}
 
