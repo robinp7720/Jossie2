@@ -205,11 +205,13 @@ impl GoogleIntegration {
     }
 
     async fn list_accounts(&self) -> anyhow::Result<String> {
+        println!("Listing Google integration accounts");
         let mut accounts = Vec::new();
 
         if let Some(db) = &self.db {
             let db_accounts = db.list_integration_accounts("google").await?;
             for acc in db_accounts {
+                println!("Listing Google account: {} - {}", acc.id, acc.name);
                 let email = if let Ok(data) = serde_json::from_str::<StoredAccount>(&acc.data) {
                     data.email
                 } else {
@@ -551,8 +553,8 @@ impl GoogleIntegration {
                 .to_string()
         };
 
-        // Extract body - try plain text first, then html
-        let mut body_text = extract_body_from_payload(&msg["payload"]);
+        // Extract body - try plain text first, then html (fetch attachment-backed parts if needed)
+        let mut body_text = extract_body_from_payload(&self.client, &token, message_id, &msg["payload"]).await;
         let mut debug_info = String::new();
 
         if body_text.trim().is_empty() {
@@ -736,10 +738,23 @@ fn summarize_structure(payload: &serde_json::Value, depth: usize) -> String {
     out
 }
 
-fn extract_body_from_payload(payload: &serde_json::Value) -> String {
-    let text = extract_content(payload, "text/plain").unwrap_or_default();
-    let html = extract_content(payload, "text/html").unwrap_or_default();
-    
+fn decode_base64_url(data: &str) -> Option<String> {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(data)
+        .ok()
+        .map(|decoded| String::from_utf8_lossy(&decoded).to_string())
+}
+
+async fn extract_body_from_payload(
+    client: &reqwest::Client,
+    token: &str,
+    message_id: &str,
+    payload: &serde_json::Value,
+) -> String {
+    let text = extract_content(client, token, message_id, payload, "text/plain").await.unwrap_or_default();
+    let html = extract_content(client, token, message_id, payload, "text/html").await.unwrap_or_default();
+
     if text.trim().is_empty() && !html.trim().is_empty() {
         return html;
     }
@@ -749,25 +764,82 @@ fn extract_body_from_payload(payload: &serde_json::Value) -> String {
     String::new()
 }
 
-fn extract_content(payload: &serde_json::Value, target_mime: &str) -> Option<String> {
-    if let Some(mime) = payload.get("mimeType").and_then(|m| m.as_str()) {
-        if mime.to_lowercase().starts_with(target_mime) {
-            if let Some(data) = payload.pointer("/body/data").and_then(|d| d.as_str()) {
-                use base64::Engine;
-                if let Ok(decoded) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(data) {
-                    return Some(String::from_utf8_lossy(&decoded).to_string());
+async fn extract_content(
+    client: &reqwest::Client,
+    token: &str,
+    message_id: &str,
+    payload: &serde_json::Value,
+    target_mime: &str,
+) -> Option<String> {
+    let mut stack = vec![payload];
+    while let Some(part) = stack.pop() {
+        if let Some(mime) = part.get("mimeType").and_then(|m| m.as_str()) {
+            if mime.to_lowercase().starts_with(target_mime) {
+                if let Some(data) = part.pointer("/body/data").and_then(|d| d.as_str()) {
+                    if let Some(decoded) = decode_base64_url(data) {
+                        return Some(decoded);
+                    }
+                }
+                if let Some(att_id) = part.pointer("/body/attachmentId").and_then(|a| a.as_str()) {
+                    if let Some(decoded) = fetch_attachment_text(client, token, message_id, att_id).await {
+                        return Some(decoded);
+                    }
                 }
             }
         }
-    }
-    if let Some(parts) = payload.get("parts").and_then(|p| p.as_array()) {
-        for part in parts {
-            if let Some(content) = extract_content(part, target_mime) {
-                return Some(content);
+        if let Some(parts) = part.get("parts").and_then(|p| p.as_array()) {
+            for child in parts.iter().rev() {
+                stack.push(child);
             }
         }
     }
     None
+}
+
+async fn fetch_attachment_text(
+    client: &reqwest::Client,
+    token: &str,
+    message_id: &str,
+    attachment_id: &str,
+) -> Option<String> {
+    if attachment_id.trim().is_empty() {
+        return None;
+    }
+
+    let url = format!(
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}/attachments/{attachment_id}"
+    );
+    let resp = match client.get(&url).bearer_auth(token).send().await {
+        Ok(resp) => resp,
+        Err(err) => {
+            tracing::warn!("Gmail attachment fetch failed for {}: {}", message_id, err);
+            return None;
+        }
+    };
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        tracing::warn!(
+            "Gmail attachment fetch failed for {} ({}): {}",
+            message_id,
+            status,
+            body
+        );
+        return None;
+    }
+
+    let data: serde_json::Value = match resp.json().await {
+        Ok(json) => json,
+        Err(err) => {
+            tracing::warn!("Gmail attachment JSON parse failed for {}: {}", message_id, err);
+            return None;
+        }
+    };
+
+    data.get("data")
+        .and_then(|d| d.as_str())
+        .and_then(decode_base64_url)
 }
 
 fn extract_event_time(value: Option<&serde_json::Value>) -> Option<String> {
