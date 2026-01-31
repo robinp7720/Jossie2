@@ -52,7 +52,7 @@ There are currently zero tests anywhere in the workspace.
 
 There is no system prompt. Conversations start with the user's first message only.
 
-- [ ] **Add configurable system prompt**
+- [x] **Add configurable system prompt**
   - Add `system_prompt: String` field to `LlmConfig` in `crates/jossie-core/src/config.rs`
   - Add a default value in `config.toml` (e.g. "You are Jossie, a helpful assistant.")
   - In `jossie-server/src/lib.rs`, in both `run_agent_loop()` and `handle_ws()`, prepend a `Role::System` message to the messages list before calling `llm.complete()`. Do NOT save it to the DB — inject it at call time.
@@ -61,11 +61,11 @@ There is no system prompt. Conversations start with the user's first message onl
 
 ## Agent Loop Hardening
 
-- [ ] **Add iteration limit to agent loop**
+- [x] **Add iteration limit to agent loop**
   Location: `crates/jossie-server/src/lib.rs`, functions `run_agent_loop()` and `handle_ws()`
   Both contain `loop { ... }` with no bound. Add a configurable max (e.g. 10) and return an error or a "max iterations reached" message when exceeded.
 
-- [ ] **Structured error responses from HTTP endpoints**
+- [x] **Structured error responses from HTTP endpoints**
   Currently `chat_handler`, `list_conversations`, `get_messages` return bare `StatusCode::INTERNAL_SERVER_ERROR`. Replace with `Json<ErrorResponse>` containing `{"error": "..."}`. Use a custom `IntoResponse` impl or axum error handling pattern.
 
 ---
@@ -73,9 +73,9 @@ There is no system prompt. Conversations start with the user's first message onl
 ## Email Integration
 
 Crate: `crates/jossie-integration-email/`
-Current state: `Integration` trait is implemented but `execute()` returns "not yet implemented" for all tools.
+Current state: `Integration` trait is implemented.
 
-- [ ] **Add `async-imap` and `lettre` dependencies**
+- [x] **Add `async-imap` and `lettre` dependencies**
   Add to `crates/jossie-integration-email/Cargo.toml`:
   ```toml
   async-imap = "0.10"
@@ -83,29 +83,29 @@ Current state: `Integration` trait is implemented but `execute()` returns "not y
   lettre = { version = "0.11", features = ["tokio1-native-tls", "builder"] }
   ```
 
-- [ ] **Implement IMAP connection management**
+- [x] **Implement IMAP connection management**
   In `crates/jossie-integration-email/src/lib.rs`:
   - Store full `EmailConfig` fields (host, port, username, password)
   - Create an async method to connect to IMAP, login, and return a session
   - Connections should be created per-call (simplest) or pooled (optimization)
 
-- [ ] **Implement `email_search` tool**
+- [x] **Implement `email_search` tool**
   - Connect to IMAP, SELECT INBOX (or specified folder)
   - Run IMAP SEARCH command with the query
   - Return list of matching message summaries (subject, from, date, UID)
   - Limit results (e.g. 20)
 
-- [ ] **Implement `email_read` tool**
+- [x] **Implement `email_read` tool**
   - Add tool definition with parameter `uid: string`
   - Fetch full message by UID, parse headers + body
   - Return formatted text (from, to, subject, date, body)
 
-- [ ] **Implement `email_send` tool**
+- [x] **Implement `email_send` tool**
   - Use `lettre` to build and send message via SMTP
   - Parameters: `to`, `subject`, `body` (already defined in tool schema)
   - Return confirmation or error
 
-- [ ] **Implement `email_list_folders` tool**
+- [x] **Implement `email_list_folders` tool**
   - Add tool definition (no parameters)
   - List all IMAP mailboxes/folders
   - Return as JSON array
@@ -115,40 +115,40 @@ Current state: `Integration` trait is implemented but `execute()` returns "not y
 ## Google Integration
 
 Crate: `crates/jossie-integration-google/`
-Current state: `Integration` trait is implemented but `execute()` returns "not yet implemented".
+Current state: `Integration` trait is implemented.
 
-- [ ] **Add OAuth2 dependencies**
+- [x] **Add OAuth2 dependencies**
   Add to `crates/jossie-integration-google/Cargo.toml`:
   ```toml
   oauth2 = "5"
   ```
-  `reqwest` is already a workspace dep.
+  `reqwest` is already a workspace dep. (Note: Implemented using manual `reqwest` calls for token refresh instead of `oauth2` crate).
 
-- [ ] **Implement OAuth2 token management**
+- [x] **Implement OAuth2 token management**
   - Add `refresh_token: String` and `token_url: String` fields to `GoogleConfig` in `crates/jossie-core/src/config.rs`
   - Implement token refresh flow: use `oauth2` crate to exchange refresh token for access token
   - Cache access token, refresh when expired
   - Store token state in the `GoogleIntegration` struct (behind a `tokio::sync::RwLock`)
 
-- [ ] **Implement `gmail_search` tool**
+- [x] **Implement `gmail_search` tool**
   - Call Gmail API: `GET https://gmail.googleapis.com/gmail/v1/users/me/messages?q={query}`
   - Return list of message IDs + snippet
 
-- [ ] **Implement `gmail_read` tool**
+- [x] **Implement `gmail_read` tool**
   - Add tool definition with parameter `message_id: string`
   - Call Gmail API: `GET https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}?format=full`
   - Parse and return headers + decoded body
 
-- [ ] **Implement `gmail_send` tool**
+- [x] **Implement `gmail_send` tool**
   - Add tool definition with parameters `to`, `subject`, `body`
   - Build RFC 2822 message, base64url encode
   - Call Gmail API: `POST https://gmail.googleapis.com/gmail/v1/users/me/messages/send`
 
-- [ ] **Implement `drive_search` tool**
+- [x] **Implement `drive_search` tool**
   - Call Drive API: `GET https://www.googleapis.com/drive/v3/files?q={query}`
   - Return file names, IDs, mimeTypes
 
-- [ ] **Implement `drive_read` tool**
+- [x] **Implement `drive_read` tool**
   - Add tool definition with parameter `file_id: string`
   - Call Drive API to export/download file content
   - For Google Docs, export as plain text; for other files, return metadata
@@ -160,25 +160,25 @@ Current state: `Integration` trait is implemented but `execute()` returns "not y
 Crate: `crates/jossie-telegram/`
 Current state: Empty struct with `is_configured()` only.
 
-- [ ] **Add `teloxide` dependency**
+- [x] **Add `teloxide` dependency**
   Add to `crates/jossie-telegram/Cargo.toml`:
   ```toml
   teloxide = { version = "0.13", features = ["macros"] }
   ```
   Also add `jossie-server` or extract the agent loop into a shared location.
 
-- [ ] **Implement bot message handler**
+- [x] **Implement bot message handler**
   - On incoming text message, map Telegram `chat_id` (i64) to a `conversation_id` (Uuid)
   - Maintain a persistent mapping (add a `telegram_chats` table to the DB schema, or use an in-memory HashMap)
   - Create conversation if first message from this chat_id
   - Run the agent loop (reuse `run_agent_loop` from jossie-server, or extract it into a shared crate)
   - Send the assistant's response back as a Telegram message
 
-- [ ] **Wire bot startup into main.rs**
+- [x] **Wire bot startup into main.rs**
   - If `config.telegram.bot_token` is non-empty, spawn the bot as a background tokio task
   - The bot needs access to the same `Database`, `LlmClient`, and `IntegrationRegistry`
 
-- [ ] **Handle long responses**
+- [x] **Handle long responses**
   Telegram messages have a 4096 character limit. Split long responses into multiple messages.
 
 ---
@@ -187,7 +187,7 @@ Current state: Empty struct with `is_configured()` only.
 
 Current state: The WebSocket handler in `jossie-server/src/lib.rs` (`handle_ws()`) uses non-streaming `llm.complete()`. It works but doesn't stream tokens.
 
-- [ ] **Stream final assistant response via WebSocket**
+- [x] **Stream final assistant response via WebSocket**
   In `handle_ws()`, when the agent loop reaches the final response (no tool calls):
   - Use `llm.complete_stream()` instead of `complete()`
   - Spawn a task that reads from the `mpsc::Receiver<StreamEvent>`
@@ -201,7 +201,7 @@ Current state: The WebSocket handler in `jossie-server/src/lib.rs` (`handle_ws()
 
 There is no frontend. The server only exposes API endpoints.
 
-- [ ] **Create minimal chat UI**
+- [x] **Create minimal chat UI**
   - Add a static file serving route in `jossie-server` (e.g. `GET /` serves `static/index.html`)
   - Build a single-page HTML/JS chat interface:
     - Text input + send button
@@ -215,13 +215,13 @@ There is no frontend. The server only exposes API endpoints.
 
 ## Configuration & Deployment
 
-- [ ] **Support env var overrides for secrets**
+- [x] **Support env var overrides for secrets**
   `config.toml` contains `api_key`, `auth_token`, `password` etc. in plain text. Support environment variable overrides (e.g. `JOSSIE_LLM_API_KEY`) so secrets don't need to be in the file. Either use a crate like `config` or manually check env vars in `main.rs` after loading the TOML.
 
-- [ ] **Add `.env` file support**
+- [x] **Add `.env` file support**
   Add `dotenvy` to workspace deps. Call `dotenvy::dotenv().ok()` at the top of `main()`.
 
-- [ ] **Dockerfile**
+- [x] **Dockerfile**
   Multi-stage build: compile with `rust:latest`, run with `debian:bookworm-slim`. Copy binary + config.toml.
 
 ---

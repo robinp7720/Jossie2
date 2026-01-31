@@ -120,6 +120,25 @@ impl Database {
             .await?;
         Ok(rows.into_iter().map(|r| MemoryEntry { key: r.key, content: r.content, tags: r.tags }).collect())
     }
+
+    // Telegram
+    pub async fn get_telegram_conversation(&self, chat_id: i64) -> anyhow::Result<Option<Uuid>> {
+        let row = sqlx::query_as::<_, TelegramChatRow>("SELECT conversation_id FROM telegram_chats WHERE telegram_chat_id = ?")
+            .bind(chat_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.and_then(|r| r.conversation_id.parse().ok()))
+    }
+
+    pub async fn link_telegram_conversation(&self, chat_id: i64, conversation_id: Uuid) -> anyhow::Result<()> {
+        let conv_str = conversation_id.to_string();
+        sqlx::query("INSERT OR REPLACE INTO telegram_chats (telegram_chat_id, conversation_id) VALUES (?, ?)")
+            .bind(chat_id)
+            .bind(&conv_str)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 // Row types for sqlx
@@ -181,6 +200,11 @@ struct MemoryRow {
     key: String,
     content: String,
     tags: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct TelegramChatRow {
+    conversation_id: String,
 }
 
 #[cfg(test)]
@@ -280,5 +304,19 @@ mod tests {
         let results = db.memory_search("updated").await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content, "updated content");
+    }
+
+    #[tokio::test]
+    async fn link_and_get_telegram_conversation() {
+        let db = test_db().await;
+        let conv = db.create_conversation(Some("TG Chat")).await.unwrap();
+        let chat_id = 123456789;
+
+        db.link_telegram_conversation(chat_id, conv.id).await.unwrap();
+        let linked_id = db.get_telegram_conversation(chat_id).await.unwrap().unwrap();
+        assert_eq!(linked_id, conv.id);
+
+        let unknown = db.get_telegram_conversation(987654321).await.unwrap();
+        assert!(unknown.is_none());
     }
 }

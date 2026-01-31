@@ -74,7 +74,20 @@ async fn auth_middleware(
     let token = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .or_else(|| {
+            request.uri().query().and_then(|q| {
+                q.split('&').find_map(|pair| {
+                    let mut split = pair.split('=');
+                    if split.next() == Some("token") {
+                        split.next()
+                    } else {
+                        None
+                    }
+                })
+            })
+        });
+
     match token {
         Some(t) if t == state.auth_token => Ok(next.run(request).await),
         _ => {
@@ -165,15 +178,46 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
 
         let max_iters = state.max_agent_iterations;
         for iteration in 0..max_iters {
-            let (content, tool_calls) = match state.llm.complete(&messages, &tools).await {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = socket.send(ws::Message::Text(
-                        serde_json::json!({"type": "error", "error": e.to_string()}).to_string().into()
-                    )).await;
-                    break;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+            let llm = state.llm.clone();
+            let messages_clone = messages.clone();
+            let tools_clone = tools.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = llm.complete_stream(&messages_clone, &tools_clone, tx).await {
+                    tracing::error!("LLM stream error: {e}");
                 }
-            };
+            });
+
+            let mut full_content = String::new();
+            let mut tool_calls = Vec::new();
+
+            while let Some(event) = rx.recv().await {
+                match event {
+                    jossie_llm::StreamEvent::Delta(delta) => {
+                        full_content.push_str(&delta);
+                        let _ = socket.send(ws::Message::Text(
+                            serde_json::json!({"type": "delta", "content": delta}).to_string().into()
+                        )).await;
+                    }
+                    jossie_llm::StreamEvent::ToolCalls(calls) => {
+                        tool_calls = calls;
+                    }
+                    jossie_llm::StreamEvent::Done => {
+                        // Stream finished
+                    }
+                    jossie_llm::StreamEvent::Error(e) => {
+                        let _ = socket.send(ws::Message::Text(
+                            serde_json::json!({"type": "error", "error": e}).to_string().into()
+                        )).await;
+                    }
+                }
+            }
+            
+            // Send done message after stream ends
+            let _ = socket.send(ws::Message::Text(
+                serde_json::json!({"type": "done"}).to_string().into()
+            )).await;
 
             if !tool_calls.is_empty() {
                 if iteration + 1 >= max_iters {
@@ -188,7 +232,7 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
                     id: Uuid::new_v4(),
                     conversation_id: conv_id,
                     role: Role::Assistant,
-                    content: content.clone(),
+                    content: full_content.clone(),
                     tool_calls: tc_json,
                     tool_call_id: None,
                     name: None,
@@ -218,14 +262,11 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
                 continue;
             }
 
-            let _ = socket.send(ws::Message::Text(
-                serde_json::json!({"type": "message", "conversation_id": conv_id, "content": content}).to_string().into()
-            )).await;
             let assistant_msg = Message {
                 id: Uuid::new_v4(),
                 conversation_id: conv_id,
                 role: Role::Assistant,
-                content,
+                content: full_content,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,

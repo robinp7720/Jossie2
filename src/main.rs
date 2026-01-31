@@ -9,6 +9,9 @@ use jossie_server::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env file if it exists
+    dotenvy::dotenv().ok();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -18,8 +21,11 @@ async fn main() -> Result<()> {
 
     let config_str = std::fs::read_to_string("config.toml")
         .expect("Failed to read config.toml");
-    let config: AppConfig = toml::from_str(&config_str)
+    let mut config: AppConfig = toml::from_str(&config_str)
         .expect("Failed to parse config.toml");
+
+    // Override secrets from environment variables
+    override_config_from_env(&mut config);
 
     tracing::info!("Connecting to database...");
     let db = Database::new(&config.database.url).await?;
@@ -69,4 +75,23 @@ async fn main() -> Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+fn override_config_from_env(config: &mut AppConfig) {
+    use std::env;
+
+    if let Ok(val) = env::var("JOSSIE_SERVER_AUTH_TOKEN") { config.server.auth_token = val; }
+    if let Ok(val) = env::var("JOSSIE_LLM_API_KEY") { config.llm.api_key = val; }
+    if let Ok(val) = env::var("JOSSIE_TELEGRAM_BOT_TOKEN") { config.telegram.bot_token = val; }
+    
+    // Email
+    if let Ok(val) = env::var("JOSSIE_EMAIL_USERNAME") { config.email.username = val; }
+    if let Ok(val) = env::var("JOSSIE_EMAIL_PASSWORD") { config.email.password = val; }
+    if let Ok(val) = env::var("JOSSIE_EMAIL_IMAP_HOST") { config.email.imap_host = val; }
+    if let Ok(val) = env::var("JOSSIE_EMAIL_SMTP_HOST") { config.email.smtp_host = val; }
+
+    // Google
+    if let Ok(val) = env::var("JOSSIE_GOOGLE_CLIENT_ID") { config.google.client_id = val; }
+    if let Ok(val) = env::var("JOSSIE_GOOGLE_CLIENT_SECRET") { config.google.client_secret = val; }
+    if let Ok(val) = env::var("JOSSIE_GOOGLE_REFRESH_TOKEN") { config.google.refresh_token = val; }
 }

@@ -113,8 +113,9 @@ impl EmailIntegration {
 
     async fn do_email_send(&self, to: &str, subject: &str, body: &str) -> anyhow::Result<String> {
         use lettre::{
-            Message as LettreMessage, SmtpTransport, Transport,
+            Message as LettreMessage, AsyncSmtpTransport, AsyncTransport,
             transport::smtp::authentication::Credentials,
+            Tokio1Executor,
         };
 
         let email = LettreMessage::builder()
@@ -128,12 +129,12 @@ impl EmailIntegration {
             self.config.password.clone(),
         );
 
-        let mailer = SmtpTransport::starttls_relay(&self.config.smtp_host)?
+        let mailer: AsyncSmtpTransport<Tokio1Executor> = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&self.config.smtp_host)?
             .port(self.config.smtp_port)
             .credentials(creds)
             .build();
 
-        mailer.send(&email)?;
+        mailer.send(email).await?;
         Ok(format!("Email sent to {to}"))
     }
 

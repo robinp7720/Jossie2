@@ -4,6 +4,7 @@ use jossie_core::types::{Message, Role};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+#[derive(Clone)]
 pub struct LlmClient {
     client: reqwest::Client,
     api_url: String,

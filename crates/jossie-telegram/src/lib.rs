@@ -1,13 +1,10 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use jossie_server::AppState;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
 pub struct TelegramBot {
     token: String,
     state: Arc<AppState>,
-    chat_map: Arc<RwLock<HashMap<i64, Uuid>>>,
 }
 
 impl TelegramBot {
@@ -15,7 +12,6 @@ impl TelegramBot {
         Self {
             token: token.to_string(),
             state,
-            chat_map: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -28,12 +24,10 @@ impl TelegramBot {
 
         let bot = Bot::new(&self.token);
         let state = self.state;
-        let chat_map = self.chat_map;
 
         let handler = Update::filter_message().endpoint(
             move |bot: Bot, msg: Message| {
                 let state = state.clone();
-                let chat_map = chat_map.clone();
                 async move {
                     let respond = |e: &dyn std::fmt::Display| -> teloxide::RequestError {
                         tracing::error!("{e}");
@@ -46,23 +40,21 @@ impl TelegramBot {
 
                     let chat_id = msg.chat.id.0;
 
-                    let conv_id = {
-                        let map = chat_map.read().await;
-                        map.get(&chat_id).copied()
-                    };
-
-                    let conv_id = match conv_id {
-                        Some(id) => id,
-                        None => {
+                    let conv_id = match state.db.get_telegram_conversation(chat_id).await {
+                        Ok(Some(id)) => id,
+                        Ok(None) => {
                             let title = format!("Telegram chat {}", chat_id);
                             match state.db.create_conversation(Some(&title)).await {
                                 Ok(conv) => {
-                                    chat_map.write().await.insert(chat_id, conv.id);
+                                    if let Err(e) = state.db.link_telegram_conversation(chat_id, conv.id).await {
+                                        return Err(respond(&e));
+                                    }
                                     conv.id
                                 }
                                 Err(e) => return Err(respond(&e)),
                             }
                         }
+                        Err(e) => return Err(respond(&e)),
                     };
 
                     let user_msg = jossie_core::types::Message {
