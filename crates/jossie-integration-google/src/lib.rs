@@ -553,7 +553,7 @@ impl GoogleIntegration {
                 .to_string()
         };
 
-        // Extract body - try plain text first, then html (fetch attachment-backed parts if needed)
+        // Extract body - prefer the most informative part (fetch attachment-backed parts if needed)
         let mut body_text = extract_body_from_payload(&self.client, &token, message_id, &msg["payload"]).await;
         let mut debug_info = String::new();
 
@@ -563,6 +563,8 @@ impl GoogleIntegration {
             body_text = snippet.clone();
         }
 
+        let attachments = collect_attachments(&msg["payload"]);
+
         Ok(serde_json::json!({
             "id": message_id,
             "snippet": snippet,
@@ -571,6 +573,7 @@ impl GoogleIntegration {
             "subject": get_header("Subject"),
             "date": get_header("Date"),
             "body": body_text,
+            "attachments": attachments,
             "debug_structure": if !debug_info.is_empty() { Some(debug_info) } else { None },
         }).to_string())
     }
@@ -752,16 +755,86 @@ async fn extract_body_from_payload(
     message_id: &str,
     payload: &serde_json::Value,
 ) -> String {
-    let text = extract_content(client, token, message_id, payload, "text/plain").await.unwrap_or_default();
-    let html = extract_content(client, token, message_id, payload, "text/html").await.unwrap_or_default();
+    let text = extract_content(client, token, message_id, payload, "text/plain")
+        .await
+        .unwrap_or_default();
+    let html = extract_content(client, token, message_id, payload, "text/html")
+        .await
+        .unwrap_or_default();
 
-    if text.trim().is_empty() && !html.trim().is_empty() {
+    choose_preferred_body(text, html)
+}
+
+fn choose_preferred_body(text: String, html: String) -> String {
+    let text_trimmed = text.trim();
+    let html_trimmed = html.trim();
+    if text_trimmed.is_empty() && !html_trimmed.is_empty() {
         return html;
     }
-    if !text.is_empty() {
+    if html_trimmed.is_empty() {
         return text;
     }
-    String::new()
+
+    let text_len = text_trimmed.len();
+    let html_visible_len = approx_visible_len(html_trimmed);
+
+    // Prefer HTML if it contains substantially more visible content.
+    if html_visible_len > text_len.saturating_mul(2)
+        || (text_len < 200 && html_visible_len > text_len)
+    {
+        return html;
+    }
+
+    text
+}
+
+fn approx_visible_len(html: &str) -> usize {
+    let mut in_tag = false;
+    let mut count = 0usize;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ => {
+                if !in_tag && !ch.is_whitespace() {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
+fn collect_attachments(payload: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let mut stack = vec![payload];
+
+    while let Some(part) = stack.pop() {
+        if let Some(parts) = part.get("parts").and_then(|p| p.as_array()) {
+            for child in parts.iter().rev() {
+                stack.push(child);
+            }
+        }
+
+        let filename = part.get("filename").and_then(|f| f.as_str()).unwrap_or("");
+        let mime = part.get("mimeType").and_then(|m| m.as_str()).unwrap_or("");
+        let attachment_id = part.pointer("/body/attachmentId").and_then(|a| a.as_str());
+        let size = part.pointer("/body/size").and_then(|s| s.as_u64()).unwrap_or(0);
+
+        let is_non_text = !mime.to_lowercase().starts_with("text/");
+        let has_payload = attachment_id.is_some() || size > 0;
+
+        if (is_non_text && has_payload) || (!filename.is_empty() && has_payload) {
+            out.push(serde_json::json!({
+                "filename": if filename.is_empty() { None::<String> } else { Some(filename.to_string()) },
+                "mimeType": if mime.is_empty() { None::<String> } else { Some(mime.to_string()) },
+                "size": size,
+                "attachmentId": attachment_id.map(|a| a.to_string()),
+            }));
+        }
+    }
+
+    out
 }
 
 async fn extract_content(
