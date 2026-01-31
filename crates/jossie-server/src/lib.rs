@@ -28,6 +28,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Conversations
         .route("/api/conversations", get(handlers::conversations::list_conversations))
         .route("/api/conversations/{id}/messages", get(handlers::conversations::get_messages))
+        .route("/api/graph", get(handlers::graph::graph_handler))
         // Config / Onboarding
         .route("/api/onboarding", get(handlers::integrations::onboarding_status_handler))
         .route("/api/config/accounts", get(handlers::config::list_accounts).post(handlers::config::add_account))
@@ -43,6 +44,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
     let public = Router::new()
         .route("/", get(handlers::web::index_handler))
+        .route("/graph", get(handlers::web::graph_handler))
         .route("/oauth/callback", get(handlers::integrations::oauth_callback_handler));
 
     Router::new()

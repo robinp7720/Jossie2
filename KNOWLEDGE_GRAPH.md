@@ -1,80 +1,92 @@
 # Jossie Knowledge Graph
 
-This document outlines the design and implementation of a local Knowledge Graph (KG) for Jossie.
+This document describes the **current** Knowledge Graph (KG) implementation in Jossie, along with the visualization endpoint.
 
 ## 1. Goal
-To enable Jossie to understand and reason about relationships between entities (people, projects, concepts, places) mentioned in conversations, surpassing the limitations of simple vector or keyword search.
+Enable Jossie to reason about relationships between entities (people, projects, concepts, places) beyond keyword or vector search.
 
-**Example Query:** "How is Robin related to the 'Apollo' project?"
-*   **Without KG:** Searches for messages containing "Robin" and "Apollo", potentially missing the link.
-*   **With KG:** Traverses `Robin --(created)--> Project X --(sub-project-of)--> Apollo`.
-
-## 2. Architecture
+## 2. Current Architecture (Implemented)
 
 ### 2.1 Storage (SQLite)
-We will extend `jossie-db` with a lightweight graph schema consisting of Nodes and Edges.
+Implemented in `crates/jossie-db/migrations.sql` and `crates/jossie-db/src/lib.rs`.
 
 **Table: `graph_nodes`**
-*   `id` (TEXT, PK): Unique identifier (UUID or normalized name).
-*   `label` (TEXT): Entity name (e.g., "Robin", "Apollo", "Rust").
-*   `type` (TEXT): Category (e.g., "Person", "Project", "Technology").
-*   `properties` (TEXT): JSON blob for extra attributes (e.g., email, status).
-*   `created_at` (TEXT)
-*   `updated_at` (TEXT)
+- `id` (TEXT, PK): Stable identifier (typically normalized label).
+- `label` (TEXT): Display name.
+- `type` (TEXT): Category (Person, Project, Technology, etc.).
+- `properties` (TEXT): JSON blob for attributes.
+- `created_at`, `updated_at` (TEXT, RFC3339).
 
 **Table: `graph_edges`**
-*   `id` (TEXT, PK): UUID.
-*   `source_id` (TEXT, FK): `graph_nodes.id`.
-*   `target_id` (TEXT, FK): `graph_nodes.id`.
-*   `relation` (TEXT): The relationship type (e.g., "WORKS_ON", "CREATED", "FRIEND_OF").
-*   `weight` (REAL): Confidence score or importance (0.0 - 1.0).
-*   `properties` (TEXT): JSON blob.
-*   `created_at` (TEXT)
+- `id` (TEXT, PK): UUID.
+- `source_id`, `target_id` (TEXT, FK → `graph_nodes.id`).
+- `relation` (TEXT): Relationship type (WORKS_ON, CREATED, etc.).
+- `weight` (REAL): Confidence/strength.
+- `properties` (TEXT): JSON blob.
+- `created_at`, `updated_at` (TEXT, RFC3339).
 
-### 2.2 Integration (The "Brain")
-The KG is not just a database; it requires active maintenance by the agent.
+**Database APIs (implemented)**
+- `graph_upsert_node`, `graph_upsert_edge`
+- `graph_find_nodes` (label LIKE)
+- `graph_get_neighbors`
+- `graph_list_nodes`, `graph_list_edges`
 
-1.  **Extraction (Write):**
-    *   **Trigger:** After each user message (or periodically via a background job).
-    *   **Process:** The LLM analyzes the conversation buffer.
-    *   **Prompt:** "Identify key entities and relationships in the last message. Return JSON: `[{source: 'Robin', relation: 'likes', target: 'Pizza', type: 'Preference'}]`."
-    *   **Action:** `db.graph_upsert(...)`
+### 2.2 Integration Tools (Implemented)
+A dedicated crate exists: `crates/jossie-integration-graph` and is registered in `src/main.rs`.
 
-2.  **Retrieval (Read / RAG):**
-    *   **Trigger:** Before generating a response.
-    *   **Process:**
-        1.  Identify entities in the user's current prompt (e.g., "Apollo").
-        2.  Query the KG for neighbors of "Apollo" (1-2 hops).
-        3.  Summarize these relationships into the System Prompt.
-    *   **Prompt Injection:**
-        ```text
-        ## Context Graph
-        - Apollo is a Project.
-        - Robin works on Apollo.
-        - Apollo uses Rust.
-        ```
+**Tools exposed to the agent:**
+- `graph_upsert_node`
+- `graph_add_relation`
+- `graph_search`
 
-## 3. Implementation Plan
+### 2.3 Automatic Extraction (Implemented)
+In `crates/jossie-server/src/agent.rs`:
 
-### Phase 1: Database Support
-*   [ ] Add `graph_nodes` and `graph_edges` to `migrations.sql`.
-*   [ ] Implement `GraphNode` and `GraphEdge` structs in `jossie-db`.
-*   [ ] Add methods: `upsert_node`, `upsert_edge`, `get_neighbors`.
+1. After the assistant responds, a **background LLM call** extracts nodes/edges from the latest user + assistant turn.
+2. Parsed nodes/edges are upserted into the KG.
 
-### Phase 2: Graph Tools
-*   [ ] Create a new crate `jossie-integration-graph` (or add to `jossie-core`).
-*   [ ] Expose tools for the Agent:
-    *   `graph_add_relation(source, relation, target)`
-    *   `graph_query(entity_name)`
+Extraction prompt expects JSON:
+```json
+{
+  "nodes": [{"id": "...", "label": "...", "type": "..."}],
+  "edges": [{"source": "...", "target": "...", "relation": "..."}]
+}
+```
 
-### Phase 3: Automatic Extraction
-*   [ ] Update `jossie-server/src/agent.rs` to include a "Graph Extraction" step.
-*   [ ] This can be a separate LLM call (cheaper model) running in parallel or after the main response.
+### 2.4 Graph Context Injection (Implemented)
+Before generating a response, the agent builds a **Context Graph** block:
 
-### Phase 4: Visualization (Optional)
-*   [ ] Add a `/graph` endpoint to the Web API to visualize the nodes using D3.js or Cytoscape.
+- Heuristically extracts candidate entities from the user message (quoted phrases + token runs).
+- Looks up matching nodes and neighbors.
+- Injects the relationships into the System Prompt.
 
-## 4. Potential Challenges
-*   **Entity Resolution:** Does "Robin" refer to "Robin Decker" or "Robin (Bird)"? The LLM needs context to merge nodes correctly.
-*   **Graph Explosion:** Avoiding storing trivial info ("Robin is typing"). Need filtering rules.
-*   **Latency:** Adding an extra LLM call for extraction increases latency. Best done asynchronously.
+This gives the LLM structured graph context during response generation.
+
+## 3. Visualization (Implemented)
+A graph visualization page is available:
+
+- **UI:** `GET /graph` (public HTML page)
+- **Data:** `GET /api/graph` (auth-protected)
+
+The `/graph` page uses a D3 force-directed layout and pulls data from `/api/graph` with the same Bearer token used by the chat UI. It supports:
+- Live reloads
+- Filtering by node name/type
+- Zoom and pan
+
+**Response shape from `/api/graph`:**
+```json
+{
+  "nodes": [
+    {"id":"robin","label":"Robin","node_type":"Person","properties":{}}
+  ],
+  "edges": [
+    {"id":"...","source_id":"robin","target_id":"apollo","relation":"WORKS_ON","weight":1.0,"properties":{}}
+  ]
+}
+```
+
+## 4. Known Gaps / Next Steps
+- Entity resolution is naive (IDs are caller-supplied; no merge strategy).
+- Extraction runs in the background with the main model; no cheaper extractor model or queue.
+- Graph growth controls (pruning / TTL) are not implemented.
+- Visualization is read-only; no editing UI yet.

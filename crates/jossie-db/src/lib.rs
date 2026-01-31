@@ -454,6 +454,30 @@ impl Database {
 
         Ok(results)
     }
+
+    pub async fn graph_list_nodes(&self, limit: usize) -> anyhow::Result<Vec<GraphNode>> {
+        let limit = limit.max(1).min(5000);
+        let rows = sqlx::query_as::<_, GraphNodeRow>(
+            "SELECT * FROM graph_nodes ORDER BY updated_at DESC LIMIT ?"
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn graph_list_edges(&self, limit: usize) -> anyhow::Result<Vec<GraphEdge>> {
+        let limit = limit.max(1).min(5000);
+        let rows = sqlx::query_as::<_, GraphEdgeRow>(
+            "SELECT * FROM graph_edges ORDER BY updated_at DESC LIMIT ?"
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
 }
 
 // Row types for sqlx
@@ -462,6 +486,16 @@ pub struct GraphNode {
     pub id: String,
     pub label: String,
     pub node_type: String,
+    pub properties: serde_json::Value,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GraphEdge {
+    pub id: String,
+    pub source_id: String,
+    pub target_id: String,
+    pub relation: String,
+    pub weight: f64,
     pub properties: serde_json::Value,
 }
 
@@ -500,20 +534,28 @@ impl From<GraphNodeRow> for GraphNode {
 #[derive(sqlx::FromRow)]
 struct GraphEdgeRow {
     id: String,
-    #[allow(dead_code)]
     source_id: String,
-    #[allow(dead_code)]
     target_id: String,
-    #[allow(dead_code)]
     relation: String,
-    #[allow(dead_code)]
     weight: f64,
-    #[allow(dead_code)]
     properties: String,
     #[allow(dead_code)]
     created_at: String,
     #[allow(dead_code)]
     updated_at: String,
+}
+
+impl From<GraphEdgeRow> for GraphEdge {
+    fn from(r: GraphEdgeRow) -> Self {
+        GraphEdge {
+            id: r.id,
+            source_id: r.source_id,
+            target_id: r.target_id,
+            relation: r.relation,
+            weight: r.weight,
+            properties: serde_json::from_str(&r.properties).unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(sqlx::FromRow)]
