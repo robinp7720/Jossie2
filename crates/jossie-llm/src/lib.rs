@@ -287,12 +287,6 @@ impl LlmClient {
             }
         }
 
-        /*
-        let merged_sources = merge_sources(sources, annotations);
-        if !merged_sources.is_empty() {
-            append_sources(&mut content, &merged_sources);
-        }*/
-
         Ok((content, tool_calls))
     }
 

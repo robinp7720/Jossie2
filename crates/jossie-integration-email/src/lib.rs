@@ -1,6 +1,6 @@
 use jossie_core::config::EmailConfig;
 use jossie_core::integration::{Integration, ToolDefinition, OnboardingStatus, OnboardingField};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
 use jossie_db::Database;
 
@@ -217,7 +217,12 @@ impl Integration for EmailIntegration {
             ToolDefinition {
                 name: "email_list_accounts".to_string(),
                 description: "List configured email accounts".to_string(),
-                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": false
+                }),
             },
             ToolDefinition {
                 name: "email_search".to_string(),
@@ -225,11 +230,12 @@ impl Integration for EmailIntegration {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "account_id": {"type": "string", "description": "Account ID (optional, defaults to default account)"},
+                        "account_id": {"type": "string", "description": "Account ID (use empty string for default account)"},
                         "query": {"type": "string", "description": "Search term"},
-                        "folder": {"type": "string", "description": "IMAP folder to search (default: INBOX)"}
+                        "folder": {"type": "string", "description": "IMAP folder to search (use empty string for INBOX)"}
                     },
-                    "required": ["query"]
+                    "required": ["account_id", "query", "folder"],
+                    "additionalProperties": false
                 }),
             },
             ToolDefinition {
@@ -238,11 +244,12 @@ impl Integration for EmailIntegration {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "account_id": {"type": "string", "description": "Account ID"},
+                        "account_id": {"type": "string", "description": "Account ID (use empty string for default account)"},
                         "uid": {"type": "integer", "description": "Email UID from search results"},
-                        "folder": {"type": "string", "description": "IMAP folder (default: INBOX)"}
+                        "folder": {"type": "string", "description": "IMAP folder (use empty string for INBOX)"}
                     },
-                    "required": ["uid"]
+                    "required": ["account_id", "uid", "folder"],
+                    "additionalProperties": false
                 }),
             },
             ToolDefinition {
@@ -251,12 +258,13 @@ impl Integration for EmailIntegration {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "account_id": {"type": "string", "description": "Account ID"},
+                        "account_id": {"type": "string", "description": "Account ID (use empty string for default account)"},
                         "to": {"type": "string", "description": "Recipient email address"},
                         "subject": {"type": "string", "description": "Email subject"},
                         "body": {"type": "string", "description": "Email body text"}
                     },
-                    "required": ["to", "subject", "body"]
+                    "required": ["account_id", "to", "subject", "body"],
+                    "additionalProperties": false
                 }),
             },
             ToolDefinition {
@@ -265,8 +273,10 @@ impl Integration for EmailIntegration {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "account_id": {"type": "string", "description": "Account ID"}
-                    }
+                        "account_id": {"type": "string", "description": "Account ID (use empty string for default account)"}
+                    },
+                    "required": ["account_id"],
+                    "additionalProperties": false
                 }),
             },
         ]
@@ -280,24 +290,28 @@ impl Integration for EmailIntegration {
 
         // Common args struct for account extraction
         #[derive(Deserialize)]
-        struct AccountArgs { account_id: Option<String> }
-        let base_args: AccountArgs = serde_json::from_str(arguments).unwrap_or(AccountArgs { account_id: None });
-        let config = self.get_account_config(base_args.account_id.as_deref()).await?;
+        struct AccountArgs { #[serde(default)] account_id: String }
+        let base_args: AccountArgs = serde_json::from_str(arguments).unwrap_or(AccountArgs { account_id: String::new() });
+        let account_id = base_args.account_id.trim();
+        let account_id = if account_id.is_empty() || account_id == "default" { None } else { Some(account_id) };
+        let config = self.get_account_config(account_id).await?;
 
         match tool_name {
             "email_search" => {
                 #[derive(Deserialize)]
-                struct Args { query: String, #[serde(default = "default_folder")] folder: String }
+                struct Args { query: String, #[serde(default)] folder: String }
                 fn default_folder() -> String { "INBOX".to_string() }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.do_email_search(&config, &args.query, &args.folder).await
+                let folder = if args.folder.trim().is_empty() { default_folder() } else { args.folder };
+                self.do_email_search(&config, &args.query, &folder).await
             }
             "email_read" => {
                 #[derive(Deserialize)]
-                struct Args { uid: u32, #[serde(default = "default_folder")] folder: String }
+                struct Args { uid: u32, #[serde(default)] folder: String }
                 fn default_folder() -> String { "INBOX".to_string() }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.do_email_read(&config, args.uid, &args.folder).await
+                let folder = if args.folder.trim().is_empty() { default_folder() } else { args.folder };
+                self.do_email_read(&config, args.uid, &folder).await
             }
             "email_send" => {
                 #[derive(Deserialize)]
@@ -339,4 +353,3 @@ impl Integration for EmailIntegration {
         })
     }
 }
-

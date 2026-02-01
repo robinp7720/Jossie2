@@ -124,12 +124,22 @@ mod tests {
                 ToolDefinition {
                     name: "mock_tool".to_string(),
                     description: "A mock tool".to_string(),
-                    parameters: serde_json::json!({"type": "object", "properties": {}}),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": false
+                    }),
                 },
                 ToolDefinition {
                     name: "mock_echo".to_string(),
                     description: "Echoes input".to_string(),
-                    parameters: serde_json::json!({"type": "object", "properties": {"text": {"type": "string"}}}),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
+                        "additionalProperties": false
+                    }),
                 },
             ]
         }

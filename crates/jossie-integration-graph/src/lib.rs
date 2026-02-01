@@ -87,6 +87,28 @@ impl GraphIntegration {
     }
 }
 
+fn normalize_attributes(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(items) => {
+            let mut map = serde_json::Map::new();
+            for item in items {
+                if let serde_json::Value::Object(obj) = item {
+                    let key = obj.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if key.is_empty() {
+                        continue;
+                    }
+                    let value = obj.get("value").cloned().unwrap_or_else(|| serde_json::Value::String(String::new()));
+                    map.insert(key, value);
+                }
+            }
+            serde_json::Value::Object(map)
+        }
+        serde_json::Value::Object(obj) => serde_json::Value::Object(obj),
+        serde_json::Value::Null => serde_json::Value::Object(serde_json::Map::new()),
+        other => other,
+    }
+}
+
 #[async_trait::async_trait]
 impl Integration for GraphIntegration {
     fn name(&self) -> &str {
@@ -104,9 +126,22 @@ impl Integration for GraphIntegration {
                         "id": {"type": "string", "description": "Unique ID (e.g., 'robin_decker', 'project_apollo')"},
                         "label": {"type": "string", "description": "Display name (e.g., 'Robin Decker')"},
                         "type": {"type": "string", "description": "Category (Person, Project, Company, etc.)"},
-                        "properties": {"type": "object", "description": "Arbitrary JSON attributes"}
+                        "attributes": {
+                            "type": "array",
+                            "description": "List of attribute entries (use empty array for none)",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "key": {"type": "string", "description": "Attribute name"},
+                                    "value": {"type": "string", "description": "Attribute value"}
+                                },
+                                "required": ["key", "value"],
+                                "additionalProperties": false
+                            }
+                        }
                     },
-                    "required": ["id", "label", "type"]
+                    "required": ["id", "label", "type", "attributes"],
+                    "additionalProperties": false
                 }),
             },
             ToolDefinition {
@@ -119,9 +154,22 @@ impl Integration for GraphIntegration {
                         "target_id": {"type": "string", "description": "ID of target entity"},
                         "relation": {"type": "string", "description": "Relationship type (WORKS_ON, KNOWS, LOCATED_IN, etc.)"},
                         "weight": {"type": "number", "description": "Confidence/Strength (0.0 - 1.0), default 1.0"},
-                        "properties": {"type": "object", "description": "Edge attributes"}
+                        "attributes": {
+                            "type": "array",
+                            "description": "List of edge attribute entries (use empty array for none)",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "key": {"type": "string", "description": "Attribute name"},
+                                    "value": {"type": "string", "description": "Attribute value"}
+                                },
+                                "required": ["key", "value"],
+                                "additionalProperties": false
+                            }
+                        }
                     },
-                    "required": ["source_id", "target_id", "relation"]
+                    "required": ["source_id", "target_id", "relation", "weight", "attributes"],
+                    "additionalProperties": false
                 }),
             },
             ToolDefinition {
@@ -132,7 +180,8 @@ impl Integration for GraphIntegration {
                     "properties": {
                         "query": {"type": "string", "description": "Name or partial name of the entity to look up"}
                     },
-                    "required": ["query"]
+                    "required": ["query"],
+                    "additionalProperties": false
                 }),
             },
         ]
@@ -143,16 +192,33 @@ impl Integration for GraphIntegration {
         match tool_name {
             "graph_upsert_node" => {
                 #[derive(Deserialize)]
-                struct Args { id: String, label: String, #[serde(rename = "type")] node_type: String, #[serde(default)] properties: serde_json::Value }
+                struct Args {
+                    id: String,
+                    label: String,
+                    #[serde(rename = "type")]
+                    node_type: String,
+                    #[serde(default, alias = "properties")]
+                    attributes: serde_json::Value,
+                }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.add_node(&args.id, &args.label, &args.node_type, args.properties).await
+                let attributes = normalize_attributes(args.attributes);
+                self.add_node(&args.id, &args.label, &args.node_type, attributes).await
             }
             "graph_add_relation" => {
                 #[derive(Deserialize)]
-                struct Args { source_id: String, target_id: String, relation: String, #[serde(default = "default_weight")] weight: f64, #[serde(default)] properties: serde_json::Value }
+                struct Args {
+                    source_id: String,
+                    target_id: String,
+                    relation: String,
+                    #[serde(default = "default_weight")]
+                    weight: f64,
+                    #[serde(default, alias = "properties")]
+                    attributes: serde_json::Value,
+                }
                 fn default_weight() -> f64 { 1.0 }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.add_edge(&args.source_id, &args.target_id, &args.relation, args.weight, args.properties).await
+                let attributes = normalize_attributes(args.attributes);
+                self.add_edge(&args.source_id, &args.target_id, &args.relation, args.weight, attributes).await
             }
             "graph_search" => {
                 #[derive(Deserialize)]

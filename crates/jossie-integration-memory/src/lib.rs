@@ -29,9 +29,10 @@ impl Integration for MemoryIntegration {
                     "properties": {
                         "key": {"type": "string", "description": "Unique key for this memory"},
                         "content": {"type": "string", "description": "Content to remember"},
-                        "tags": {"type": "string", "description": "Space-separated tags for categorization"}
+                        "tags": {"type": "string", "description": "Space-separated tags for categorization (use empty string for none)"}
                     },
-                    "required": ["key", "content"]
+                    "required": ["key", "content", "tags"],
+                    "additionalProperties": false
                 }),
             },
             ToolDefinition {
@@ -42,7 +43,8 @@ impl Integration for MemoryIntegration {
                     "properties": {
                         "query": {"type": "string", "description": "Search query"}
                     },
-                    "required": ["query"]
+                    "required": ["query"],
+                    "additionalProperties": false
                 }),
             },
         ]

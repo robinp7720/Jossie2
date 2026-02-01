@@ -1,11 +1,11 @@
-use jossie_core::types::{Message, Role};
-use uuid::Uuid;
-use chrono::Utc;
 use crate::state::AppState;
-use std::sync::Arc;
+use chrono::Utc;
+use jossie_core::types::{Message, Role};
+use jossie_db::IntegrationEvent;
 use serde::Deserialize;
 use std::collections::HashSet;
-use jossie_db::IntegrationEvent;
+use std::sync::Arc;
+use uuid::Uuid;
 
 async fn build_system_prompt(state: &AppState, user_message: Option<&str>) -> String {
     let mut prompt = state.system_prompt.clone();
@@ -15,7 +15,7 @@ async fn build_system_prompt(state: &AppState, user_message: Option<&str>) -> St
         prompt.push_str("\n\n## Agent Description (Jossie)\n");
         prompt.push_str(&entry.content);
     }
-    
+
     if let Ok(Some(entry)) = state.db.get_memory("user_profile").await {
         prompt.push_str("\n\n## User Description\n");
         prompt.push_str(&entry.content);
@@ -32,7 +32,11 @@ async fn build_system_prompt(state: &AppState, user_message: Option<&str>) -> St
     prompt
 }
 
-pub async fn prepend_system_prompt(state: &AppState, messages: &mut Vec<Message>, user_message: Option<&str>) {
+pub async fn prepend_system_prompt(
+    state: &AppState,
+    messages: &mut Vec<Message>,
+    user_message: Option<&str>,
+) {
     let content = build_system_prompt(state, user_message).await;
     if content.is_empty() {
         return;
@@ -53,9 +57,12 @@ pub async fn prepend_system_prompt(state: &AppState, messages: &mut Vec<Message>
 pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<String> {
     let tools = state.registry.all_tool_definitions();
     let mut messages = state.db.get_messages(conv_id).await?;
-    
+
     // Capture user message for extraction later
-    let last_user_msg = messages.last().map(|m| m.content.clone()).unwrap_or_default();
+    let last_user_msg = messages
+        .last()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
 
     prepend_system_prompt(state, &mut messages, Some(&last_user_msg)).await;
 
@@ -74,12 +81,12 @@ pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<S
                 created_at: Utc::now(),
             };
             state.db.save_message(&msg).await?;
-            
+
             // Trigger background extraction
             let db = state.db.clone();
             let llm = state.llm.clone();
             let assistant_reply = content.clone();
-            
+
             tokio::spawn(async move {
                 spawn_knowledge_extraction(db, llm, last_user_msg, assistant_reply).await;
             });
@@ -118,10 +125,18 @@ pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<S
         }
     }
 
-    anyhow::bail!("Agent loop exceeded maximum of {} iterations", state.max_agent_iterations)
+    anyhow::bail!(
+        "Agent loop exceeded maximum of {} iterations",
+        state.max_agent_iterations
+    )
 }
 
-pub(crate) async fn spawn_knowledge_extraction(db: Arc<jossie_db::Database>, llm: jossie_llm::LlmClient, user_msg: String, assistant_msg: String) {
+pub(crate) async fn spawn_knowledge_extraction(
+    db: Arc<jossie_db::Database>,
+    llm: jossie_llm::LlmClient,
+    user_msg: String,
+    assistant_msg: String,
+) {
     if user_msg.len() < 10 && assistant_msg.len() < 10 {
         return; // Skip short chat
     }
@@ -169,19 +184,33 @@ If nothing to extract, output {{ "nodes": [], "edges": [] }}"#
 
     match llm.complete(&[sys_msg, user_msg], &[]).await {
         Ok((response, _)) => {
-            let clean_json = response.trim().trim_start_matches("```json").trim_end_matches("```");
+            let clean_json = response
+                .trim()
+                .trim_start_matches("```json")
+                .trim_end_matches("```");
             match serde_json::from_str::<ExtractionResult>(clean_json) {
                 Ok(data) => {
                     let node_count = data.nodes.len();
                     let edge_count = data.edges.len();
                     for node in &data.nodes {
                         let _ = db
-                            .graph_upsert_node(&node.id, &node.label, &node.node_type, &serde_json::json!({}))
+                            .graph_upsert_node(
+                                &node.id,
+                                &node.label,
+                                &node.node_type,
+                                &serde_json::json!({}),
+                            )
                             .await;
                     }
                     for edge in &data.edges {
                         let _ = db
-                            .graph_upsert_edge(&edge.source, &edge.target, &edge.relation, 1.0, &serde_json::json!({}))
+                            .graph_upsert_edge(
+                                &edge.source,
+                                &edge.target,
+                                &edge.relation,
+                                1.0,
+                                &serde_json::json!({}),
+                            )
                             .await;
                     }
                     if node_count > 0 || edge_count > 0 {
@@ -229,7 +258,7 @@ pub async fn generate_event_message(
     let event_msg = Message {
         id: Uuid::nil(),
         conversation_id: Uuid::nil(),
-        role: Role::Tool,
+        role: Role::System,
         content: serde_json::to_string_pretty(&event_payload)?,
         tool_calls: None,
         tool_call_id: None,
@@ -270,7 +299,9 @@ async fn build_graph_context(state: &AppState, user_message: &str) -> String {
     let mut seen_nodes = HashSet::new();
 
     for candidate in candidates.into_iter().take(MAX_CANDIDATES) {
-        let Ok(found) = state.db.graph_find_nodes(&candidate).await else { continue };
+        let Ok(found) = state.db.graph_find_nodes(&candidate).await else {
+            continue;
+        };
         for node in found {
             if seen_nodes.insert(node.id.clone()) {
                 nodes.push(node);
@@ -295,21 +326,19 @@ async fn build_graph_context(state: &AppState, user_message: &str) -> String {
     for node in &nodes {
         lines.push(format!("- {} [{}]", node.label, node.node_type));
 
-        let Ok(neighbors) = state.db.graph_get_neighbors(&node.id).await else { continue };
+        let Ok(neighbors) = state.db.graph_get_neighbors(&node.id).await else {
+            continue;
+        };
         for neighbor in neighbors.into_iter().take(MAX_EDGES_PER_NODE) {
             let line = if neighbor.direction == "outgoing" {
                 format!(
                     "- {} --[{}]--> {}",
-                    node.label,
-                    neighbor.relation,
-                    neighbor.node.label
+                    node.label, neighbor.relation, neighbor.node.label
                 )
             } else {
                 format!(
                     "- {} --[{}]--> {}",
-                    neighbor.node.label,
-                    neighbor.relation,
-                    node.label
+                    neighbor.node.label, neighbor.relation, node.label
                 )
             };
             if seen_edges.insert(line.clone()) {
@@ -333,9 +362,9 @@ fn extract_candidate_entities(message: &str) -> Vec<String> {
     }
 
     let stopwords: HashSet<&'static str> = [
-        "the", "a", "an", "and", "or", "but", "to", "from", "in", "on", "at", "for", "with",
-        "of", "my", "your", "our", "his", "her", "their", "it", "this", "that", "i", "we",
-        "you", "he", "she", "they",
+        "the", "a", "an", "and", "or", "but", "to", "from", "in", "on", "at", "for", "with", "of",
+        "my", "your", "our", "his", "her", "their", "it", "this", "that", "i", "we", "you", "he",
+        "she", "they",
     ]
     .into_iter()
     .collect();
@@ -408,7 +437,9 @@ fn is_entity_token(token: &str, stopwords: &HashSet<&str>) -> bool {
     }
 
     let mut chars = token.chars();
-    let Some(first) = chars.next() else { return false };
+    let Some(first) = chars.next() else {
+        return false;
+    };
     if !first.is_ascii_uppercase() {
         return false;
     }
