@@ -11,6 +11,7 @@ members = [
     "crates/jossie-llm",
     "crates/jossie-server",
     "crates/jossie-telegram",
+    "crates/jossie-integration-http",
 ]
 resolver = "3"
 
@@ -26,6 +27,7 @@ jossie-integration-graph = { path = "crates/jossie-integration-graph" }
 jossie-integration-memory = { path = "crates/jossie-integration-memory" }
 
 jossie-integration-browser = { path = "crates/jossie-integration-browser" }
+jossie-integration-http = { path = "crates/jossie-integration-http" }
 
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
@@ -79,4 +81,5 @@ jossie-integration-email = { workspace = true }
 jossie-integration-google = { workspace = true }
 jossie-integration-graph = { workspace = true }
 jossie-integration-browser = { workspace = true }
+jossie-integration-http = { workspace = true }
 jossie-telegram = { workspace = true }

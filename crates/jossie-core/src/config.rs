@@ -11,6 +11,14 @@ pub struct AppConfig {
     pub email: EmailConfig,
     #[serde(default)]
     pub google: GoogleConfig,
+    #[serde(default)]
+    pub http: HttpConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HttpConfig {
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

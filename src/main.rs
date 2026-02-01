@@ -2,6 +2,7 @@ use anyhow::Result;
 use jossie_core::config::AppConfig;
 use jossie_core::integration::IntegrationRegistry;
 use jossie_db::Database;
+use jossie_integration_http::HttpIntegration;
 use jossie_integration_memory::MemoryIntegration;
 use jossie_llm::LlmClient;
 use jossie_server::AppState;
@@ -61,6 +62,12 @@ async fn main() -> Result<()> {
         jossie_integration_browser::BrowserIntegration::new(),
     ));
     tracing::info!("Registered browser integration");
+
+    // HTTP Integration
+    registry.register(Arc::new(HttpIntegration::new(
+        config.http.allowed_domains.clone(),
+    )));
+    tracing::info!("Registered http integration");
 
     tracing::info!(
         "Registered {} tool(s)",
