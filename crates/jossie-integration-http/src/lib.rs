@@ -497,7 +497,23 @@ impl HttpIntegration {
                 e
             })?;
             let body_size = body_bytes.len();
-            let body_text = String::from_utf8_lossy(&body_bytes).to_string();
+            let mut body_text = String::from_utf8_lossy(&body_bytes).to_string();
+            
+            // Limit response size to 100KB to prevent token exhaustion
+            const MAX_RESPONSE_SIZE: usize = 100 * 1024;
+            if body_text.len() > MAX_RESPONSE_SIZE {
+                tracing::warn!(
+                    "Response body too large ({} bytes). Truncating to {} bytes.",
+                    body_size,
+                    MAX_RESPONSE_SIZE
+                );
+                body_text.truncate(MAX_RESPONSE_SIZE);
+                body_text.push_str(&format!(
+                    "\n... [Response truncated. Original size: {} bytes]",
+                    body_size
+                ));
+            }
+
             tracing::info!(
                 "Response body size: {} bytes, is_utf8: {}",
                 body_size,
@@ -893,5 +909,45 @@ mod tests {
                 .to_string()
                 .contains("exceeds 500KB limit")
         );
+    }
+
+    #[tokio::test]
+    async fn test_response_truncation() {
+        // Start a local axum server that returns a huge response
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let app = Router::new().route("/huge", post(|| async {
+            // Return 150KB of data
+            "a".repeat(150 * 1024)
+        }));
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let integration = HttpIntegration::new(vec![]);
+        let args = serde_json::json!({
+            "method": "POST",
+            "url": format!("http://{}/huge", addr),
+            "headers": null,
+            "query": null,
+            "body": null,
+            "timeout_ms": 5000,
+            "follow_redirects": false
+        });
+
+        let result = integration
+            .execute("http_request", &args.to_string())
+            .await
+            .expect("Request failed");
+
+        let output: Value = serde_json::from_str(&result).unwrap();
+        let body_text = output["body_text"].as_str().unwrap();
+
+        // Should be truncated to 100KB + suffix
+        assert!(body_text.len() < 150 * 1024);
+        assert!(body_text.contains("[Response truncated. Original size:"));
+        assert!(body_text.len() >= 100 * 1024);
     }
 }
