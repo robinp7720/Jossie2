@@ -50,6 +50,7 @@ async fn build_system_prompt(state: &AppState, user_message: Option<&str>) -> St
         }
     }
 
+    tracing::debug!("System Prompt Built. Length: {} chars", prompt.len());
     prompt
 }
 
@@ -112,6 +113,32 @@ async fn run_agent_loop_inner(state: &AppState, conv_id: Uuid) -> anyhow::Result
     prepend_system_prompt(state, &mut messages, Some(&last_user_msg)).await;
 
     for _iteration in 0..state.max_agent_iterations {
+        // --- DEBUG: Log Context Size ---
+        let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
+        let est_tokens = total_chars / 4; // Rough estimate
+        tracing::info!(
+            "Agent Loop Iteration {}. Messages: {}. Total Chars: {}. Est Tokens: {}",
+            _iteration,
+            messages.len(),
+            total_chars,
+            est_tokens
+        );
+
+        if est_tokens > 200_000 {
+            tracing::warn!("⚠️ CONTEXT SIZE WARNING: Context is very large!");
+            // Optional: Print top 3 largest messages
+            let mut sizes: Vec<(usize, String)> = messages
+                .iter()
+                .enumerate()
+                .map(|(i, m)| (m.content.len(), format!("Msg[{}] Role: {:?}", i, m.role)))
+                .collect();
+            sizes.sort_by(|a, b| b.0.cmp(&a.0));
+            for (size, info) in sizes.iter().take(3) {
+                tracing::warn!("   Large Message: {} chars - {}", size, info);
+            }
+        }
+        // -------------------------------
+
         let (content, tool_calls) = state.llm.complete(&messages, &tools).await?;
 
         if tool_calls.is_empty() {
