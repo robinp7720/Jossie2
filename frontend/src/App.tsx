@@ -548,7 +548,9 @@ const App = () => {
                     className={`message ${message.role} ${message.pending ? 'pending' : ''}`}
                   >
                     <div className="message-role">{message.role}</div>
-                    <ReactMarkdown className="message-content markdown">{message.content}</ReactMarkdown>
+                    <div className="message-content markdown">
+                      <ReactMarkdown>{message.content}</ReactMarkdown>
+                    </div>
                   </div>
                 ))}
                 <div ref={chatEndRef} />
