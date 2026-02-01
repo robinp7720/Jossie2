@@ -12,6 +12,7 @@ use axum::{
     http::{header, Method},
 };
 use tower_http::cors::{CorsLayer, Any};
+use tower_http::services::ServeDir;
 pub use state::AppState;
 pub use agent::{run_agent_loop, prepend_system_prompt};
 
@@ -45,10 +46,13 @@ pub fn router(state: Arc<AppState>) -> Router {
     let public = Router::new()
         .route("/oauth/callback", get(handlers::integrations::oauth_callback_handler));
 
+    let static_files = ServeDir::new("frontend/dist");
+
     Router::new()
         .merge(public)
         .merge(setup)
         .merge(api)
+        .nest_service("/", static_files)
         .layer(cors)
         .with_state(state)
 }
