@@ -21,56 +21,117 @@ impl BrowserIntegration {
         tracing::info!("Browsing to: {}", url);
 
         // Hybrid approach: Check headers first.
-        // If it's a simple resource (text, markdown, json, etc.), fetching it directly is faster and more reliable.
+        tracing::info!("Initializing reqwest client for {}", url);
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .build()?;
 
         // Try a HEAD request first to check content type
-        let head_resp = client.head(url.clone()).send().await;
+        tracing::info!("Sending HEAD request to {}", url);
+        let head_resp = client
+            .head(url.clone())
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            )
+            .send()
+            .await;
 
-        let should_use_browser = match head_resp {
+        let mut should_use_browser = false;
+
+        match head_resp {
             Ok(resp) => {
-                let content_type = resp
-                    .headers()
+                let status = resp.status();
+                tracing::info!("HEAD response status: {}", status);
+
+                let headers = resp.headers();
+                tracing::info!("HEAD response headers: {:?}", headers);
+
+                let content_type = headers
                     .get("content-type")
                     .and_then(|h| h.to_str().ok())
                     .unwrap_or("")
                     .to_lowercase();
 
-                tracing::info!("Content-Type for {}: {}", url, content_type);
+                tracing::info!("Content-Type for {}: '{}'", url, content_type);
 
                 // If it's explicitly HTML, use browser to handle JS.
-                // If it's something else (or unknown), but NOT html, try simple fetch.
-                content_type.contains("html")
+                if content_type.contains("html") {
+                    tracing::info!("Detected HTML content, attempting browser fallback");
+                    should_use_browser = true;
+                } else {
+                    tracing::info!("Content is not HTML, will attempt direct download");
+                }
             }
-            Err(_) => {
-                // If HEAD fails (some servers block it), assume we might need browser
-                // OR just try GET. Let's default to browser as it's the robust path for "web browsing".
-                true
+            Err(e) => {
+                tracing::warn!("HEAD request failed: {}. Defaulting to browser.", e);
+                should_use_browser = true;
             }
         };
 
         if !should_use_browser {
-            tracing::info!("Fetching {} with simple HTTP client", url);
-            let resp = client.get(url.clone()).send().await?;
-            if resp.status().is_success() {
-                let text = resp.text().await?;
-                return Ok(format!(
-                    "### Content from {} (Direct Fetch)\n\n{}",
-                    domain, text
-                ));
+            tracing::info!("Fetching {} with simple HTTP client (GET)", url);
+            let resp_result = client
+                .get(url.clone())
+                .header(
+                    "Accept",
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                )
+                .send()
+                .await;
+
+            match resp_result {
+                Ok(resp) => {
+                    let final_url = resp.url().clone();
+                    let status = resp.status();
+                    tracing::info!("GET final URL: {}", final_url);
+                    tracing::info!("GET response status: {}", status);
+                    tracing::info!("GET response headers: {:?}", resp.headers());
+
+                    // Even if it is an error status (e.g. 400), we probably want to return the body
+                    // so the agent can see "Rate Limit" or "Bad Request" details.
+                    let body = resp
+                        .text()
+                        .await
+                        .unwrap_or_else(|e| format!("Failed to read body: {}", e));
+
+                    tracing::info!("GET response body length: {}", body.len());
+                    if body.len() > 100 {
+                        tracing::info!(
+                            "GET response body preview: {}...",
+                            &body[0..100].replace('\n', " ")
+                        );
+                    } else {
+                        tracing::info!("GET response body: {}", body);
+                    }
+
+                    if !status.is_success() {
+                        tracing::warn!("Simple fetch returned error status {}", status);
+                        // Explicitly formatted error string for LLM awareness
+                        return Ok(format!(
+                            "### URL Fetch Failed\n**Final URL**: {}\n**Status**: {}\n**Reason**: Direct fetch returned error status.\n\n**Response Body**:\n```\n{}\n```",
+                            final_url, status, body
+                        ));
+                    }
+
+                    return Ok(format!(
+                        "### Content from {} (Direct Fetch)\n\n{}",
+                        domain, body
+                    ));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Simple fetch network error: {}, falling back to browser request",
+                        e
+                    );
+                    // Network failed, maybe browser can bypass unique network issues? Unlikely but worth a shot.
+                }
             }
-            // If simple fetch failed (e.g. 403 blocking non-browsers, though we set UA),
-            // fall back to browser below.
-            tracing::warn!(
-                "Simple fetch failed with status {}, falling back to browser",
-                resp.status()
-            );
         }
 
         // Headless Chrome Path
+        tracing::info!("Launching headless browser for {}", url);
         let options = LaunchOptions::default_builder()
             .headless(true)
             .build()
@@ -84,20 +145,24 @@ impl BrowserIntegration {
             .map_err(|e| anyhow::anyhow!("Failed to open tab: {}", e))?;
 
         // Navigate
+        tracing::info!("Navigating browser tab to {}", url);
         tab.navigate_to(url_str)
             .map_err(|e| anyhow::anyhow!("Failed to navigate: {}", e))?;
 
+        tracing::info!("Waiting for navigation to complete...");
         tab.wait_until_navigated()
             .map_err(|e| anyhow::anyhow!("Failed to wait for navigation: {}", e))?;
 
         // Use selector if provided
         if let Some(sel) = selector {
+            tracing::info!("Waiting for selector: {}", sel);
             match tab.wait_for_element(sel) {
                 Ok(_) => {}
                 Err(e) => tracing::warn!("Selector {} not found: {}", sel, e),
             }
         }
 
+        tracing::info!("Extracting page content");
         let content = tab
             .get_content()
             .map_err(|e| anyhow::anyhow!("Failed to get content: {}", e))?;
