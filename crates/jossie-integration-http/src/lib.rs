@@ -103,16 +103,35 @@ impl HttpIntegration {
         timeout_ms: Option<u64>,
         follow_redirects: bool,
     ) -> anyhow::Result<String> {
-        let url = Url::parse(url_str).map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
+        tracing::info!("Starting HTTP request: {} {}", method, url_str);
+        tracing::debug!(
+            "Request params - timeout_ms: {:?}, follow_redirects: {}, has_headers: {}, has_query: {}",
+            timeout_ms,
+            follow_redirects,
+            headers.is_some(),
+            query.is_some()
+        );
+
+        let url = Url::parse(url_str).map_err(|e| {
+            tracing::error!("Failed to parse URL '{}': {}", url_str, e);
+            anyhow::anyhow!("Invalid URL: {}", e)
+        })?;
 
         if !is_globally_reachable(&url) {
+            tracing::warn!(
+                "SSRF protection: Blocked request to non-globally-reachable URL: {}",
+                url
+            );
             return Err(anyhow::anyhow!(
                 "Blocked: URL targets a local or private network address."
             ));
         }
+        tracing::debug!("URL passed SSRF validation: {}", url);
 
-        let method = reqwest::Method::from_bytes(method.as_bytes())
-            .map_err(|_| anyhow::anyhow!("Invalid HTTP method"))?;
+        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| {
+            tracing::error!("Invalid HTTP method: {}", method);
+            anyhow::anyhow!("Invalid HTTP method")
+        })?;
 
         // 1. Prepare Client
         // We handle redirects manually for security if needed, but the requirements say:
@@ -169,11 +188,15 @@ impl HttpIntegration {
         let mut current_multipart: Option<reqwest::multipart::Form> = None;
 
         match body {
-            BodyContent::None => {}
+            BodyContent::None => {
+                tracing::debug!("Request has no body");
+            }
             BodyContent::Text(s) => {
+                tracing::debug!("Request body type: text, size: {} bytes", s.len());
                 current_body_bytes = Some(s.into_bytes());
             }
             BodyContent::Json(bytes) => {
+                tracing::debug!("Request body type: JSON, size: {} bytes", bytes.len());
                 // Auto-set content type if missing
                 if !final_headers.contains_key(reqwest::header::CONTENT_TYPE) {
                     final_headers.insert(
@@ -184,6 +207,7 @@ impl HttpIntegration {
                 current_body_bytes = Some(bytes);
             }
             BodyContent::Multipart(form) => {
+                tracing::debug!("Request body type: multipart/form-data");
                 // reqwest handles content-type boundary
                 // If caller set content-type, we should probably remove it so reqwest sets it correctly
                 final_headers.remove(reqwest::header::CONTENT_TYPE);
@@ -220,10 +244,16 @@ impl HttpIntegration {
                     if !allowed {
                         // Strip or Block?
                         // "Any attempt to send secrets to non-allowlisted domains must be blocked"
+                        tracing::warn!(
+                            "Blocked: Authentication header present but domain '{}' is not in allowed_domains list",
+                            host
+                        );
                         return Err(anyhow::anyhow!(
                             "Authentication header present but domain '{}' is not in allowed_domains list.",
                             host
                         ));
+                    } else {
+                        tracing::debug!("Domain '{}' is in allowed_domains list for auth", host);
                     }
                 }
             }
@@ -242,8 +272,22 @@ impl HttpIntegration {
                 req_builder = req_builder.multipart(form);
             }
 
-            let resp = req_builder.send().await?;
+            let resp = req_builder.send().await.map_err(|e| {
+                tracing::error!(
+                    "HTTP request failed for {} {}: {}",
+                    current_method,
+                    current_url,
+                    e
+                );
+                e
+            })?;
             let status = resp.status();
+            tracing::info!(
+                "Received response: {} from {} {}",
+                status,
+                current_method,
+                current_url
+            );
 
             // Check if redirect
             if status.is_redirection() && follow_redirects && attempts < max_attempts {
@@ -272,15 +316,27 @@ impl HttpIntegration {
                             );
                             final_headers.remove(reqwest::header::AUTHORIZATION);
                             final_headers.remove(reqwest::header::COOKIE);
+                        } else {
+                            tracing::debug!(
+                                "Redirecting same-origin from {} to {}. Preserving headers.",
+                                current_url,
+                                next_url
+                            );
                         }
 
                         current_url = next_url;
                         attempts += 1;
                         // Redirects usually change to GET unless 307/308
                         if status != 307 && status != 308 {
+                            tracing::debug!(
+                                "Redirect {} changes method to GET, dropping body",
+                                status
+                            );
                             current_method = reqwest::Method::GET;
                             current_body_bytes = None;
                             current_multipart = None; // Body is dropped on redirect to GET
+                        } else {
+                            tracing::debug!("Redirect {} preserves method and body", status);
                         }
                         continue;
                     }
@@ -293,12 +349,27 @@ impl HttpIntegration {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
                 .collect();
+            tracing::debug!("Response headers count: {}", res_headers.len());
 
-            let body_bytes = resp.bytes().await?;
+            let body_bytes = resp.bytes().await.map_err(|e| {
+                tracing::error!("Failed to read response body: {}", e);
+                e
+            })?;
+            let body_size = body_bytes.len();
             let body_text = String::from_utf8_lossy(&body_bytes).to_string();
+            tracing::info!(
+                "Response body size: {} bytes, is_utf8: {}",
+                body_size,
+                std::str::from_utf8(&body_bytes).is_ok()
+            );
 
             // Try parse JSON
             let body_json: Option<Value> = serde_json::from_str(&body_text).ok();
+            if body_json.is_some() {
+                tracing::debug!("Response body is valid JSON");
+            } else {
+                tracing::debug!("Response body is not JSON");
+            }
 
             // Build result
             #[derive(Serialize)]
@@ -316,6 +387,11 @@ impl HttpIntegration {
                 body_json,
             };
 
+            tracing::info!(
+                "HTTP request completed successfully: {} {}",
+                method,
+                url_str
+            );
             return Ok(serde_json::to_string_pretty(&output)?);
         }
     }
