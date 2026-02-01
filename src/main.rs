@@ -108,7 +108,11 @@ async fn main() -> Result<()> {
 
     // Start Telegram bot if configured
     if !config.telegram.bot_token.is_empty() {
-        let bot = jossie_telegram::TelegramBot::new(&config.telegram.bot_token, state.clone());
+        let bot = jossie_telegram::TelegramBot::new(
+            &config.telegram.bot_token,
+            state.clone(),
+            config.telegram.allowed_user_id,
+        );
         tokio::spawn(async move {
             if let Err(e) = bot.run().await {
                 tracing::error!("Telegram bot error: {e}");

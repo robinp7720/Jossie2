@@ -100,6 +100,8 @@ pub struct DatabaseConfig {
 pub struct TelegramConfig {
     #[serde(default)]
     pub bot_token: String,
+    #[serde(default)]
+    pub allowed_user_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
