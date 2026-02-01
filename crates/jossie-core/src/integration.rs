@@ -94,18 +94,27 @@ impl IntegrationRegistry {
             .await
         {
             Ok(content) => {
-                // Log warning for large outputs to help debug token usage
-                if content.len() > 10_000 {
+                let original_len = content.len();
+                let mut final_content = content;
+                const MAX_OUTPUT_SIZE: usize = 100_000;
+
+                if original_len > MAX_OUTPUT_SIZE {
                     tracing::warn!(
-                        "⚠️ Tool '{}' returned large output: {} chars. Preview: {:.100}...",
+                        "⚠️ Tool '{}' returned large output: {} chars. Truncating to {} chars.",
                         call.name,
-                        content.len(),
-                        content
+                        original_len,
+                        MAX_OUTPUT_SIZE
                     );
+                    final_content.truncate(MAX_OUTPUT_SIZE);
+                    final_content.push_str(&format!(
+                        "\n... [Output truncated. Original size: {} chars]",
+                        original_len
+                    ));
                 }
+
                 ToolResult {
                     tool_call_id: call.id.clone(),
-                    content,
+                    content: final_content,
                     is_error: false,
                 }
             }
@@ -221,5 +230,37 @@ mod tests {
         let result = reg.execute(&call).await;
         assert!(!result.is_error);
         assert!(result.content.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_output_truncation() {
+        let mut reg = IntegrationRegistry::new();
+
+        struct LargeIntegration;
+        #[async_trait::async_trait]
+        impl Integration for LargeIntegration {
+            fn name(&self) -> &str { "large" }
+            fn tools(&self) -> Vec<ToolDefinition> {
+                vec![ToolDefinition {
+                    name: "large_tool".to_string(),
+                    description: "desc".to_string(),
+                    parameters: serde_json::json!({}),
+                }]
+            }
+            async fn execute(&self, _name: &str, _args: &str) -> anyhow::Result<String> {
+                Ok("a".repeat(150_000))
+            }
+        }
+
+        reg.register(Arc::new(LargeIntegration));
+        let call = ToolCall {
+            id: "call_1".to_string(),
+            name: "large_tool".to_string(),
+            arguments: "{}".to_string(),
+        };
+
+        let result = reg.execute(&call).await;
+        assert_eq!(result.content.len(), 100_000 + "\n... [Output truncated. Original size: 150000 chars]".len());
+        assert!(result.content.contains("Original size: 150000 chars"));
     }
 }
