@@ -100,6 +100,18 @@ async fn process_event_inner(
     chat: &jossie_db::TelegramChatLink,
     event: &IntegrationEvent,
 ) -> anyhow::Result<()> {
+    // NEW: Extract entities from event and enrich with graph context
+    let entities = extract_event_entities(event);
+    for entity in &entities {
+        if let Ok(nodes) = state.db.graph_find_nodes(entity).await {
+            if !nodes.is_empty() {
+                tracing::info!("Enriching event with graph context for: {}", entity);
+                // Graph context will be automatically injected in generate_event_message
+                // via the normal context building mechanism
+            }
+        }
+    }
+
     let message = match jossie_server::agent::generate_event_message(
         state,
         chat.conversation_id,
@@ -144,6 +156,58 @@ async fn process_event_inner(
     state.db.save_message(&assistant_msg).await?;
     state.db.mark_integration_event_processed(&event.id).await?;
     Ok(())
+}
+
+/// Extract entity names from integration events
+fn extract_event_entities(event: &IntegrationEvent) -> Vec<String> {
+    let mut entities = Vec::new();
+
+    match event.event_type.as_str() {
+        "new_email" => {
+            // Extract sender and recipients from email payload
+            if let Some(from) = event.payload.get("from").and_then(|v| v.as_str()) {
+                // Extract name from email address or use full address
+                if let Some(name_part) = from.split('<').next() {
+                    let cleaned = name_part.trim().trim_matches('"');
+                    if !cleaned.is_empty() && cleaned != from {
+                        entities.push(cleaned.to_string());
+                    }
+                }
+                entities.push(from.to_string());
+            }
+
+            if let Some(to) = event.payload.get("to").and_then(|v| v.as_array()) {
+                for recipient in to {
+                    if let Some(addr) = recipient.as_str() {
+                        entities.push(addr.to_string());
+                    }
+                }
+            }
+        }
+        "calendar_event" => {
+            // Extract attendees from calendar event
+            if let Some(attendees) = event.payload.get("attendees").and_then(|v| v.as_array()) {
+                for attendee in attendees {
+                    if let Some(email) = attendee.get("email").and_then(|v| v.as_str()) {
+                        entities.push(email.to_string());
+                    }
+                    if let Some(name) = attendee.get("displayName").and_then(|v| v.as_str()) {
+                        entities.push(name.to_string());
+                    }
+                }
+            }
+
+            // Extract location if it's a company/place
+            if let Some(location) = event.payload.get("location").and_then(|v| v.as_str()) {
+                if !location.is_empty() {
+                    entities.push(location.to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+
+    entities
 }
 
 async fn process_scheduled_tasks(state: &Arc<AppState>) -> anyhow::Result<()> {

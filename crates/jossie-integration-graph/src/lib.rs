@@ -59,12 +59,12 @@ impl GraphIntegration {
                 "Entity: {} [{}] (ID: {})\n",
                 node.label, node.node_type, node.id
             ));
-            
+
             // Print properties if not empty object
             if let Some(obj) = node.properties.as_object() {
-                 if !obj.is_empty() {
-                     output.push_str(&format!("  Properties: {:?}\n", obj));
-                 }
+                if !obj.is_empty() {
+                    output.push_str(&format!("  Properties: {:?}\n", obj));
+                }
             }
 
             let neighbors = self.db.graph_get_neighbors(&node.id).await?;
@@ -73,7 +73,11 @@ impl GraphIntegration {
             } else {
                 output.push_str("  Relations:\n");
                 for n in neighbors {
-                    let arrow = if n.direction == "outgoing" { "-->" } else { "<--" };
+                    let arrow = if n.direction == "outgoing" {
+                        "-->"
+                    } else {
+                        "<--"
+                    };
                     output.push_str(&format!(
                         "    {} [{}] {} ({})\n",
                         arrow, n.relation, n.node.label, n.node.node_type
@@ -81,6 +85,120 @@ impl GraphIntegration {
                 }
             }
             output.push('\n');
+        }
+
+        Ok(output)
+    }
+
+    async fn list_by_type(&self, entity_type: &str) -> anyhow::Result<String> {
+        let nodes = self.db.graph_list_nodes_by_type(entity_type).await?;
+        if nodes.is_empty() {
+            return Ok(format!("No {} entities found in the graph.", entity_type));
+        }
+
+        let mut output = format!("Found {} {} entities:\n\n", nodes.len(), entity_type);
+        for node in nodes {
+            output.push_str(&format!("- {} (ID: {})\n", node.label, node.id));
+
+            // Show connection count
+            if let Ok(neighbors) = self.db.graph_get_neighbors(&node.id).await {
+                if !neighbors.is_empty() {
+                    output.push_str(&format!("  {} connections\n", neighbors.len()));
+                }
+            }
+        }
+
+        Ok(output)
+    }
+
+    async fn explore_connections(
+        &self,
+        entities: Vec<String>,
+        max_depth: usize,
+    ) -> anyhow::Result<String> {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        let max_depth = max_depth.max(1).min(3); // Limit depth to prevent explosion
+
+        // Find all entity nodes first
+        let mut entity_nodes = Vec::new();
+        for entity_name in &entities {
+            let nodes = self.db.graph_find_nodes(entity_name).await?;
+            if let Some(node) = nodes.into_iter().next() {
+                entity_nodes.push(node);
+            }
+        }
+
+        if entity_nodes.len() < 2 {
+            return Ok(format!(
+                "Need at least 2 entities to explore connections. Found: {}",
+                entity_nodes
+                    .iter()
+                    .map(|n| n.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+
+        let mut output = format!(
+            "Exploring connections between: {}\n\n",
+            entity_nodes
+                .iter()
+                .map(|n| n.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+
+        // BFS to find paths between entities
+        let start_id = &entity_nodes[0].id;
+        let target_ids: HashSet<String> = entity_nodes[1..].iter().map(|n| n.id.clone()).collect();
+
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        let mut paths: HashMap<String, Vec<String>> = HashMap::new();
+
+        queue.push_back((start_id.clone(), 0, vec![entity_nodes[0].label.clone()]));
+        visited.insert(start_id.clone());
+
+        while let Some((current_id, depth, path)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+
+            if let Ok(neighbors) = self.db.graph_get_neighbors(&current_id).await {
+                for neighbor in neighbors {
+                    let neighbor_id = neighbor.node.id.clone();
+
+                    // If we found a target, record the path
+                    if target_ids.contains(&neighbor_id) {
+                        let mut full_path = path.clone();
+                        full_path.push(format!("--[{}]-->", neighbor.relation));
+                        full_path.push(neighbor.node.label.clone());
+                        paths.insert(neighbor_id.clone(), full_path);
+                    }
+
+                    if !visited.contains(&neighbor_id) {
+                        visited.insert(neighbor_id.clone());
+                        let mut new_path = path.clone();
+                        new_path.push(format!("--[{}]-->", neighbor.relation));
+                        new_path.push(neighbor.node.label.clone());
+                        queue.push_back((neighbor_id, depth + 1, new_path));
+                    }
+                }
+            }
+        }
+
+        if paths.is_empty() {
+            output.push_str("No connections found within the specified depth.\n");
+        } else {
+            output.push_str(&format!("Found {} connection path(s):\n\n", paths.len()));
+            for (target_id, path) in paths {
+                if let Some(target_node) = entity_nodes.iter().find(|n| n.id == target_id) {
+                    output.push_str(&format!("→ {}:\n  ", target_node.label));
+                    output.push_str(&path.join(" "));
+                    output.push_str("\n\n");
+                }
+            }
         }
 
         Ok(output)
@@ -93,11 +211,18 @@ fn normalize_attributes(value: serde_json::Value) -> serde_json::Value {
             let mut map = serde_json::Map::new();
             for item in items {
                 if let serde_json::Value::Object(obj) = item {
-                    let key = obj.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let key = obj
+                        .get("key")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     if key.is_empty() {
                         continue;
                     }
-                    let value = obj.get("value").cloned().unwrap_or_else(|| serde_json::Value::String(String::new()));
+                    let value = obj
+                        .get("value")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::Value::String(String::new()));
                     map.insert(key, value);
                 }
             }
@@ -174,13 +299,46 @@ impl Integration for GraphIntegration {
             },
             ToolDefinition {
                 name: "graph_search".to_string(),
-                description: "Search the Knowledge Graph for entities and their relationships.".to_string(),
+                description: "Search the Knowledge Graph for entities and their relationships. Use this proactively to understand context before answering questions.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "Name or partial name of the entity to look up"}
                     },
                     "required": ["query"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "graph_list_by_type".to_string(),
+                description: "List all entities of a specific type (e.g., 'Person', 'Project', 'Company'). Great for getting an overview of all entities in a category.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "entity_type": {"type": "string", "description": "The type/category of entities to list (e.g., 'Person', 'Project', 'Company', 'Event')"}
+                    },
+                    "required": ["entity_type"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "graph_explore_connections".to_string(),
+                description: "Discover how multiple entities are connected through relationships. Finds paths between entities to understand complex connections.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "entities": {
+                            "type": "array",
+                            "description": "List of entity names to explore connections between (minimum 2)",
+                            "items": {"type": "string"}
+                        },
+                        "max_depth": {
+                            "type": "integer",
+                            "description": "Maximum relationship hops to traverse (1-3, default 2)",
+                            "default": 2
+                        }
+                    },
+                    "required": ["entities"],
                     "additionalProperties": false
                 }),
             },
@@ -202,7 +360,8 @@ impl Integration for GraphIntegration {
                 }
                 let args: Args = serde_json::from_str(arguments)?;
                 let attributes = normalize_attributes(args.attributes);
-                self.add_node(&args.id, &args.label, &args.node_type, attributes).await
+                self.add_node(&args.id, &args.label, &args.node_type, attributes)
+                    .await
             }
             "graph_add_relation" => {
                 #[derive(Deserialize)]
@@ -215,16 +374,49 @@ impl Integration for GraphIntegration {
                     #[serde(default, alias = "properties")]
                     attributes: serde_json::Value,
                 }
-                fn default_weight() -> f64 { 1.0 }
+                fn default_weight() -> f64 {
+                    1.0
+                }
                 let args: Args = serde_json::from_str(arguments)?;
                 let attributes = normalize_attributes(args.attributes);
-                self.add_edge(&args.source_id, &args.target_id, &args.relation, args.weight, attributes).await
+                self.add_edge(
+                    &args.source_id,
+                    &args.target_id,
+                    &args.relation,
+                    args.weight,
+                    attributes,
+                )
+                .await
             }
             "graph_search" => {
                 #[derive(Deserialize)]
-                struct Args { query: String }
+                struct Args {
+                    query: String,
+                }
                 let args: Args = serde_json::from_str(arguments)?;
                 self.query_graph(&args.query).await
+            }
+            "graph_list_by_type" => {
+                #[derive(Deserialize)]
+                struct Args {
+                    entity_type: String,
+                }
+                let args: Args = serde_json::from_str(arguments)?;
+                self.list_by_type(&args.entity_type).await
+            }
+            "graph_explore_connections" => {
+                #[derive(Deserialize)]
+                struct Args {
+                    entities: Vec<String>,
+                    #[serde(default = "default_max_depth")]
+                    max_depth: usize,
+                }
+                fn default_max_depth() -> usize {
+                    2
+                }
+                let args: Args = serde_json::from_str(arguments)?;
+                self.explore_connections(args.entities, args.max_depth)
+                    .await
             }
             _ => anyhow::bail!("Unknown graph tool: {tool_name}"),
         }

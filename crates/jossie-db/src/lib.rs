@@ -158,6 +158,54 @@ impl Database {
         }))
     }
 
+    pub async fn memory_list_keys(&self) -> anyhow::Result<Vec<MemoryKeyInfo>> {
+        let rows = sqlx::query_as::<_, MemoryKeyRow>(
+            "SELECT m.key, mm.created_at, mm.updated_at 
+             FROM memory m 
+             LEFT JOIN memory_metadata mm ON m.key = mm.key 
+             ORDER BY mm.updated_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| MemoryKeyInfo {
+                key: r.key,
+                created_at: r.created_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
+                updated_at: r.updated_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
+            })
+            .collect())
+    }
+
+    pub async fn memory_list_all(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemoryEntryWithMetadata>> {
+        let limit = limit.max(1).min(500);
+        let rows = sqlx::query_as::<_, MemoryEntryMetadataRow>(
+            "SELECT m.key, m.content, m.tags, mm.created_at, mm.updated_at 
+             FROM memory m 
+             LEFT JOIN memory_metadata mm ON m.key = mm.key 
+             ORDER BY mm.updated_at DESC
+             LIMIT ?",
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| MemoryEntryWithMetadata {
+                key: r.key,
+                content: r.content,
+                tags: r.tags,
+                created_at: r.created_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
+                updated_at: r.updated_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
+            })
+            .collect())
+    }
+
     // Telegram
     pub async fn get_telegram_conversation(&self, chat_id: i64) -> anyhow::Result<Option<Uuid>> {
         let row = sqlx::query_as::<_, TelegramChatRow>(
@@ -578,6 +626,78 @@ impl Database {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    /// Get all nodes of a specific type (e.g., "Person", "Project", "Company")
+    pub async fn graph_list_nodes_by_type(
+        &self,
+        node_type: &str,
+    ) -> anyhow::Result<Vec<GraphNode>> {
+        let rows = sqlx::query_as::<_, GraphNodeRow>(
+            "SELECT * FROM graph_nodes WHERE type = ? ORDER BY updated_at DESC LIMIT 50",
+        )
+        .bind(node_type)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    /// Get the most recently updated nodes (for fresh context)
+    pub async fn graph_recent_nodes(&self, limit: usize) -> anyhow::Result<Vec<GraphNode>> {
+        let limit = limit.max(1).min(100);
+        let rows = sqlx::query_as::<_, GraphNodeRow>(
+            "SELECT * FROM graph_nodes ORDER BY updated_at DESC LIMIT ?",
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    /// Get nodes with the most connections (important/central entities)
+    pub async fn graph_central_nodes(&self, limit: usize) -> anyhow::Result<Vec<(GraphNode, i64)>> {
+        let limit = limit.max(1).min(50);
+
+        #[derive(sqlx::FromRow)]
+        struct CentralNodeRow {
+            id: String,
+            label: String,
+            #[sqlx(rename = "type")]
+            node_type: String,
+            properties: String,
+            #[allow(dead_code)]
+            created_at: String,
+            #[allow(dead_code)]
+            updated_at: String,
+            connection_count: i64,
+        }
+
+        let rows = sqlx::query_as::<_, CentralNodeRow>(
+            r#"
+            SELECT n.*, COUNT(e.id) as connection_count
+            FROM graph_nodes n
+            LEFT JOIN graph_edges e ON e.source_id = n.id OR e.target_id = n.id
+            GROUP BY n.id
+            ORDER BY connection_count DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let node = GraphNode {
+                    id: r.id,
+                    label: r.label,
+                    node_type: r.node_type,
+                    properties: serde_json::from_str(&r.properties).unwrap_or_default(),
+                };
+                (node, r.connection_count)
+            })
+            .collect())
+    }
+
     // Scheduled Tasks
 
     pub async fn create_scheduled_task(
@@ -964,6 +1084,38 @@ pub struct MemoryEntry {
     pub tags: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemoryKeyInfo {
+    pub key: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemoryEntryWithMetadata {
+    pub key: String,
+    pub content: String,
+    pub tags: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct MemoryKeyRow {
+    key: String,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct MemoryEntryMetadataRow {
+    key: String,
+    content: String,
+    tags: String,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
 #[derive(sqlx::FromRow)]
 struct MemoryRow {
     key: String,
@@ -1127,6 +1279,23 @@ mod tests {
         let results = db.memory_search("updated").await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content, "updated content");
+    }
+
+    #[tokio::test]
+    async fn memory_list() {
+        let db = test_db().await;
+        db.memory_save("k1", "c1", "t1").await.unwrap();
+        db.memory_save("k2", "c2", "t2").await.unwrap();
+
+        let keys = db.memory_list_keys().await.unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.iter().any(|k| k.key == "k1"));
+        assert!(keys.iter().any(|k| k.key == "k2"));
+
+        let all = db.memory_list_all(10).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|e| e.key == "k1" && e.content == "c1"));
+        assert!(all.iter().any(|e| e.key == "k2" && e.content == "c2"));
     }
 
     #[tokio::test]

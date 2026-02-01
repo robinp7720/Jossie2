@@ -2,6 +2,7 @@ use crate::state::AppState;
 use chrono::Utc;
 use jossie_core::types::{Message, Role};
 use jossie_db::IntegrationEvent;
+use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -163,7 +164,17 @@ async fn run_agent_loop_inner(state: &AppState, conv_id: Uuid) -> anyhow::Result
                 }
             }
 
+            tracing::info!(
+                "Executing tool: {} with args: {}",
+                call.name,
+                call.arguments
+            );
             let result = state.registry.execute(&call_with_context).await;
+            tracing::info!(
+                "Tool {} finished. Result preview: {:.200}...",
+                call.name,
+                result.content
+            );
             let tool_msg = Message {
                 id: Uuid::new_v4(),
                 conversation_id: conv_id,
@@ -347,7 +358,11 @@ async fn build_graph_context(state: &AppState, user_message: &str) -> String {
         return String::new();
     }
 
-    let candidates = extract_candidate_entities(user_message);
+    let mut candidates = extract_candidate_entities(user_message);
+
+    // NEW: Enrich candidates with context-aware searches
+    candidates = enrich_candidates_with_context(state, user_message, candidates).await;
+
     if candidates.is_empty() {
         return String::new();
     }
@@ -408,13 +423,80 @@ async fn build_graph_context(state: &AppState, user_message: &str) -> String {
         }
     }
 
-    lines.join("\n")
+    let mut context = lines.join("\n");
+
+    // NEW: Add contextual hints to encourage proactive searching
+    let lower_msg = user_message.to_lowercase();
+
+    if user_message.contains('?') && nodes.len() < 3 {
+        context.push_str("\n\n**Hint**: This is a question. Consider using graph_search to find more relevant context before answering.");
+    }
+
+    if (lower_msg.contains("work") || lower_msg.contains("project"))
+        && !nodes.iter().any(|n| n.node_type == "Project")
+    {
+        context.push_str("\n\n**Hint**: Work/project mentioned. Use graph_list_by_type to find relevant Project entities.");
+    }
+
+    if (lower_msg.contains("who") || lower_msg.contains("people"))
+        && !nodes.iter().any(|n| n.node_type == "Person")
+    {
+        context.push_str("\n\n**Hint**: Question about people. Use graph_list_by_type('Person') to see all known individuals.");
+    }
+
+    context
+}
+
+/// Enrich entity candidates with context-aware graph searches
+async fn enrich_candidates_with_context(
+    state: &AppState,
+    message: &str,
+    mut candidates: Vec<String>,
+) -> Vec<String> {
+    let lower = message.to_lowercase();
+
+    // Proactively search for entities when certain keywords appear
+    if lower.contains("work") || lower.contains("project") || lower.contains("job") {
+        if let Ok(nodes) = state.db.graph_list_nodes_by_type("Project").await {
+            candidates.extend(nodes.into_iter().map(|n| n.label).take(3));
+        }
+    }
+
+    if lower.contains("meeting")
+        || lower.contains("talk")
+        || lower.contains("discuss")
+        || lower.contains("call")
+    {
+        if let Ok(nodes) = state.db.graph_list_nodes_by_type("Person").await {
+            candidates.extend(nodes.into_iter().map(|n| n.label).take(5));
+        }
+    }
+
+    if lower.contains("company") || lower.contains("organization") {
+        if let Ok(nodes) = state.db.graph_list_nodes_by_type("Company").await {
+            candidates.extend(nodes.into_iter().map(|n| n.label).take(3));
+        }
+    }
+
+    // Add frequently mentioned entities from memory (if stored)
+    if let Ok(Some(freq_entities)) = state.db.get_memory("frequent_entities").await {
+        if let Ok(entities) = serde_json::from_str::<Vec<String>>(&freq_entities.content) {
+            candidates.extend(entities.into_iter().take(3));
+        }
+    }
+
+    // Deduplicate while preserving order
+    let mut seen = HashSet::new();
+    candidates.retain(|c| seen.insert(c.to_lowercase()));
+
+    candidates
 }
 
 fn extract_candidate_entities(message: &str) -> Vec<String> {
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
 
+    // Extract quoted phrases (existing logic)
     for quoted in extract_quoted_phrases(message) {
         let key = quoted.to_lowercase();
         if seen.insert(key) {
@@ -422,6 +504,74 @@ fn extract_candidate_entities(message: &str) -> Vec<String> {
         }
     }
 
+    // NEW: Extract email addresses as entity candidates
+    if let Ok(email_regex) = Regex::new(r"\b([a-zA-Z0-9._-]+)@([a-zA-Z0-9._-]+\.[a-zA-Z]+)\b") {
+        for cap in email_regex.captures_iter(message) {
+            if let Some(email) = cap.get(0) {
+                let email_str = email.as_str().to_string();
+                let key = email_str.to_lowercase();
+                if seen.insert(key) {
+                    candidates.push(email_str);
+                }
+
+                // Also try to extract name from email (e.g., john.doe -> John Doe)
+                if let Some(username) = cap.get(1) {
+                    let name_parts: Vec<&str> = username.as_str().split(&['.', '_', '-']).collect();
+                    if name_parts.len() >= 2 {
+                        let formatted_name: String = name_parts
+                            .iter()
+                            .map(|part| {
+                                let mut chars = part.chars();
+                                match chars.next() {
+                                    None => String::new(),
+                                    Some(first) => {
+                                        first.to_uppercase().collect::<String>()
+                                            + &chars.as_str().to_lowercase()
+                                    }
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+
+                        let key = formatted_name.to_lowercase();
+                        if seen.insert(key) {
+                            candidates.push(formatted_name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // NEW: Extract @mentions (social media style)
+    if let Ok(mention_regex) = Regex::new(r"@([A-Za-z0-9_]+)") {
+        for cap in mention_regex.captures_iter(message) {
+            if let Some(mention) = cap.get(1) {
+                let mention_str = mention.as_str().to_string();
+                let key = mention_str.to_lowercase();
+                if seen.insert(key) {
+                    candidates.push(mention_str);
+                }
+            }
+        }
+    }
+
+    // NEW: Extract role-based names (e.g., "my boss Alice", "colleague Bob")
+    if let Ok(role_regex) = Regex::new(
+        r"(?i)\b(?:my|our|the)\s+(boss|manager|colleague|friend|partner|coworker|supervisor|assistant|teammate)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b",
+    ) {
+        for cap in role_regex.captures_iter(message) {
+            if let Some(name) = cap.get(2) {
+                let name_str = name.as_str().to_string();
+                let key = name_str.to_lowercase();
+                if seen.insert(key) {
+                    candidates.push(name_str);
+                }
+            }
+        }
+    }
+
+    // Existing: Extract capitalized token sequences
     let stopwords: HashSet<&'static str> = [
         "the", "a", "an", "and", "or", "but", "to", "from", "in", "on", "at", "for", "with", "of",
         "my", "your", "our", "his", "her", "their", "it", "this", "that", "i", "we", "you", "he",
