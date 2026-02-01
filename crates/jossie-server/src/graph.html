@@ -323,7 +323,7 @@
             reloadBtn.disabled = true;
             setStatus('Loading graph...', false);
             try {
-                const res = await fetch('/api/graph?limit=500', {
+                const res = await fetch('/api/graph?limit=99999', {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
                 if (!res.ok) throw new Error(`Request failed (${res.status})`);
