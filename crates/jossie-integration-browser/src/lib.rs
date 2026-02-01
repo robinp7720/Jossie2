@@ -13,14 +13,64 @@ impl BrowserIntegration {
     async fn browser_read_page(
         &self,
         url_str: &str,
-        _selector: Option<&str>,
+        selector: Option<&str>,
     ) -> anyhow::Result<String> {
         let url = Url::parse(url_str)?;
         let domain = url.domain().unwrap_or("unknown");
 
         tracing::info!("Browsing to: {}", url);
 
-        // Configure browser launch
+        // Hybrid approach: Check headers first.
+        // If it's a simple resource (text, markdown, json, etc.), fetching it directly is faster and more reliable.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .build()?;
+
+        // Try a HEAD request first to check content type
+        let head_resp = client.head(url.clone()).send().await;
+
+        let should_use_browser = match head_resp {
+            Ok(resp) => {
+                let content_type = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|h| h.to_str().ok())
+                    .unwrap_or("")
+                    .to_lowercase();
+
+                tracing::info!("Content-Type for {}: {}", url, content_type);
+
+                // If it's explicitly HTML, use browser to handle JS.
+                // If it's something else (or unknown), but NOT html, try simple fetch.
+                content_type.contains("html")
+            }
+            Err(_) => {
+                // If HEAD fails (some servers block it), assume we might need browser
+                // OR just try GET. Let's default to browser as it's the robust path for "web browsing".
+                true
+            }
+        };
+
+        if !should_use_browser {
+            tracing::info!("Fetching {} with simple HTTP client", url);
+            let resp = client.get(url.clone()).send().await?;
+            if resp.status().is_success() {
+                let text = resp.text().await?;
+                return Ok(format!(
+                    "### Content from {} (Direct Fetch)\n\n{}",
+                    domain, text
+                ));
+            }
+            // If simple fetch failed (e.g. 403 blocking non-browsers, though we set UA),
+            // fall back to browser below.
+            tracing::warn!(
+                "Simple fetch failed with status {}, falling back to browser",
+                resp.status()
+            );
+        }
+
+        // Headless Chrome Path
         let options = LaunchOptions::default_builder()
             .headless(true)
             .build()
@@ -40,18 +90,25 @@ impl BrowserIntegration {
         tab.wait_until_navigated()
             .map_err(|e| anyhow::anyhow!("Failed to wait for navigation: {}", e))?;
 
-        // Wait a bit for dynamic content? Alternatively wait for selector if provided.
-        // For now, let's just grab the content after load.
+        // Use selector if provided
+        if let Some(sel) = selector {
+            match tab.wait_for_element(sel) {
+                Ok(_) => {}
+                Err(e) => tracing::warn!("Selector {} not found: {}", sel, e),
+            }
+        }
 
         let content = tab
             .get_content()
             .map_err(|e| anyhow::anyhow!("Failed to get content: {}", e))?;
 
         // Convert to markdown
-        // html2text::from_read(content.as_bytes(), 80) is synchronous/blocking, but it's fast enough for text.
         let markdown = html2text::from_read(content.as_bytes(), 80);
 
-        Ok(format!("### Content from {}\n\n{}", domain, markdown))
+        Ok(format!(
+            "### Content from {} (Browser Rendered)\n\n{}",
+            domain, markdown
+        ))
     }
 
     async fn browser_search(&self, query: &str) -> anyhow::Result<String> {
