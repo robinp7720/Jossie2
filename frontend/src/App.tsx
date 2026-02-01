@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent } from 'react'
+import ReactMarkdown from 'react-markdown'
 import {
   addAccount,
   buildWebSocketUrl,
@@ -118,6 +119,7 @@ const App = () => {
   const [onboarding, setOnboarding] = useState<OnboardingStatus[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
   const [activity, setActivity] = useState<ActivityItem[]>([])
+  const chatEndRef = useRef<HTMLDivElement>(null)
   const [accountForm, setAccountForm] = useState({
     integration: 'email',
     name: '',
@@ -135,6 +137,10 @@ const App = () => {
   useEffect(() => {
     persistConfig(apiConfig)
   }, [apiConfig])
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
 
   const canConnect = useMemo(() => Boolean(apiConfig.baseUrl && apiConfig.token), [apiConfig])
 
@@ -542,9 +548,10 @@ const App = () => {
                     className={`message ${message.role} ${message.pending ? 'pending' : ''}`}
                   >
                     <div className="message-role">{message.role}</div>
-                    <div className="message-content">{message.content}</div>
+                    <ReactMarkdown className="message-content markdown">{message.content}</ReactMarkdown>
                   </div>
                 ))}
+                <div ref={chatEndRef} />
               </div>
 
               <div className="composer">
