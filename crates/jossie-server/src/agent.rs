@@ -10,6 +10,13 @@ use uuid::Uuid;
 async fn build_system_prompt(state: &AppState, user_message: Option<&str>) -> String {
     let mut prompt = state.system_prompt.clone();
 
+    // Add current time context
+    let now = chrono::Local::now();
+    prompt.push_str(&format!(
+        "\n\nCurrent Date and Time: {}",
+        now.format("%A, %B %d, %Y %H:%M:%S")
+    ));
+
     // Dynamically append agent and user profiles from memory
     if let Ok(Some(entry)) = state.db.get_memory("agent_profile").await {
         prompt.push_str("\n\n## Agent Description (Jossie)\n");
