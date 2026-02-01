@@ -36,7 +36,25 @@ Jossie is an LLM-powered agent with:
 ### 🤖 Autonomous Features
 - **Proactive Behavior**: Checks emails, reads important ones, saves info—all without asking permission
 - **Scheduled Tasks**: Can schedule herself to check things periodically or run one-time reminders
+### Combined Tool Usage
 - **Combined Tool Usage**: Intelligently chains tools together (search emails → read → save to memory → create knowledge graph → schedule follow-up)
+
+## 🆚 Jossie vs. OpenClaw
+
+While **OpenClaw** is a popular framework for general agent tasks, **Jossie** is specialized as a personal, long-term companion.
+
+| Feature | Jossie | OpenClaw |
+|:---|:---|:---|
+| **Primary Goal** | **Long-term Companionship** & Proactive Assistance | **Task Execution** & One-off automation |
+| **Memory** | **Structured Knowledge Graph** + FTS5 (Remembers relationships & context) | **Vector-only / Stateless** (Often loses context between sessions) |
+| **Architecture** | **Rust (Type-safe, High Performance)** | **Python (Dynamic, Higher Latency)** |
+| **Autonomy** | **Proactive**: Monitors events, schedules own tasks | **Reactive**: Waits for user prompts |
+| **System Access** | **Restricted / Safe**: Sandboxed integrations for online services | **Direct**: Full filesystem access & shell command execution |
+| **Philosophy** | **Safety First**: First-class citizens are cloud/API integrations | **Capability First**: High-risk system-level access by default |
+| **Deployment** | **Single Binary / Docker** (Easy self-host) | **Complex Dependency Chain** |
+
+**Why Jossie?**
+If you want an agent that builds a memory of your life, understands the *people* and *projects* you care about, and acts without constant prodding—while keeping your system safe—Jossie is the superior choice. OpenClaw is better suited for developers building ephemeral automation scripts that require direct local system manipulation.
 
 ## 🏗️ Architecture
 
