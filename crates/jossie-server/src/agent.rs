@@ -708,6 +708,20 @@ fn sanitize_context_window(messages: &mut Vec<Message>) {
         );
         messages.drain(0..split_idx);
     }
+
+    // Safety check: Truncate any historical tool messages that are too large
+    // This handles legacy messages or cases where tool output limits were bypassed
+    const MAX_HISTORICAL_TOOL_MSG_SIZE: usize = 100_000;
+    for msg in messages.iter_mut() {
+        if msg.role == Role::Tool && msg.content.len() > MAX_HISTORICAL_TOOL_MSG_SIZE {
+            tracing::warn!(
+                "Sanitizing context window: Truncating large historical tool message ({} chars)",
+                msg.content.len()
+            );
+            msg.content.truncate(MAX_HISTORICAL_TOOL_MSG_SIZE);
+            msg.content.push_str("\n... [Historical message truncated for context safety]");
+        }
+    }
 }
 
 #[cfg(test)]
