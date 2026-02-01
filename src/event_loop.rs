@@ -68,6 +68,38 @@ async fn handle_event(
     event: &IntegrationEvent,
 ) -> anyhow::Result<()> {
     tracing::info!("Processing event: {}", event.id);
+
+    // Atomically mark event as processing to prevent concurrent processing
+    let claimed = state
+        .db
+        .mark_integration_event_processing(&event.id)
+        .await?;
+    if !claimed {
+        tracing::debug!("Event {} already being processed, skipping", event.id);
+        return Ok(());
+    }
+
+    // If we fail anywhere below, reset the event status to 'new' so it can be retried
+    let result = process_event_inner(state, chat, event).await;
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Reset event to 'new' status on failure so it can be retried
+            state
+                .db
+                .mark_integration_event_failed(&event.id, &e.to_string())
+                .await?;
+            Err(e)
+        }
+    }
+}
+
+async fn process_event_inner(
+    state: &Arc<AppState>,
+    chat: &jossie_db::TelegramChatLink,
+    event: &IntegrationEvent,
+) -> anyhow::Result<()> {
     let message =
         jossie_server::agent::generate_event_message(state, chat.conversation_id, event).await?;
     tracing::info!("Generated message: {:?}", message);

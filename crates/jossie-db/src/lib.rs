@@ -366,6 +366,16 @@ impl Database {
         Ok(())
     }
 
+    pub async fn mark_integration_event_processing(&self, id: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE integration_events SET status = 'processing' WHERE id = ? AND status = 'new'",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn mark_integration_event_failed(&self, id: &str, error: &str) -> anyhow::Result<()> {
         sqlx::query("UPDATE integration_events SET status = 'failed', last_error = ? WHERE id = ?")
             .bind(error)
