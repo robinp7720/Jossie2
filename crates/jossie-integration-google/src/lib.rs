@@ -847,6 +847,69 @@ impl GoogleIntegration {
         .to_string())
     }
 
+    async fn drive_list_files(
+        &self,
+        account_id: &str,
+        folder_id: Option<&str>,
+        query: Option<&str>,
+        page_size: Option<u32>,
+        page_token: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let token = self.get_access_token(account_id).await?;
+        let page_size = page_size.unwrap_or(20).min(1000).to_string();
+
+        // Build the query string
+        let mut q_parts = Vec::new();
+
+        // If folder_id is specified, filter by parent
+        if let Some(fid) = folder_id {
+            if !fid.trim().is_empty() {
+                q_parts.push(format!("'{}' in parents", fid.replace("'", "\\'").trim()));
+            }
+        }
+
+        // Add trashed filter
+        q_parts.push("trashed = false".to_string());
+
+        // If query is specified, add name search
+        if let Some(q) = query {
+            if !q.trim().is_empty() {
+                q_parts.push(format!("name contains '{}'", q.replace("'", "\\'").trim()));
+            }
+        }
+
+        let full_query = q_parts.join(" and ");
+
+        let mut req = self
+            .client
+            .get("https://www.googleapis.com/drive/v3/files")
+            .bearer_auth(&token)
+            .query(&[
+                ("q", &full_query),
+                ("pageSize", &page_size),
+                (
+                    "fields",
+                    &"nextPageToken,files(id,name,mimeType,size,modifiedTime,webViewLink,parents)"
+                        .to_string(),
+                ),
+                ("orderBy", &"folder,name".to_string()),
+            ]);
+
+        if let Some(token) = page_token {
+            req = req.query(&[("pageToken", token)]);
+        }
+
+        let resp = req.send().await?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Drive list files failed: {body}");
+        }
+
+        let data: serde_json::Value = resp.json().await?;
+        Ok(serde_json::to_string_pretty(&data)?)
+    }
+
     async fn calendar_list_events(
         &self,
         account_id: &str,
@@ -1474,6 +1537,24 @@ impl Integration for GoogleIntegration {
                 }),
             },
             ToolDefinition {
+                name: "drive_list_files".to_string(),
+                description:
+                    "List Google Drive files with optional folder filtering and pagination"
+                        .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "string", "description": "Account ID from google_list_accounts"},
+                        "folder_id": {"type": ["string", "null"], "description": "Optional folder ID to list files within (null for root or all files)"},
+                        "query": {"type": ["string", "null"], "description": "Optional search query to filter files by name"},
+                        "page_size": {"type": ["integer", "null"], "description": "Number of files to return (default: 20, max: 1000)"},
+                        "page_token": {"type": ["string", "null"], "description": "Token for pagination from previous results"}
+                    },
+                    "required": ["account_id", "folder_id", "query", "page_size", "page_token"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
                 name: "calendar_list_calendars".to_string(),
                 description: "List all Google calendars accessible by the user".to_string(),
                 parameters: serde_json::json!({
@@ -1583,6 +1664,25 @@ impl Integration for GoogleIntegration {
                 }
                 let args: Args = serde_json::from_str(arguments)?;
                 self.drive_read(&args.account_id, &args.file_id).await
+            }
+            "drive_list_files" => {
+                #[derive(Deserialize)]
+                struct Args {
+                    account_id: String,
+                    folder_id: Option<String>,
+                    query: Option<String>,
+                    page_size: Option<u32>,
+                    page_token: Option<String>,
+                }
+                let args: Args = serde_json::from_str(arguments)?;
+                self.drive_list_files(
+                    &args.account_id,
+                    args.folder_id.as_deref(),
+                    args.query.as_deref(),
+                    args.page_size,
+                    args.page_token.as_deref(),
+                )
+                .await
             }
             "calendar_list_calendars" => {
                 #[derive(Deserialize)]
