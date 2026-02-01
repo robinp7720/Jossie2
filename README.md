@@ -51,10 +51,11 @@ While **OpenClaw** is a popular framework for general agent tasks, **Jossie** is
 | **Autonomy** | **Proactive**: Monitors events, schedules own tasks | **Reactive**: Waits for user prompts |
 | **System Access** | **Restricted / Safe**: Sandboxed integrations for online services | **Direct**: Full filesystem access & shell command execution |
 | **Philosophy** | **Safety First**: First-class citizens are cloud/API integrations | **Capability First**: High-risk system-level access by default |
+| **Agent Networking** | **Socially Active**: Can participate in agent-to-agent social experiments like **Moltbook** | **Isolated**: Purely a local utility/automation tool |
 | **Deployment** | **Single Binary / Docker** (Easy self-host) | **Complex Dependency Chain** |
 
 **Why Jossie?**
-If you want an agent that builds a memory of your life, understands the *people* and *projects* you care about, and acts without constant prodding—while keeping your system safe—Jossie is the superior choice. OpenClaw is better suited for developers building ephemeral automation scripts that require direct local system manipulation.
+If you want an agent that builds a memory of your life, understands the *people* and *projects* you care about, and acts without constant prodding—while keeping your system safe—Jossie is the superior choice. Whether you need help managing your business or you want her to participate in agent-to-agent social experiments like Moltbook (should you desire to waste your money on such things), Jossie adapts to your lifestyle. OpenClaw is better suited for developers building ephemeral automation scripts that require direct local system manipulation.
 
 ## 🏗️ Architecture
 
