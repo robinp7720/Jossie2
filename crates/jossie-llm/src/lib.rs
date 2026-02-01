@@ -2,8 +2,8 @@ use futures::StreamExt;
 use jossie_core::integration::{ToolCall, ToolDefinition};
 use jossie_core::types::{Message, Role};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 use std::collections::{HashMap, HashSet};
+use tokio::sync::mpsc;
 
 #[derive(Clone)]
 pub struct LlmClient {
@@ -30,9 +30,16 @@ struct ResponseRequest {
 #[serde(tag = "type")]
 enum InputItem {
     #[serde(rename = "message")]
-    Message { role: String, content: Vec<InputContent> },
+    Message {
+        role: String,
+        content: Vec<InputContent>,
+    },
     #[serde(rename = "function_call")]
-    FunctionCall { call_id: String, name: String, arguments: String },
+    FunctionCall {
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
     #[serde(rename = "function_call_output")]
     FunctionCallOutput { call_id: String, output: String },
 }
@@ -78,9 +85,15 @@ struct ResponseBody {
 #[serde(tag = "type")]
 enum ResponseOutputItem {
     #[serde(rename = "message")]
-    Message { #[serde(default)] content: Vec<ResponseContentPart> },
+    Message {
+        #[serde(default)]
+        content: Vec<ResponseContentPart>,
+    },
     #[serde(rename = "web_search_call")]
-    WebSearchCall { #[serde(default)] action: Option<WebSearchAction> },
+    WebSearchCall {
+        #[serde(default)]
+        action: Option<WebSearchAction>,
+    },
     #[serde(rename = "function_call")]
     FunctionCall {
         #[serde(default)]
@@ -180,7 +193,9 @@ impl LlmClient {
                     }
 
                     if let Some(tc_val) = &m.tool_calls {
-                        if let Ok(flat_calls) = serde_json::from_value::<Vec<ToolCall>>(tc_val.clone()) {
+                        if let Ok(flat_calls) =
+                            serde_json::from_value::<Vec<ToolCall>>(tc_val.clone())
+                        {
                             for call in flat_calls {
                                 items.push(InputItem::FunctionCall {
                                     call_id: call.id,
@@ -200,10 +215,10 @@ impl LlmClient {
     fn build_tools(tools: &[ToolDefinition]) -> Option<Vec<ResponseTool>> {
         let mut built = Vec::new();
 
-        built.push(ResponseTool::WebSearch {});
-        built.push(ResponseTool::CodeInterpreter {
-            container: CodeInterpreterContainer { r#type: "auto".to_string() },
-        });
+        // built.push(ResponseTool::WebSearch {});
+        // built.push(ResponseTool::CodeInterpreter {
+        //     container: CodeInterpreterContainer { r#type: "auto".to_string() },
+        // });
 
         for t in tools {
             built.push(ResponseTool::Function {
@@ -214,11 +229,7 @@ impl LlmClient {
             });
         }
 
-        if built.is_empty() {
-            None
-        } else {
-            Some(built)
-        }
+        if built.is_empty() { None } else { Some(built) }
     }
 
     /// Non-streaming completion. Returns content and optional tool calls.
@@ -236,7 +247,8 @@ impl LlmClient {
             stream: false,
         };
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(format!("{}/responses", self.api_url))
             .bearer_auth(&self.api_key)
             .json(&req)
@@ -259,7 +271,11 @@ impl LlmClient {
             match item {
                 ResponseOutputItem::Message { content: parts } => {
                     for part in parts {
-                        if let ResponseContentPart::OutputText { text, annotations: ann } = part {
+                        if let ResponseContentPart::OutputText {
+                            text,
+                            annotations: ann,
+                        } = part
+                        {
                             content.push_str(&text);
                             for annotation in ann {
                                 if let ResponseAnnotation::UrlCitation { url, title } = annotation {
@@ -274,7 +290,12 @@ impl LlmClient {
                         sources.extend(action.sources);
                     }
                 }
-                ResponseOutputItem::FunctionCall { call_id, id, name, arguments } => {
+                ResponseOutputItem::FunctionCall {
+                    call_id,
+                    id,
+                    name,
+                    arguments,
+                } => {
                     let Some(name) = name else { continue };
                     let call_id = call_id.or(id).unwrap_or_default();
                     tool_calls.push(ToolCall {
@@ -306,7 +327,8 @@ impl LlmClient {
             stream: true,
         };
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(format!("{}/responses", self.api_url))
             .bearer_auth(&self.api_key)
             .json(&req)
@@ -316,7 +338,11 @@ impl LlmClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            let _ = tx.send(StreamEvent::Error(format!("LLM API error {status}: {body}"))).await;
+            let _ = tx
+                .send(StreamEvent::Error(format!(
+                    "LLM API error {status}: {body}"
+                )))
+                .await;
             return Ok(());
         }
 
@@ -366,11 +392,20 @@ impl LlmClient {
                         if let Some(item) = event.get("item") {
                             let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
                             if item_type == "function_call" {
-                                let call_id = item.get("call_id").and_then(|v| v.as_str())
+                                let call_id = item
+                                    .get("call_id")
+                                    .and_then(|v| v.as_str())
                                     .or_else(|| item.get("id").and_then(|v| v.as_str()))
                                     .map(|s| s.to_string());
-                                let name = item.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
-                                let arguments = item.get("arguments").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let name = item
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                                let arguments = item
+                                    .get("arguments")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
                                 let entry = pending_calls.entry(item_id.to_string()).or_default();
                                 if entry.call_id.is_none() {
                                     entry.call_id = call_id;
@@ -427,8 +462,12 @@ impl LlmClient {
                         return Ok(());
                     }
                     "error" => {
-                        let message = event.get("message").and_then(|v| v.as_str())
-                            .or_else(|| event.get("error").and_then(|e| e.get("message")).and_then(|v| v.as_str()));
+                        let message = event.get("message").and_then(|v| v.as_str()).or_else(|| {
+                            event
+                                .get("error")
+                                .and_then(|e| e.get("message"))
+                                .and_then(|v| v.as_str())
+                        });
                         if let Some(message) = message {
                             let _ = tx.send(StreamEvent::Error(message.to_string())).await;
                         }
@@ -449,11 +488,14 @@ impl LlmClient {
 
 fn input_content_for_role(role: &Role, text: &str) -> InputContent {
     match role {
-        Role::Assistant | Role::Tool => InputContent::OutputText { text: text.to_string() },
-        Role::System | Role::User => InputContent::InputText { text: text.to_string() },
+        Role::Assistant | Role::Tool => InputContent::OutputText {
+            text: text.to_string(),
+        },
+        Role::System | Role::User => InputContent::InputText {
+            text: text.to_string(),
+        },
     }
 }
-
 
 #[derive(Default)]
 struct PendingToolCall {
@@ -465,7 +507,9 @@ struct PendingToolCall {
 fn collect_tool_calls(pending: HashMap<String, PendingToolCall>) -> Vec<ToolCall> {
     let mut calls = Vec::new();
     for (item_id, pending_call) in pending {
-        let Some(name) = pending_call.name else { continue };
+        let Some(name) = pending_call.name else {
+            continue;
+        };
         let id = pending_call.call_id.unwrap_or(item_id);
         calls.push(ToolCall {
             id,
@@ -521,7 +565,10 @@ fn join_natural_list(items: &[String]) -> String {
     }
 }
 
-fn merge_sources(primary: Vec<WebSearchSource>, secondary: Vec<WebSearchSource>) -> Vec<WebSearchSource> {
+fn merge_sources(
+    primary: Vec<WebSearchSource>,
+    secondary: Vec<WebSearchSource>,
+) -> Vec<WebSearchSource> {
     let mut seen = HashSet::new();
     let mut merged = Vec::new();
     for source in primary.into_iter().chain(secondary) {
@@ -547,7 +594,10 @@ fn sources_from_response_body(body: ResponseBody) -> Vec<WebSearchSource> {
         match item {
             ResponseOutputItem::Message { content: parts } => {
                 for part in parts {
-                    if let ResponseContentPart::OutputText { annotations: ann, .. } = part {
+                    if let ResponseContentPart::OutputText {
+                        annotations: ann, ..
+                    } = part
+                    {
                         for annotation in ann {
                             if let ResponseAnnotation::UrlCitation { url, title } = annotation {
                                 annotations.push(WebSearchSource { url, title });
