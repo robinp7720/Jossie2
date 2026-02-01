@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -27,7 +27,7 @@ pub struct ToolResult {
 pub struct OnboardingField {
     pub name: String,
     pub label: String,
-    pub input_type: String, // "text", "password", "oauth", "info"
+    pub input_type: String,    // "text", "password", "oauth", "info"
     pub value: Option<String>, // Current value or auth URL
     pub description: Option<String>,
 }
@@ -36,9 +36,7 @@ pub struct OnboardingField {
 #[serde(tag = "status", content = "details")]
 pub enum OnboardingStatus {
     Configured,
-    RequiresAction {
-        fields: Vec<OnboardingField>,
-    },
+    RequiresAction { fields: Vec<OnboardingField> },
 }
 
 #[async_trait::async_trait]
@@ -48,6 +46,9 @@ pub trait Integration: Send + Sync {
     async fn execute(&self, tool_name: &str, arguments: &str) -> anyhow::Result<String>;
     async fn check_onboarding(&self) -> anyhow::Result<OnboardingStatus> {
         Ok(OnboardingStatus::Configured)
+    }
+    async fn poll(&self) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
@@ -88,7 +89,10 @@ impl IntegrationRegistry {
                 is_error: true,
             };
         };
-        match self.integrations[idx].execute(&call.name, &call.arguments).await {
+        match self.integrations[idx]
+            .execute(&call.name, &call.arguments)
+            .await
+        {
             Ok(content) => ToolResult {
                 tool_call_id: call.id.clone(),
                 content,
@@ -118,7 +122,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Integration for MockIntegration {
-        fn name(&self) -> &str { "mock" }
+        fn name(&self) -> &str {
+            "mock"
+        }
         fn tools(&self) -> Vec<ToolDefinition> {
             vec![
                 ToolDefinition {
