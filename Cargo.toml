@@ -25,6 +25,8 @@ jossie-integration-google = { path = "crates/jossie-integration-google" }
 jossie-integration-graph = { path = "crates/jossie-integration-graph" }
 jossie-integration-memory = { path = "crates/jossie-integration-memory" }
 
+jossie-integration-browser = { path = "crates/jossie-integration-browser" }
+
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
@@ -44,6 +46,8 @@ toml = "0.8"
 dotenvy = "0.15"
 tower-http = { version = "0.6", features = ["cors"] }
 urlencoding = "2.1"
+headless_chrome = { version = "1.0", features = ["fetch"] }
+html2text = "0.6"
 
 [package]
 name = "jossie2"
@@ -74,4 +78,5 @@ jossie-integration-memory = { workspace = true }
 jossie-integration-email = { workspace = true }
 jossie-integration-google = { workspace = true }
 jossie-integration-graph = { workspace = true }
+jossie-integration-browser = { workspace = true }
 jossie-telegram = { workspace = true }

@@ -8,6 +8,7 @@ jossie-core = { workspace = true }
 jossie-llm = { workspace = true }
 jossie-db = { workspace = true }
 jossie-integration-google = { workspace = true }
+jossie-integration-browser = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

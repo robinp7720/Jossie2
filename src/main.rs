@@ -1,11 +1,11 @@
-use std::sync::Arc;
 use anyhow::Result;
 use jossie_core::config::AppConfig;
 use jossie_core::integration::IntegrationRegistry;
 use jossie_db::Database;
-use jossie_llm::LlmClient;
 use jossie_integration_memory::MemoryIntegration;
+use jossie_llm::LlmClient;
 use jossie_server::AppState;
+use std::sync::Arc;
 
 mod event_loop;
 
@@ -16,15 +16,12 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
-    let config_str = std::fs::read_to_string("config.toml")
-        .expect("Failed to read config.toml");
-    let mut config: AppConfig = toml::from_str(&config_str)
-        .expect("Failed to parse config.toml");
+    let config_str = std::fs::read_to_string("config.toml").expect("Failed to read config.toml");
+    let mut config: AppConfig = toml::from_str(&config_str).expect("Failed to parse config.toml");
 
     // Override secrets from environment variables
     override_config_from_env(&mut config);
@@ -38,9 +35,11 @@ async fn main() -> Result<()> {
 
     let mut registry = IntegrationRegistry::new();
     registry.register(Arc::new(MemoryIntegration::new(db.clone())));
-    
+
     // Knowledge Graph
-    registry.register(Arc::new(jossie_integration_graph::GraphIntegration::new(db.clone())));
+    registry.register(Arc::new(jossie_integration_graph::GraphIntegration::new(
+        db.clone(),
+    )));
 
     let mut email = jossie_integration_email::EmailIntegration::new(&config.email);
     email.set_db(db.clone());
@@ -57,7 +56,16 @@ async fn main() -> Result<()> {
         tracing::info!("Registered Google integration");
     }
 
-    tracing::info!("Registered {} tool(s)", registry.all_tool_definitions().len());
+    // Browser Integration
+    registry.register(Arc::new(
+        jossie_integration_browser::BrowserIntegration::new(),
+    ));
+    tracing::info!("Registered browser integration");
+
+    tracing::info!(
+        "Registered {} tool(s)",
+        registry.all_tool_definitions().len()
+    );
 
     let state = Arc::new(AppState {
         db,
@@ -102,19 +110,41 @@ async fn main() -> Result<()> {
 fn override_config_from_env(config: &mut AppConfig) {
     use std::env;
 
-    if let Ok(val) = env::var("JOSSIE_SERVER_AUTH_TOKEN") { config.server.auth_token = val; }
-    if let Ok(val) = env::var("JOSSIE_LLM_API_KEY") { config.llm.api_key = val; }
-    if let Ok(val) = env::var("JOSSIE_LLM_SYSTEM_PROMPT") { config.llm.system_prompt = val; }
-    if let Ok(val) = env::var("JOSSIE_TELEGRAM_BOT_TOKEN") { config.telegram.bot_token = val.trim().to_string(); }
-    
+    if let Ok(val) = env::var("JOSSIE_SERVER_AUTH_TOKEN") {
+        config.server.auth_token = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_LLM_API_KEY") {
+        config.llm.api_key = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_LLM_SYSTEM_PROMPT") {
+        config.llm.system_prompt = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_TELEGRAM_BOT_TOKEN") {
+        config.telegram.bot_token = val.trim().to_string();
+    }
+
     // Email
-    if let Ok(val) = env::var("JOSSIE_EMAIL_USERNAME") { config.email.username = val; }
-    if let Ok(val) = env::var("JOSSIE_EMAIL_PASSWORD") { config.email.password = val; }
-    if let Ok(val) = env::var("JOSSIE_EMAIL_IMAP_HOST") { config.email.imap_host = val; }
-    if let Ok(val) = env::var("JOSSIE_EMAIL_SMTP_HOST") { config.email.smtp_host = val; }
+    if let Ok(val) = env::var("JOSSIE_EMAIL_USERNAME") {
+        config.email.username = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_EMAIL_PASSWORD") {
+        config.email.password = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_EMAIL_IMAP_HOST") {
+        config.email.imap_host = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_EMAIL_SMTP_HOST") {
+        config.email.smtp_host = val;
+    }
 
     // Google
-    if let Ok(val) = env::var("JOSSIE_GOOGLE_CLIENT_ID") { config.google.client_id = val; }
-    if let Ok(val) = env::var("JOSSIE_GOOGLE_CLIENT_SECRET") { config.google.client_secret = val; }
-    if let Ok(val) = env::var("JOSSIE_GOOGLE_REFRESH_TOKEN") { config.google.refresh_token = val; }
+    if let Ok(val) = env::var("JOSSIE_GOOGLE_CLIENT_ID") {
+        config.google.client_id = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_GOOGLE_CLIENT_SECRET") {
+        config.google.client_secret = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_GOOGLE_REFRESH_TOKEN") {
+        config.google.refresh_token = val;
+    }
 }
