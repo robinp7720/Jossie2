@@ -575,15 +575,26 @@ impl GoogleIntegration {
         Ok(events)
     }
 
-    async fn gmail_search(&self, account_id: &str, query: &str) -> anyhow::Result<String> {
+    async fn gmail_search(
+        &self,
+        account_id: &str,
+        query: &str,
+        max_results: Option<u32>,
+        page_token: Option<&str>,
+    ) -> anyhow::Result<String> {
         let token = self.get_access_token(account_id).await?;
-        let resp = self
+        let max_results = max_results.unwrap_or(20).to_string();
+        let mut req = self
             .client
             .get("https://gmail.googleapis.com/gmail/v1/users/me/messages")
             .bearer_auth(&token)
-            .query(&[("q", query), ("maxResults", "20")])
-            .send()
-            .await?;
+            .query(&[("q", query), ("maxResults", &max_results)]);
+
+        if let Some(token) = page_token {
+            req = req.query(&[("pageToken", token)]);
+        }
+
+        let resp = req.send().await?;
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -594,6 +605,8 @@ impl GoogleIntegration {
         struct ListResponse {
             #[serde(default)]
             messages: Vec<MessageRef>,
+            #[serde(rename = "nextPageToken")]
+            next_page_token: Option<String>,
         }
         #[derive(Deserialize, Serialize)]
         struct MessageRef {
@@ -605,12 +618,15 @@ impl GoogleIntegration {
         let list: ListResponse = resp.json().await?;
 
         if list.messages.is_empty() {
-            return Ok("No matching emails found.".to_string());
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "messages": [],
+                "next_page_token": list.next_page_token
+            }))?);
         }
 
-        // Fetch snippet for each message (up to 10)
+        // Fetch snippet for each message
         let mut results = Vec::new();
-        for msg_ref in list.messages.iter().take(10) {
+        for msg_ref in list.messages.iter() {
             let url = format!(
                 "https://gmail.googleapis.com/gmail/v1/users/me/messages/{}",
                 msg_ref.id
@@ -637,7 +653,10 @@ impl GoogleIntegration {
             }
         }
 
-        Ok(serde_json::to_string_pretty(&results)?)
+        Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "messages": results,
+            "next_page_token": list.next_page_token
+        }))?)
     }
 
     async fn gmail_read(&self, account_id: &str, message_id: &str) -> anyhow::Result<String> {
@@ -1387,14 +1406,16 @@ impl Integration for GoogleIntegration {
             },
             ToolDefinition {
                 name: "gmail_search".to_string(),
-                description: "Search Gmail messages".to_string(),
+                description: "Search Gmail messages with pagination support".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "account_id": {"type": "string", "description": "Account ID from google_list_accounts"},
-                        "query": {"type": "string", "description": "Gmail search query (same syntax as Gmail search bar)"}
+                        "query": {"type": "string", "description": "Gmail search query (same syntax as Gmail search bar)"},
+                        "max_results": {"type": ["integer", "null"], "description": "Maximum number of messages to return (default: 20, max: 500)"},
+                        "page_token": {"type": ["string", "null"], "description": "Token for pagination from previous search results"}
                     },
-                    "required": ["account_id", "query"],
+                    "required": ["account_id", "query", "max_results", "page_token"],
                     "additionalProperties": false
                 }),
             },
@@ -1512,9 +1533,17 @@ impl Integration for GoogleIntegration {
                 struct Args {
                     query: String,
                     account_id: String,
+                    max_results: Option<u32>,
+                    page_token: Option<String>,
                 }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.gmail_search(&args.account_id, &args.query).await
+                self.gmail_search(
+                    &args.account_id,
+                    &args.query,
+                    args.max_results,
+                    args.page_token.as_deref(),
+                )
+                .await
             }
             "gmail_read" => {
                 #[derive(Deserialize)]
