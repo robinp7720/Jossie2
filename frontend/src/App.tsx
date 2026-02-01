@@ -30,6 +30,8 @@ type ActivityItem = {
   at: string
 }
 
+const INITIAL_MESSAGE_LIMIT = 100
+
 const getDefaultBaseUrl = () => {
   if (typeof window === 'undefined') {
     return ''
@@ -161,7 +163,7 @@ const App = () => {
       return
     }
     try {
-      const data = await getMessages(apiConfig, conversationId)
+      const data = await getMessages(apiConfig, conversationId, INITIAL_MESSAGE_LIMIT)
       setMessages(toChatMessages(data))
     } catch (error) {
       setStatusMessage(formatError(error))

@@ -63,8 +63,11 @@ export const request = async <T>(
 export const listConversations = (config: ApiConfig) =>
   request<Conversation[]>(config, '/api/conversations')
 
-export const getMessages = (config: ApiConfig, conversationId: string) =>
-  request<Message[]>(config, `/api/conversations/${conversationId}/messages`)
+export const getMessages = (config: ApiConfig, conversationId: string, limit?: number) =>
+  request<Message[]>(
+    config,
+    `/api/conversations/${conversationId}/messages${limit ? `?limit=${limit}` : ''}`,
+  )
 
 export const sendMessage = (
   config: ApiConfig,

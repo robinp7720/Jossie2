@@ -93,13 +93,26 @@ impl Database {
         Ok(())
     }
 
-    pub async fn get_messages(&self, conversation_id: Uuid) -> anyhow::Result<Vec<Message>> {
+    pub async fn get_messages(&self, conversation_id: Uuid, limit: Option<usize>) -> anyhow::Result<Vec<Message>> {
         let conv_str = conversation_id.to_string();
-        let rows = sqlx::query_as::<_, MessageRow>("SELECT id, conversation_id, role, content, tool_calls, tool_call_id, name, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC")
-            .bind(&conv_str)
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.into_iter().map(Into::into).collect())
+        
+        if let Some(limit) = limit {
+            let limit_val = limit as i64;
+            let mut rows = sqlx::query_as::<_, MessageRow>("SELECT id, conversation_id, role, content, tool_calls, tool_call_id, name, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?")
+                .bind(&conv_str)
+                .bind(limit_val)
+                .fetch_all(&self.pool)
+                .await?;
+            // Reverse to get chronological order (oldest first)
+            rows.reverse();
+            Ok(rows.into_iter().map(Into::into).collect())
+        } else {
+            let rows = sqlx::query_as::<_, MessageRow>("SELECT id, conversation_id, role, content, tool_calls, tool_call_id, name, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC")
+                .bind(&conv_str)
+                .fetch_all(&self.pool)
+                .await?;
+            Ok(rows.into_iter().map(Into::into).collect())
+        }
     }
 
     // Memory (FTS5)
@@ -1238,7 +1251,7 @@ mod tests {
         };
         db.save_message(&msg2).await.unwrap();
 
-        let messages = db.get_messages(conv.id).await.unwrap();
+        let messages = db.get_messages(conv.id, None).await.unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content, "Hello");
         assert_eq!(messages[1].content, "Hi there");

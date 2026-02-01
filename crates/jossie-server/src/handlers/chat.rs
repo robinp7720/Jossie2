@@ -102,7 +102,7 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
         if state.db.save_message(&user_msg).await.is_err() { continue; }
 
         let tools = state.registry.all_tool_definitions();
-        let mut messages = state.db.get_messages(conv_id).await.unwrap_or_default();
+        let mut messages = state.db.get_messages(conv_id, Some(state.max_context_messages)).await.unwrap_or_default();
         prepend_system_prompt(&state, &mut messages, Some(&last_user_msg)).await;
 
         let max_iters = state.max_agent_iterations;

@@ -85,7 +85,8 @@ pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<S
 
 async fn run_agent_loop_inner(state: &AppState, conv_id: Uuid) -> anyhow::Result<String> {
     let tools = state.registry.all_tool_definitions();
-    let mut messages = state.db.get_messages(conv_id).await?;
+    // Fetch only the relevant context window from DB
+    let mut messages = state.db.get_messages(conv_id, Some(state.max_context_messages)).await?;
 
     // Capture user message for extraction later
     let last_user_msg = messages
@@ -93,11 +94,6 @@ async fn run_agent_loop_inner(state: &AppState, conv_id: Uuid) -> anyhow::Result
         .map(|m| m.content.clone())
         .unwrap_or_default();
 
-    // Apply context window limit
-    if messages.len() > state.max_context_messages {
-        let skip = messages.len() - state.max_context_messages;
-        messages = messages.into_iter().skip(skip).collect();
-    }
     sanitize_context_window(&mut messages);
 
     prepend_system_prompt(state, &mut messages, Some(&last_user_msg)).await;
@@ -294,13 +290,8 @@ pub async fn generate_event_message(
     conversation_id: Uuid,
     event: &IntegrationEvent,
 ) -> anyhow::Result<Option<String>> {
-    let mut messages = state.db.get_messages(conversation_id).await?;
+    let mut messages = state.db.get_messages(conversation_id, Some(state.max_context_messages)).await?;
 
-    // Apply context window limit for events too
-    if messages.len() > state.max_context_messages {
-        let skip = messages.len() - state.max_context_messages;
-        messages = messages.into_iter().skip(skip).collect();
-    }
     sanitize_context_window(&mut messages);
 
     let mut prompt = build_system_prompt(state, None).await;
