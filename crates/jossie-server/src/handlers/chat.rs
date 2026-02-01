@@ -59,17 +59,34 @@ pub async fn ws_handler(
 }
 
 async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
+    tracing::info!("WebSocket connection established");
     while let Some(Ok(msg)) = futures::StreamExt::next(&mut socket).await {
-        let ws::Message::Text(text) = msg else { continue };
-        let Ok(req) = serde_json::from_str::<ChatRequest>(&text) else { continue };
+        let ws::Message::Text(text) = msg else { 
+            tracing::debug!("Received non-text message");
+            continue; 
+        };
+        tracing::debug!("Received WS message: {}", text);
+        
+        let req = match serde_json::from_str::<ChatRequest>(&text) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Failed to parse ChatRequest: {}; text: {}", e, text);
+                continue;
+            }
+        };
 
         let conv_id = match req.conversation_id {
             Some(id) => id,
             None => match state.db.create_conversation(None).await {
                 Ok(c) => c.id,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::error!("Failed to create conversation: {}", e);
+                    continue;
+                }
             },
         };
+
+        tracing::info!("Processing message for conversation {}", conv_id);
 
         let last_user_msg = req.message.clone();
         let user_msg = Message {
@@ -89,6 +106,7 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
         prepend_system_prompt(&state, &mut messages, Some(&last_user_msg)).await;
 
         let max_iters = state.max_agent_iterations;
+        tracing::info!("Starting agent loop for conversation {} with {} max iterations", conv_id, max_iters);
         for iteration in 0..max_iters {
             let (tx, mut rx) = tokio::sync::mpsc::channel(100);
             let llm = state.llm.clone();
@@ -126,11 +144,6 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
                 }
             }
             
-            // Send done message after stream ends
-            let _ = socket.send(ws::Message::Text(
-                serde_json::json!({"type": "done", "conversation_id": conv_id}).to_string().into()
-            )).await;
-
             if !tool_calls.is_empty() {
                 if iteration + 1 >= max_iters {
                     let _ = socket.send(ws::Message::Text(
@@ -173,6 +186,11 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
                 }
                 continue;
             }
+
+            // Send done message after stream ends and no more tools to run
+            let _ = socket.send(ws::Message::Text(
+                serde_json::json!({"type": "done", "conversation_id": conv_id}).to_string().into()
+            )).await;
 
             let assistant_msg = Message {
                 id: Uuid::new_v4(),

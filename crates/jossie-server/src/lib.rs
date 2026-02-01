@@ -43,8 +43,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(axum_middleware::from_fn_with_state(state.clone(), middleware::auth_middleware));
 
     let public = Router::new()
-        .route("/", get(handlers::web::index_handler))
-        .route("/graph", get(handlers::web::graph_handler))
         .route("/oauth/callback", get(handlers::integrations::oauth_callback_handler));
 
     Router::new()
