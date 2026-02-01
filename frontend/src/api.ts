@@ -112,3 +112,9 @@ export const buildWebSocketUrl = (config: ApiConfig, path: string) => {
   const token = config.token ? `?token=${encodeURIComponent(config.token)}` : ''
   return `${wsBase}${path}${token}`
 }
+
+export const fetchGraph = (config: ApiConfig, limit = 500) =>
+  request<{ nodes: import('./types').GraphNode[]; edges: import('./types').GraphEdge[] }>(
+    config,
+    `/api/graph?limit=${limit}`,
+  )

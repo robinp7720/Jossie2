@@ -34,3 +34,24 @@ export type Account = {
   name: string
   details?: Record<string, unknown>
 }
+
+export type GraphNode = {
+  id: string
+  label: string
+  node_type: string
+  properties: Record<string, unknown>
+}
+
+export type GraphEdge = {
+  id: string
+  source_id: string
+  target_id: string
+  relation: string
+  weight: number
+  properties: Record<string, unknown>
+}
+
+export type GraphResponse = {
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+}

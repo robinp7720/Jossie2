@@ -11,6 +11,7 @@ import {
   sendMessage,
 } from './api'
 import type { ApiConfig } from './api'
+import { KnowledgeGraph } from './components/KnowledgeGraph'
 import type { Account, Conversation, Message, OnboardingStatus } from './types'
 
 type ChatMessage = {
@@ -104,7 +105,7 @@ const toChatMessages = (messages: Message[]): ChatMessage[] =>
 
 const App = () => {
   const [apiConfig, setApiConfig] = useState<ApiConfig>(loadConfig)
-  const [activeTab, setActiveTab] = useState<'assistant' | 'integrations' | 'accounts'>(
+  const [activeTab, setActiveTab] = useState<'assistant' | 'integrations' | 'accounts' | 'knowledge'>(
     'assistant',
   )
   const [conversations, setConversations] = useState<Conversation[]>([])
@@ -459,6 +460,12 @@ const App = () => {
             onClick={() => setActiveTab('accounts')}
           >
             Accounts
+          </button>
+          <button
+            className={activeTab === 'knowledge' ? 'tab active' : 'tab'}
+            onClick={() => setActiveTab('knowledge')}
+          >
+            Knowledge
           </button>
         </div>
 
@@ -850,6 +857,20 @@ const App = () => {
                   </pre>
                 </div>
               ))}
+            </div>
+          </section>
+        )}
+
+        {activeTab === 'knowledge' && (
+          <section className="knowledge" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+            <header className="section-header">
+              <div>
+                <h1>Knowledge Graph</h1>
+                <p>Visualize relationships and entities in the memory.</p>
+              </div>
+            </header>
+            <div className="card" style={{ flex: 1, padding: 0, overflow: 'hidden' }}>
+              <KnowledgeGraph apiConfig={apiConfig} />
             </div>
           </section>
         )}
