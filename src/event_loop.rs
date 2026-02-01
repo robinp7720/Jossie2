@@ -100,8 +100,27 @@ async fn process_event_inner(
     chat: &jossie_db::TelegramChatLink,
     event: &IntegrationEvent,
 ) -> anyhow::Result<()> {
-    let message =
-        jossie_server::agent::generate_event_message(state, chat.conversation_id, event).await?;
+    let message = match jossie_server::agent::generate_event_message(
+        state,
+        chat.conversation_id,
+        event,
+    )
+    .await
+    {
+        Ok(msg) => msg,
+        Err(e) if e.to_string().contains("already being processed") => {
+            // Conversation is busy with Telegram chat or another event, skip this event
+            tracing::debug!(
+                "Skipping event {} - conversation {} is busy",
+                event.id,
+                chat.conversation_id
+            );
+            state.db.mark_integration_event_processed(&event.id).await?;
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+
     tracing::info!("Generated message: {:?}", message);
     let Some(message) = message else {
         state.db.mark_integration_event_processed(&event.id).await?;

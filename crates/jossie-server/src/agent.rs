@@ -62,6 +62,27 @@ pub async fn prepend_system_prompt(
 }
 
 pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<String> {
+    // Try to claim this conversation
+    {
+        let mut active = state.active_conversations.write().await;
+        if !active.insert(conv_id) {
+            anyhow::bail!("Conversation {} is already being processed", conv_id);
+        }
+    }
+
+    // Execute the agent loop and ensure we release the lock even on panic/error
+    let result = run_agent_loop_inner(state, conv_id).await;
+
+    // Release the conversation lock
+    {
+        let mut active = state.active_conversations.write().await;
+        active.remove(&conv_id);
+    }
+
+    result
+}
+
+async fn run_agent_loop_inner(state: &AppState, conv_id: Uuid) -> anyhow::Result<String> {
     let tools = state.registry.all_tool_definitions();
     let mut messages = state.db.get_messages(conv_id).await?;
 
