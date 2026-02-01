@@ -74,6 +74,7 @@ async fn main() -> Result<()> {
         auth_token: config.server.auth_token.clone(),
         system_prompt: config.llm.system_prompt.clone(),
         max_agent_iterations: config.llm.max_agent_iterations,
+        max_context_messages: config.llm.max_context_messages,
         google_config: config.google.clone(),
         google_integration,
         telegram_token: config.telegram.bot_token.clone(),

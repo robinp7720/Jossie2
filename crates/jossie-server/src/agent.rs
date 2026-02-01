@@ -64,6 +64,12 @@ pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<S
         .map(|m| m.content.clone())
         .unwrap_or_default();
 
+    // Apply context window limit
+    if messages.len() > state.max_context_messages {
+        let skip = messages.len() - state.max_context_messages;
+        messages = messages.into_iter().skip(skip).collect();
+    }
+
     prepend_system_prompt(state, &mut messages, Some(&last_user_msg)).await;
 
     for _iteration in 0..state.max_agent_iterations {
@@ -230,6 +236,12 @@ pub async fn generate_event_message(
     event: &IntegrationEvent,
 ) -> anyhow::Result<Option<String>> {
     let mut messages = state.db.get_messages(conversation_id).await?;
+
+    // Apply context window limit for events too
+    if messages.len() > state.max_context_messages {
+        let skip = messages.len() - state.max_context_messages;
+        messages = messages.into_iter().skip(skip).collect();
+    }
 
     let mut prompt = build_system_prompt(state, None).await;
     prompt.push_str(
