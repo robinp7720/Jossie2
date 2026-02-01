@@ -76,6 +76,7 @@ pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<S
         let skip = messages.len() - state.max_context_messages;
         messages = messages.into_iter().skip(skip).collect();
     }
+    sanitize_context_window(&mut messages);
 
     prepend_system_prompt(state, &mut messages, Some(&last_user_msg)).await;
 
@@ -249,6 +250,7 @@ pub async fn generate_event_message(
         let skip = messages.len() - state.max_context_messages;
         messages = messages.into_iter().skip(skip).collect();
     }
+    sanitize_context_window(&mut messages);
 
     let mut prompt = build_system_prompt(state, None).await;
     prompt.push_str(
@@ -464,6 +466,73 @@ fn is_entity_token(token: &str, stopwords: &HashSet<&str>) -> bool {
     }
 
     token.len() > 1
+}
+
+fn sanitize_context_window(messages: &mut Vec<Message>) {
+    // If the first message is a Tool output, it's orphaned because we lost the Assistant call.
+    // We must drain all leading Tool messages until we hit a non-Tool message.
+    let mut split_idx = 0;
+    for (i, msg) in messages.iter().enumerate() {
+        if msg.role == Role::Tool {
+            split_idx = i + 1;
+        } else {
+            break;
+        }
+    }
+
+    if split_idx > 0 {
+        tracing::warn!(
+            "Sanitizing context window: removing {} orphaned tool messages",
+            split_idx
+        );
+        messages.drain(0..split_idx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn make_msg(role: Role) -> Message {
+        Message {
+            id: Uuid::new_v4(),
+            conversation_id: Uuid::new_v4(),
+            role,
+            content: "test".to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_sanitize_removes_orphan_tool() {
+        let mut msgs = vec![make_msg(Role::Tool), make_msg(Role::User)];
+        sanitize_context_window(&mut msgs);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::User);
+    }
+
+    #[test]
+    fn test_sanitize_preserves_valid_history() {
+        let mut msgs = vec![make_msg(Role::User), make_msg(Role::Assistant)];
+        sanitize_context_window(&mut msgs);
+        assert_eq!(msgs.len(), 2);
+    }
+
+    #[test]
+    fn test_sanitize_removes_multiple_orphans() {
+        let mut msgs = vec![
+            make_msg(Role::Tool),
+            make_msg(Role::Tool),
+            make_msg(Role::Assistant),
+        ];
+        sanitize_context_window(&mut msgs);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::Assistant);
+    }
 }
 
 #[derive(Deserialize)]
