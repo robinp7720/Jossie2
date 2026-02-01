@@ -7,6 +7,7 @@ use std::sync::Arc;
 pub struct AppState {
     pub db: Arc<Database>,
     pub llm: LlmClient,
+    pub kg_llm: LlmClient,
     pub registry: IntegrationRegistry,
     pub auth_token: String,
     pub system_prompt: String,

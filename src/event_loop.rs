@@ -22,6 +22,15 @@ pub async fn start_event_loop(state: Arc<AppState>) -> anyhow::Result<()> {
         if let Err(e) = process_pending_events(&state).await {
             tracing::error!("Event processing failed: {e}");
         }
+
+        if let Err(e) = process_scheduled_tasks(&state).await {
+            tracing::error!("Scheduled task processing failed: {e}");
+        }
+
+        if let Err(e) = process_oob_messages(&state).await {
+            tracing::error!("OOB message processing failed: {e}");
+        }
+
         interval.tick().await;
     }
 }
@@ -83,5 +92,171 @@ async fn handle_event(
     };
     state.db.save_message(&assistant_msg).await?;
     state.db.mark_integration_event_processed(&event.id).await?;
+    Ok(())
+}
+
+async fn process_scheduled_tasks(state: &Arc<AppState>) -> anyhow::Result<()> {
+    let tasks = state.db.list_pending_scheduled_tasks(10).await?;
+
+    for task in tasks {
+        tracing::info!("Processing scheduled task: {}", task.id);
+
+        // Check if max runs exceeded
+        if let Some(max) = task.max_runs {
+            if task.run_count >= max {
+                state.db.mark_task_completed(&task.id).await?;
+                tracing::info!("Task {} completed (max runs reached)", task.id);
+                continue;
+            }
+        }
+
+        // Spawn task execution in background
+        let state_clone = state.clone();
+        let task_clone = task.clone();
+        tokio::spawn(async move {
+            if let Err(e) = execute_scheduled_task(&state_clone, &task_clone).await {
+                tracing::error!("Failed to execute task {}: {}", task_clone.id, e);
+                let _ = state_clone
+                    .db
+                    .mark_task_failed(&task_clone.id, &e.to_string())
+                    .await;
+            }
+        });
+    }
+
+    Ok(())
+}
+
+async fn execute_scheduled_task(
+    state: &Arc<AppState>,
+    task: &jossie_db::ScheduledTask,
+) -> anyhow::Result<()> {
+    tracing::info!("Executing task {}: {}", task.id, task.task_type);
+
+    match task.task_type.as_str() {
+        "agent_run" => {
+            let prompt = task
+                .task_data
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let context = task
+                .task_data
+                .get("context")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let conversation_id: Uuid = task.conversation_id.parse()?;
+
+            // Create user message for the scheduled task
+            let content = if context.is_empty() {
+                prompt.to_string()
+            } else {
+                format!("{}\n\nContext: {}", prompt, context)
+            };
+
+            let user_msg = Message {
+                id: Uuid::new_v4(),
+                conversation_id,
+                role: Role::User,
+                content,
+                tool_calls: None,
+                tool_call_id: None,
+                name: Some("scheduled_task".to_string()),
+                created_at: Utc::now(),
+            };
+            state.db.save_message(&user_msg).await?;
+
+            // Run the agent loop
+            let response = jossie_server::agent::run_agent_loop(state, conversation_id).await?;
+
+            // Send response via Telegram if configured
+            if !state.telegram_token.trim().is_empty() {
+                if let Some(chat) = state.db.get_latest_telegram_chat().await? {
+                    if chat.conversation_id == conversation_id {
+                        jossie_telegram::send_message(
+                            &state.telegram_token,
+                            chat.chat_id,
+                            &response,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+        _ => {
+            anyhow::bail!("Unknown task type: {}", task.task_type);
+        }
+    }
+
+    // Handle scheduling based on type
+    match task.schedule_type.as_str() {
+        "once" => {
+            state.db.mark_task_completed(&task.id).await?;
+        }
+        "interval" => {
+            let interval_secs: i64 = task
+                .schedule_value
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid interval value"))?;
+            let next_run = Utc::now() + chrono::Duration::seconds(interval_secs);
+            state
+                .db
+                .update_task_next_run(&task.id, &next_run.to_rfc3339(), true)
+                .await?;
+        }
+        _ => {
+            anyhow::bail!("Unknown schedule type: {}", task.schedule_type);
+        }
+    }
+
+    Ok(())
+}
+
+async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
+    if state.telegram_token.trim().is_empty() {
+        return Ok(());
+    }
+
+    let messages = state.db.list_pending_oob_messages(20).await?;
+
+    for msg in messages {
+        tracing::info!("Sending OOB message: {}", msg.id);
+
+        let conversation_id: Uuid = msg.conversation_id.parse()?;
+
+        // Try to find the Telegram chat for this conversation
+        let chat_id = if let Some(chat) = state.db.get_latest_telegram_chat().await? {
+            if chat.conversation_id == conversation_id {
+                Some(chat.chat_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(chat_id) = chat_id {
+            match jossie_telegram::send_message(&state.telegram_token, chat_id, &msg.content).await
+            {
+                Ok(_) => {
+                    state.db.mark_oob_message_sent(&msg.id).await?;
+                    tracing::info!("OOB message {} sent successfully", msg.id);
+                }
+                Err(e) => {
+                    state
+                        .db
+                        .mark_oob_message_failed(&msg.id, &e.to_string())
+                        .await?;
+                    tracing::error!("Failed to send OOB message {}: {}", msg.id, e);
+                }
+            }
+        } else {
+            let err = "No Telegram chat found for conversation";
+            state.db.mark_oob_message_failed(&msg.id, err).await?;
+            tracing::warn!("Cannot send OOB message {}: {}", msg.id, err);
+        }
+    }
+
     Ok(())
 }

@@ -4,6 +4,7 @@ use jossie_core::integration::IntegrationRegistry;
 use jossie_db::Database;
 use jossie_integration_http::HttpIntegration;
 use jossie_integration_memory::MemoryIntegration;
+use jossie_integration_scheduler::SchedulerIntegration;
 use jossie_llm::LlmClient;
 use jossie_server::AppState;
 use std::sync::Arc;
@@ -33,6 +34,18 @@ async fn main() -> Result<()> {
     let db = Arc::new(db);
 
     let llm = LlmClient::new(&config.llm.api_url, &config.llm.api_key, &config.llm.model);
+
+    // Initialize KG LLM client - use cheaper model if configured, otherwise use primary model
+    let kg_llm = if let Some(kg_model) = &config.llm.kg_model {
+        tracing::info!(
+            "Using dedicated model for knowledge graph extraction: {}",
+            kg_model
+        );
+        LlmClient::new(&config.llm.api_url, &config.llm.api_key, kg_model)
+    } else {
+        tracing::info!("Using primary model for knowledge graph extraction");
+        llm.clone()
+    };
 
     let mut registry = IntegrationRegistry::new();
     registry.register(Arc::new(MemoryIntegration::new(db.clone())));
@@ -69,6 +82,10 @@ async fn main() -> Result<()> {
     )));
     tracing::info!("Registered http integration");
 
+    // Scheduler Integration
+    registry.register(Arc::new(SchedulerIntegration::new(db.clone())));
+    tracing::info!("Registered scheduler integration");
+
     tracing::info!(
         "Registered {} tool(s)",
         registry.all_tool_definitions().len()
@@ -77,6 +94,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState {
         db,
         llm,
+        kg_llm,
         registry,
         auth_token: config.server.auth_token.clone(),
         system_prompt: config.llm.system_prompt.clone(),
@@ -97,7 +115,9 @@ async fn main() -> Result<()> {
         });
     }
 
-    if state.google_integration.is_some() && !state.telegram_token.is_empty() {
+    // Start event loop if Telegram is configured
+    // The event loop now handles integration events, scheduled tasks, and OOB messages
+    if !state.telegram_token.is_empty() {
         let event_state = state.clone();
         tokio::spawn(async move {
             if let Err(e) = event_loop::start_event_loop(event_state).await {

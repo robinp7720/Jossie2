@@ -93,3 +93,40 @@ CREATE TABLE IF NOT EXISTS graph_edges (
 
 CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_id);
 CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_id);
+
+-- Scheduled tasks created by the agent via chat tools
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    task_type TEXT NOT NULL,  -- 'agent_run', 'tool_call', etc.
+    task_data TEXT NOT NULL,  -- JSON payload
+    schedule_type TEXT NOT NULL,  -- 'once', 'interval', 'cron'
+    schedule_value TEXT NOT NULL, -- ISO timestamp, interval seconds, or cron expression
+    status TEXT NOT NULL DEFAULT 'pending',  -- 'pending', 'running', 'completed', 'failed', 'cancelled'
+    next_run_at TEXT,
+    last_run_at TEXT,
+    run_count INTEGER NOT NULL DEFAULT 0,
+    max_runs INTEGER,  -- NULL for infinite
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_next_run 
+    ON scheduled_tasks(status, next_run_at);
+
+-- Out-of-band messages queued by the agent
+CREATE TABLE IF NOT EXISTS out_of_band_messages (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    sender TEXT NOT NULL DEFAULT 'assistant',  -- 'assistant', 'system', etc.
+    content TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'normal',  -- 'low', 'normal', 'high', 'urgent'
+    status TEXT NOT NULL DEFAULT 'pending',  -- 'pending', 'sent', 'failed'
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    sent_at TEXT,
+    last_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_oob_messages_status 
+    ON out_of_band_messages(status, created_at);

@@ -98,11 +98,11 @@ pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<S
 
             // Trigger background extraction
             let db = state.db.clone();
-            let llm = state.llm.clone();
+            let kg_llm = state.kg_llm.clone();
             let assistant_reply = content.clone();
 
             tokio::spawn(async move {
-                spawn_knowledge_extraction(db, llm, last_user_msg, assistant_reply).await;
+                spawn_knowledge_extraction(db, kg_llm, last_user_msg, assistant_reply).await;
             });
 
             return Ok(content);
@@ -123,7 +123,26 @@ pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<S
         messages.push(assistant_msg);
 
         for call in &tool_calls {
-            let result = state.registry.execute(call).await;
+            // Inject conversation_id into scheduler tool arguments
+            let mut call_with_context = call.clone();
+            if call.name.starts_with("schedule_")
+                || call.name == "send_user_message"
+                || call.name == "list_scheduled_tasks"
+            {
+                if let Ok(mut args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+                    if let Some(obj) = args.as_object_mut() {
+                        obj.insert(
+                            "__conversation_id".to_string(),
+                            serde_json::Value::String(conv_id.to_string()),
+                        );
+                        if let Ok(json_str) = serde_json::to_string(&args) {
+                            call_with_context.arguments = json_str;
+                        }
+                    }
+                }
+            }
+
+            let result = state.registry.execute(&call_with_context).await;
             let tool_msg = Message {
                 id: Uuid::new_v4(),
                 conversation_id: conv_id,
@@ -147,7 +166,7 @@ pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<S
 
 pub(crate) async fn spawn_knowledge_extraction(
     db: Arc<jossie_db::Database>,
-    llm: jossie_llm::LlmClient,
+    kg_llm: jossie_llm::LlmClient,
     user_msg: String,
     assistant_msg: String,
 ) {
@@ -196,7 +215,7 @@ If nothing to extract, output {{ "nodes": [], "edges": [] }}"#
         created_at: Utc::now(),
     };
 
-    match llm.complete(&[sys_msg, user_msg], &[]).await {
+    match kg_llm.complete(&[sys_msg, user_msg], &[]).await {
         Ok((response, _)) => {
             let clean_json = response
                 .trim()

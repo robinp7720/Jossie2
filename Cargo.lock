@@ -1851,6 +1851,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "jossie-integration-scheduler"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "jossie-core",
+ "jossie-db",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "jossie-llm"
 version = "0.1.0"
 dependencies = [
@@ -1925,6 +1942,7 @@ dependencies = [
  "jossie-integration-graph",
  "jossie-integration-http",
  "jossie-integration-memory",
+ "jossie-integration-scheduler",
  "jossie-llm",
  "jossie-server",
  "jossie-telegram",

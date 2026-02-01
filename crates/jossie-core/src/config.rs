@@ -33,6 +33,8 @@ pub struct LlmConfig {
     pub api_url: String,
     pub api_key: String,
     pub model: String,
+    #[serde(default)]
+    pub kg_model: Option<String>,
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
     #[serde(default = "default_max_iterations")]

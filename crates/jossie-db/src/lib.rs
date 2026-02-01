@@ -1,8 +1,8 @@
+use chrono::Utc;
 use jossie_core::types::{Conversation, Message, Role};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
-use uuid::Uuid;
-use chrono::Utc;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 pub struct Database {
     pool: SqlitePool,
@@ -35,29 +35,40 @@ impl Database {
         let now = Utc::now();
         let id_str = id.to_string();
         let now_str = now.to_rfc3339();
-        sqlx::query("INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)")
-            .bind(&id_str)
-            .bind(title)
-            .bind(&now_str)
-            .bind(&now_str)
-            .execute(&self.pool)
-            .await?;
-        Ok(Conversation { id, title: title.map(String::from), created_at: now, updated_at: now })
+        sqlx::query(
+            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&id_str)
+        .bind(title)
+        .bind(&now_str)
+        .bind(&now_str)
+        .execute(&self.pool)
+        .await?;
+        Ok(Conversation {
+            id,
+            title: title.map(String::from),
+            created_at: now,
+            updated_at: now,
+        })
     }
 
     pub async fn get_conversation(&self, id: Uuid) -> anyhow::Result<Option<Conversation>> {
         let id_str = id.to_string();
-        let row = sqlx::query_as::<_, ConversationRow>("SELECT id, title, created_at, updated_at FROM conversations WHERE id = ?")
-            .bind(&id_str)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query_as::<_, ConversationRow>(
+            "SELECT id, title, created_at, updated_at FROM conversations WHERE id = ?",
+        )
+        .bind(&id_str)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.map(|r| r.into()))
     }
 
     pub async fn list_conversations(&self) -> anyhow::Result<Vec<Conversation>> {
-        let rows = sqlx::query_as::<_, ConversationRow>("SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC")
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query_as::<_, ConversationRow>(
+            "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
@@ -97,7 +108,8 @@ impl Database {
         sqlx::query("DELETE FROM memory WHERE key = ?")
             .bind(key)
             .execute(&self.pool)
-            .await.ok();
+            .await
+            .ok();
         sqlx::query("INSERT INTO memory (key, content, tags) VALUES (?, ?, ?)")
             .bind(key)
             .bind(content)
@@ -105,41 +117,63 @@ impl Database {
             .execute(&self.pool)
             .await?;
         let now_str = Utc::now().to_rfc3339();
-        sqlx::query("INSERT OR REPLACE INTO memory_metadata (key, created_at, updated_at) VALUES (?, ?, ?)")
-            .bind(key)
-            .bind(&now_str)
-            .bind(&now_str)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "INSERT OR REPLACE INTO memory_metadata (key, created_at, updated_at) VALUES (?, ?, ?)",
+        )
+        .bind(key)
+        .bind(&now_str)
+        .bind(&now_str)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     pub async fn memory_search(&self, query: &str) -> anyhow::Result<Vec<MemoryEntry>> {
-        let rows = sqlx::query_as::<_, MemoryRow>("SELECT key, content, tags FROM memory WHERE memory MATCH ? ORDER BY rank LIMIT 10")
-            .bind(query)
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.into_iter().map(|r| MemoryEntry { key: r.key, content: r.content, tags: r.tags }).collect())
+        let rows = sqlx::query_as::<_, MemoryRow>(
+            "SELECT key, content, tags FROM memory WHERE memory MATCH ? ORDER BY rank LIMIT 10",
+        )
+        .bind(query)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| MemoryEntry {
+                key: r.key,
+                content: r.content,
+                tags: r.tags,
+            })
+            .collect())
     }
 
     pub async fn get_memory(&self, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
-        let row = sqlx::query_as::<_, MemoryRow>("SELECT key, content, tags FROM memory WHERE key = ?")
-            .bind(key)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|r| MemoryEntry { key: r.key, content: r.content, tags: r.tags }))
+        let row =
+            sqlx::query_as::<_, MemoryRow>("SELECT key, content, tags FROM memory WHERE key = ?")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|r| MemoryEntry {
+            key: r.key,
+            content: r.content,
+            tags: r.tags,
+        }))
     }
 
     // Telegram
     pub async fn get_telegram_conversation(&self, chat_id: i64) -> anyhow::Result<Option<Uuid>> {
-        let row = sqlx::query_as::<_, TelegramChatRow>("SELECT conversation_id FROM telegram_chats WHERE telegram_chat_id = ?")
-            .bind(chat_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query_as::<_, TelegramChatRow>(
+            "SELECT conversation_id FROM telegram_chats WHERE telegram_chat_id = ?",
+        )
+        .bind(chat_id)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.and_then(|r| r.conversation_id.parse().ok()))
     }
 
-    pub async fn link_telegram_conversation(&self, chat_id: i64, conversation_id: Uuid) -> anyhow::Result<()> {
+    pub async fn link_telegram_conversation(
+        &self,
+        chat_id: i64,
+        conversation_id: Uuid,
+    ) -> anyhow::Result<()> {
         let conv_str = conversation_id.to_string();
         sqlx::query("INSERT OR REPLACE INTO telegram_chats (telegram_chat_id, conversation_id) VALUES (?, ?)")
             .bind(chat_id)
@@ -165,16 +199,27 @@ impl Database {
     }
 
     // Integration Settings
-    pub async fn get_integration_setting(&self, integration: &str, key: &str) -> anyhow::Result<Option<String>> {
-        let row = sqlx::query_as::<_, SettingsRow>("SELECT value FROM integration_settings WHERE integration = ? AND key = ?")
-            .bind(integration)
-            .bind(key)
-            .fetch_optional(&self.pool)
-            .await?;
+    pub async fn get_integration_setting(
+        &self,
+        integration: &str,
+        key: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let row = sqlx::query_as::<_, SettingsRow>(
+            "SELECT value FROM integration_settings WHERE integration = ? AND key = ?",
+        )
+        .bind(integration)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.map(|r| r.value))
     }
 
-    pub async fn set_integration_setting(&self, integration: &str, key: &str, value: &str) -> anyhow::Result<()> {
+    pub async fn set_integration_setting(
+        &self,
+        integration: &str,
+        key: &str,
+        value: &str,
+    ) -> anyhow::Result<()> {
         sqlx::query("INSERT OR REPLACE INTO integration_settings (integration, key, value) VALUES (?, ?, ?)")
             .bind(integration)
             .bind(key)
@@ -184,29 +229,47 @@ impl Database {
         Ok(())
     }
 
-    pub async fn get_all_integration_settings(&self, integration: &str) -> anyhow::Result<HashMap<String, String>> {
-        let rows = sqlx::query_as::<_, SettingsRowAll>("SELECT key, value FROM integration_settings WHERE integration = ?")
-            .bind(integration)
-            .fetch_all(&self.pool)
-            .await?;
+    pub async fn get_all_integration_settings(
+        &self,
+        integration: &str,
+    ) -> anyhow::Result<HashMap<String, String>> {
+        let rows = sqlx::query_as::<_, SettingsRowAll>(
+            "SELECT key, value FROM integration_settings WHERE integration = ?",
+        )
+        .bind(integration)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.into_iter().map(|r| (r.key, r.value)).collect())
     }
 
     // Integration Accounts
-    pub async fn add_integration_account(&self, integration: &str, name: &str, data: &serde_json::Value) -> anyhow::Result<String> {
+    pub async fn add_integration_account(
+        &self,
+        integration: &str,
+        name: &str,
+        data: &serde_json::Value,
+    ) -> anyhow::Result<String> {
         let id = Uuid::new_v4().to_string();
         let data_str = serde_json::to_string(data)?;
-        sqlx::query("INSERT INTO integration_accounts (id, integration, name, data) VALUES (?, ?, ?, ?)")
-            .bind(&id)
-            .bind(integration)
-            .bind(name)
-            .bind(&data_str)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "INSERT INTO integration_accounts (id, integration, name, data) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(integration)
+        .bind(name)
+        .bind(&data_str)
+        .execute(&self.pool)
+        .await?;
         Ok(id)
     }
 
-    pub async fn upsert_integration_account(&self, id: &str, integration: &str, name: &str, data: &serde_json::Value) -> anyhow::Result<()> {
+    pub async fn upsert_integration_account(
+        &self,
+        id: &str,
+        integration: &str,
+        name: &str,
+        data: &serde_json::Value,
+    ) -> anyhow::Result<()> {
         let data_str = serde_json::to_string(data)?;
         sqlx::query("INSERT OR REPLACE INTO integration_accounts (id, integration, name, data) VALUES (?, ?, ?, ?)")
             .bind(id)
@@ -218,15 +281,23 @@ impl Database {
         Ok(())
     }
 
-    pub async fn get_integration_account(&self, id: &str) -> anyhow::Result<Option<IntegrationAccount>> {
-        let row = sqlx::query_as::<_, IntegrationAccount>("SELECT id, integration, name, data, created_at FROM integration_accounts WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+    pub async fn get_integration_account(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<IntegrationAccount>> {
+        let row = sqlx::query_as::<_, IntegrationAccount>(
+            "SELECT id, integration, name, data, created_at FROM integration_accounts WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row)
     }
 
-    pub async fn list_integration_accounts(&self, integration: &str) -> anyhow::Result<Vec<IntegrationAccount>> {
+    pub async fn list_integration_accounts(
+        &self,
+        integration: &str,
+    ) -> anyhow::Result<Vec<IntegrationAccount>> {
         let rows = sqlx::query_as::<_, IntegrationAccount>("SELECT id, integration, name, data, created_at FROM integration_accounts WHERE integration = ? ORDER BY created_at ASC")
             .bind(integration)
             .fetch_all(&self.pool)
@@ -268,7 +339,10 @@ impl Database {
         Ok(res.rows_affected() > 0)
     }
 
-    pub async fn list_pending_integration_events(&self, limit: usize) -> anyhow::Result<Vec<IntegrationEvent>> {
+    pub async fn list_pending_integration_events(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<IntegrationEvent>> {
         let rows = sqlx::query_as::<_, IntegrationEventRow>(
             "SELECT id, integration, account_id, event_type, dedupe_key, payload, status, created_at, processed_at, last_error
              FROM integration_events
@@ -303,13 +377,19 @@ impl Database {
 
     // Knowledge Graph
 
-    pub async fn graph_upsert_node(&self, id: &str, label: &str, node_type: &str, properties: &serde_json::Value) -> anyhow::Result<()> {
+    pub async fn graph_upsert_node(
+        &self,
+        id: &str,
+        label: &str,
+        node_type: &str,
+        properties: &serde_json::Value,
+    ) -> anyhow::Result<()> {
         let props_str = serde_json::to_string(properties)?;
         let now_str = Utc::now().to_rfc3339();
-        
+
         // Use normalized ID if provided, otherwise generate one (but usually ID is derived from label for deduplication)
         // Here we assume caller provides a stable ID (e.g. lowercase label)
-        
+
         sqlx::query(
             "INSERT INTO graph_nodes (id, label, type, properties, created_at, updated_at) 
              VALUES (?, ?, ?, ?, ?, ?)
@@ -317,7 +397,7 @@ impl Database {
                 label = excluded.label, 
                 type = excluded.type,
                 properties = excluded.properties,
-                updated_at = excluded.updated_at"
+                updated_at = excluded.updated_at",
         )
         .bind(id)
         .bind(label)
@@ -330,16 +410,23 @@ impl Database {
         Ok(())
     }
 
-    pub async fn graph_upsert_edge(&self, source_id: &str, target_id: &str, relation: &str, weight: f64, properties: &serde_json::Value) -> anyhow::Result<String> {
+    pub async fn graph_upsert_edge(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        relation: &str,
+        weight: f64,
+        properties: &serde_json::Value,
+    ) -> anyhow::Result<String> {
         // Check if edge exists with same source, target, relation
-        // We'll treat (source, target, relation) as unique for simplicity in this iteration, 
+        // We'll treat (source, target, relation) as unique for simplicity in this iteration,
         // though the DB schema uses a UUID PK.
-        
+
         let props_str = serde_json::to_string(properties)?;
         let now_str = Utc::now().to_rfc3339();
 
         let existing = sqlx::query_as::<_, GraphEdgeRow>(
-            "SELECT * FROM graph_edges WHERE source_id = ? AND target_id = ? AND relation = ?"
+            "SELECT * FROM graph_edges WHERE source_id = ? AND target_id = ? AND relation = ?",
         )
         .bind(source_id)
         .bind(target_id)
@@ -349,7 +436,7 @@ impl Database {
 
         if let Some(edge) = existing {
             sqlx::query(
-                "UPDATE graph_edges SET weight = ?, properties = ?, updated_at = ? WHERE id = ?"
+                "UPDATE graph_edges SET weight = ?, properties = ?, updated_at = ? WHERE id = ?",
             )
             .bind(weight)
             .bind(&props_str)
@@ -388,10 +475,12 @@ impl Database {
 
     pub async fn graph_find_nodes(&self, query: &str) -> anyhow::Result<Vec<GraphNode>> {
         let search = format!("%{}%", query);
-        let rows = sqlx::query_as::<_, GraphNodeRow>("SELECT * FROM graph_nodes WHERE label LIKE ? LIMIT 20")
-            .bind(search)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query_as::<_, GraphNodeRow>(
+            "SELECT * FROM graph_nodes WHERE label LIKE ? LIMIT 20",
+        )
+        .bind(search)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
@@ -404,7 +493,7 @@ impl Database {
             FROM graph_edges e
             JOIN graph_nodes n ON e.target_id = n.id
             WHERE e.source_id = ?
-            "#
+            "#,
         )
         .bind(node_id)
         .fetch_all(&self.pool)
@@ -418,7 +507,7 @@ impl Database {
             FROM graph_edges e
             JOIN graph_nodes n ON e.source_id = n.id
             WHERE e.target_id = ?
-            "#
+            "#,
         )
         .bind(node_id)
         .fetch_all(&self.pool)
@@ -435,11 +524,11 @@ impl Database {
                     label: r.label,
                     node_type: r.node_type,
                     properties: serde_json::from_str(&r.node_properties).unwrap_or_default(),
-                }
+                },
             });
         }
         for r in incoming {
-             results.push(GraphNeighbor {
+            results.push(GraphNeighbor {
                 edge_id: r.edge_id,
                 relation: r.relation,
                 direction: "incoming".to_string(),
@@ -448,7 +537,7 @@ impl Database {
                     label: r.label,
                     node_type: r.node_type,
                     properties: serde_json::from_str(&r.node_properties).unwrap_or_default(),
-                }
+                },
             });
         }
 
@@ -458,7 +547,7 @@ impl Database {
     pub async fn graph_list_nodes(&self, limit: usize) -> anyhow::Result<Vec<GraphNode>> {
         let limit = limit.max(1).min(5000);
         let rows = sqlx::query_as::<_, GraphNodeRow>(
-            "SELECT * FROM graph_nodes ORDER BY updated_at DESC LIMIT ?"
+            "SELECT * FROM graph_nodes ORDER BY updated_at DESC LIMIT ?",
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -470,13 +559,226 @@ impl Database {
     pub async fn graph_list_edges(&self, limit: usize) -> anyhow::Result<Vec<GraphEdge>> {
         let limit = limit.max(1).min(5000);
         let rows = sqlx::query_as::<_, GraphEdgeRow>(
-            "SELECT * FROM graph_edges ORDER BY updated_at DESC LIMIT ?"
+            "SELECT * FROM graph_edges ORDER BY updated_at DESC LIMIT ?",
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
 
         Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    // Scheduled Tasks
+
+    pub async fn create_scheduled_task(
+        &self,
+        conversation_id: Uuid,
+        task_type: &str,
+        task_data: &serde_json::Value,
+        schedule_type: &str,
+        schedule_value: &str,
+        next_run_at: Option<&str>,
+        max_runs: Option<i64>,
+    ) -> anyhow::Result<String> {
+        let id = Uuid::new_v4().to_string();
+        let conv_str = conversation_id.to_string();
+        let task_data_str = serde_json::to_string(task_data)?;
+        let now_str = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO scheduled_tasks (id, conversation_id, task_type, task_data, schedule_type, schedule_value, next_run_at, max_runs, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(&id)
+        .bind(&conv_str)
+        .bind(task_type)
+        .bind(&task_data_str)
+        .bind(schedule_type)
+        .bind(schedule_value)
+        .bind(next_run_at)
+        .bind(max_runs)
+        .bind(&now_str)
+        .bind(&now_str)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(id)
+    }
+
+    pub async fn get_scheduled_task(&self, id: &str) -> anyhow::Result<Option<ScheduledTask>> {
+        let row = sqlx::query_as::<_, ScheduledTaskRow>(
+            "SELECT id, conversation_id, task_type, task_data, schedule_type, schedule_value, status, next_run_at, last_run_at, run_count, max_runs, created_at, updated_at, last_error
+             FROM scheduled_tasks WHERE id = ?"
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Into::into))
+    }
+
+    pub async fn list_pending_scheduled_tasks(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ScheduledTask>> {
+        let now_str = Utc::now().to_rfc3339();
+        let rows = sqlx::query_as::<_, ScheduledTaskRow>(
+            "SELECT id, conversation_id, task_type, task_data, schedule_type, schedule_value, status, next_run_at, last_run_at, run_count, max_runs, created_at, updated_at, last_error
+             FROM scheduled_tasks
+             WHERE status = 'pending' AND (next_run_at IS NULL OR next_run_at <= ?)
+             ORDER BY next_run_at ASC
+             LIMIT ?"
+        )
+        .bind(&now_str)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn update_task_next_run(
+        &self,
+        id: &str,
+        next_run: &str,
+        increment_count: bool,
+    ) -> anyhow::Result<()> {
+        let now_str = Utc::now().to_rfc3339();
+        if increment_count {
+            sqlx::query(
+                "UPDATE scheduled_tasks SET next_run_at = ?, last_run_at = ?, run_count = run_count + 1, updated_at = ? WHERE id = ?"
+            )
+            .bind(next_run)
+            .bind(&now_str)
+            .bind(&now_str)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query("UPDATE scheduled_tasks SET next_run_at = ?, updated_at = ? WHERE id = ?")
+                .bind(next_run)
+                .bind(&now_str)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn mark_task_completed(&self, id: &str) -> anyhow::Result<()> {
+        let now_str = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE scheduled_tasks SET status = 'completed', updated_at = ?, last_run_at = ? WHERE id = ?"
+        )
+        .bind(&now_str)
+        .bind(&now_str)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_task_failed(&self, id: &str, error: &str) -> anyhow::Result<()> {
+        let now_str = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE scheduled_tasks SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?"
+        )
+        .bind(error)
+        .bind(&now_str)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn cancel_scheduled_task(&self, id: &str) -> anyhow::Result<()> {
+        let now_str = Utc::now().to_rfc3339();
+        sqlx::query("UPDATE scheduled_tasks SET status = 'cancelled', updated_at = ? WHERE id = ?")
+            .bind(&now_str)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_scheduled_tasks_for_conversation(
+        &self,
+        conversation_id: Uuid,
+    ) -> anyhow::Result<Vec<ScheduledTask>> {
+        let conv_str = conversation_id.to_string();
+        let rows = sqlx::query_as::<_, ScheduledTaskRow>(
+            "SELECT id, conversation_id, task_type, task_data, schedule_type, schedule_value, status, next_run_at, last_run_at, run_count, max_runs, created_at, updated_at, last_error
+             FROM scheduled_tasks
+             WHERE conversation_id = ? AND status IN ('pending', 'running')
+             ORDER BY next_run_at ASC"
+        )
+        .bind(&conv_str)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    // Out-of-Band Messages
+
+    pub async fn queue_oob_message(
+        &self,
+        conversation_id: Uuid,
+        content: &str,
+        priority: &str,
+    ) -> anyhow::Result<String> {
+        let id = Uuid::new_v4().to_string();
+        let conv_str = conversation_id.to_string();
+        let now_str = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO out_of_band_messages (id, conversation_id, content, priority, created_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&conv_str)
+        .bind(content)
+        .bind(priority)
+        .bind(&now_str)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(id)
+    }
+
+    pub async fn list_pending_oob_messages(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<OutOfBandMessage>> {
+        let rows = sqlx::query_as::<_, OutOfBandMessageRow>(
+            "SELECT id, conversation_id, sender, content, priority, status, created_at, sent_at, last_error
+             FROM out_of_band_messages
+             WHERE status = 'pending'
+             ORDER BY priority DESC, created_at ASC
+             LIMIT ?"
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn mark_oob_message_sent(&self, id: &str) -> anyhow::Result<()> {
+        let now_str = Utc::now().to_rfc3339();
+        sqlx::query("UPDATE out_of_band_messages SET status = 'sent', sent_at = ? WHERE id = ?")
+            .bind(&now_str)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn mark_oob_message_failed(&self, id: &str, error: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE out_of_band_messages SET status = 'failed', last_error = ? WHERE id = ?",
+        )
+        .bind(error)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }
 
@@ -792,8 +1094,12 @@ mod tests {
     #[tokio::test]
     async fn memory_save_and_search() {
         let db = test_db().await;
-        db.memory_save("greeting", "Hello world, this is a test", "test greeting").await.unwrap();
-        db.memory_save("farewell", "Goodbye cruel world", "test farewell").await.unwrap();
+        db.memory_save("greeting", "Hello world, this is a test", "test greeting")
+            .await
+            .unwrap();
+        db.memory_save("farewell", "Goodbye cruel world", "test farewell")
+            .await
+            .unwrap();
 
         let results = db.memory_search("hello").await.unwrap();
         assert_eq!(results.len(), 1);
@@ -803,7 +1109,9 @@ mod tests {
     #[tokio::test]
     async fn memory_save_overwrites() {
         let db = test_db().await;
-        db.memory_save("key1", "original content", "").await.unwrap();
+        db.memory_save("key1", "original content", "")
+            .await
+            .unwrap();
         db.memory_save("key1", "updated content", "").await.unwrap();
 
         let results = db.memory_search("updated").await.unwrap();
@@ -817,8 +1125,14 @@ mod tests {
         let conv = db.create_conversation(Some("TG Chat")).await.unwrap();
         let chat_id = 123456789;
 
-        db.link_telegram_conversation(chat_id, conv.id).await.unwrap();
-        let linked_id = db.get_telegram_conversation(chat_id).await.unwrap().unwrap();
+        db.link_telegram_conversation(chat_id, conv.id)
+            .await
+            .unwrap();
+        let linked_id = db
+            .get_telegram_conversation(chat_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(linked_id, conv.id);
 
         let unknown = db.get_telegram_conversation(987654321).await.unwrap();
@@ -829,10 +1143,17 @@ mod tests {
     async fn test_integration_settings() {
         let db = test_db().await;
         let integration = "google";
-        db.set_integration_setting(integration, "refresh_token", "abc").await.unwrap();
-        db.set_integration_setting(integration, "other", "123").await.unwrap();
+        db.set_integration_setting(integration, "refresh_token", "abc")
+            .await
+            .unwrap();
+        db.set_integration_setting(integration, "other", "123")
+            .await
+            .unwrap();
 
-        let val = db.get_integration_setting(integration, "refresh_token").await.unwrap();
+        let val = db
+            .get_integration_setting(integration, "refresh_token")
+            .await
+            .unwrap();
         assert_eq!(val.as_deref(), Some("abc"));
 
         let all = db.get_all_integration_settings(integration).await.unwrap();
@@ -844,7 +1165,10 @@ mod tests {
     async fn test_integration_accounts() {
         let db = test_db().await;
         let data = serde_json::json!({"foo": "bar"});
-        let id = db.add_integration_account("test_int", "My Account", &data).await.unwrap();
+        let id = db
+            .add_integration_account("test_int", "My Account", &data)
+            .await
+            .unwrap();
 
         let acc = db.get_integration_account(&id).await.unwrap().unwrap();
         assert_eq!(acc.name, "My Account");
@@ -880,7 +1204,9 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].dedupe_key, "msg1");
 
-        db.mark_integration_event_processed(&pending[0].id).await.unwrap();
+        db.mark_integration_event_processed(&pending[0].id)
+            .await
+            .unwrap();
         let pending_after = db.list_pending_integration_events(10).await.unwrap();
         assert!(pending_after.is_empty());
     }
@@ -888,9 +1214,14 @@ mod tests {
     #[tokio::test]
     async fn graph_upsert_and_search_nodes() {
         let db = test_db().await;
-        db.graph_upsert_node("robin", "Robin Decker", "Person", &serde_json::json!({"email": "robin@example.com"}))
-            .await
-            .unwrap();
+        db.graph_upsert_node(
+            "robin",
+            "Robin Decker",
+            "Person",
+            &serde_json::json!({"email": "robin@example.com"}),
+        )
+        .await
+        .unwrap();
 
         let found = db.graph_find_nodes("Robin").await.unwrap();
         assert_eq!(found.len(), 1);
@@ -902,17 +1233,128 @@ mod tests {
     #[tokio::test]
     async fn graph_edges_and_neighbors() {
         let db = test_db().await;
-        db.graph_upsert_node("robin", "Robin", "Person", &serde_json::json!({})).await.unwrap();
-        db.graph_upsert_node("apollo", "Apollo", "Project", &serde_json::json!({})).await.unwrap();
+        db.graph_upsert_node("robin", "Robin", "Person", &serde_json::json!({}))
+            .await
+            .unwrap();
+        db.graph_upsert_node("apollo", "Apollo", "Project", &serde_json::json!({}))
+            .await
+            .unwrap();
 
         db.graph_upsert_edge("robin", "apollo", "WORKS_ON", 0.9, &serde_json::json!({}))
             .await
             .unwrap();
 
         let robin_neighbors = db.graph_get_neighbors("robin").await.unwrap();
-        assert!(robin_neighbors.iter().any(|n| n.node.id == "apollo" && n.direction == "outgoing"));
+        assert!(
+            robin_neighbors
+                .iter()
+                .any(|n| n.node.id == "apollo" && n.direction == "outgoing")
+        );
 
         let apollo_neighbors = db.graph_get_neighbors("apollo").await.unwrap();
-        assert!(apollo_neighbors.iter().any(|n| n.node.id == "robin" && n.direction == "incoming"));
+        assert!(
+            apollo_neighbors
+                .iter()
+                .any(|n| n.node.id == "robin" && n.direction == "incoming")
+        );
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScheduledTask {
+    pub id: String,
+    pub conversation_id: String,
+    pub task_type: String,
+    pub task_data: serde_json::Value,
+    pub schedule_type: String,
+    pub schedule_value: String,
+    pub status: String,
+    pub next_run_at: Option<String>,
+    pub last_run_at: Option<String>,
+    pub run_count: i64,
+    pub max_runs: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_error: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct ScheduledTaskRow {
+    id: String,
+    conversation_id: String,
+    task_type: String,
+    task_data: String,
+    schedule_type: String,
+    schedule_value: String,
+    status: String,
+    next_run_at: Option<String>,
+    last_run_at: Option<String>,
+    run_count: i64,
+    max_runs: Option<i64>,
+    created_at: String,
+    updated_at: String,
+    last_error: Option<String>,
+}
+
+impl From<ScheduledTaskRow> for ScheduledTask {
+    fn from(r: ScheduledTaskRow) -> Self {
+        ScheduledTask {
+            id: r.id,
+            conversation_id: r.conversation_id,
+            task_type: r.task_type,
+            task_data: serde_json::from_str(&r.task_data).unwrap_or_default(),
+            schedule_type: r.schedule_type,
+            schedule_value: r.schedule_value,
+            status: r.status,
+            next_run_at: r.next_run_at,
+            last_run_at: r.last_run_at,
+            run_count: r.run_count,
+            max_runs: r.max_runs,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+            last_error: r.last_error,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OutOfBandMessage {
+    pub id: String,
+    pub conversation_id: String,
+    pub sender: String,
+    pub content: String,
+    pub priority: String,
+    pub status: String,
+    pub created_at: String,
+    pub sent_at: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct OutOfBandMessageRow {
+    id: String,
+    conversation_id: String,
+    sender: String,
+    content: String,
+    priority: String,
+    status: String,
+    created_at: String,
+    sent_at: Option<String>,
+    last_error: Option<String>,
+}
+
+impl From<OutOfBandMessageRow> for OutOfBandMessage {
+    fn from(r: OutOfBandMessageRow) -> Self {
+        OutOfBandMessage {
+            id: r.id,
+            conversation_id: r.conversation_id,
+            sender: r.sender,
+            content: r.content,
+            priority: r.priority,
+            status: r.status,
+            created_at: r.created_at,
+            sent_at: r.sent_at,
+            last_error: r.last_error,
+        }
     }
 }
