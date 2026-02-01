@@ -52,7 +52,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(public)
         .merge(setup)
         .merge(api)
-        .nest_service("/", static_files)
+        .fallback_service(static_files)
         .layer(cors)
         .with_state(state)
 }
