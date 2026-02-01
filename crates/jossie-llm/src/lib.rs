@@ -2,7 +2,7 @@ use futures::StreamExt;
 use jossie_core::integration::{ToolCall, ToolDefinition};
 use jossie_core::types::{Message, Role};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 #[derive(Clone)]
@@ -14,138 +14,98 @@ pub struct LlmClient {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ResponseRequest {
+struct ChatCompletionRequest {
     model: String,
-    input: Vec<InputItem>,
+    messages: Vec<OpenAIMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<ResponseTool>>,
+    tools: Option<Vec<OpenAITool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    include: Option<Vec<String>>,
     stream: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type")]
-enum InputItem {
-    #[serde(rename = "message")]
-    Message {
-        role: String,
-        content: Vec<InputContent>,
-    },
-    #[serde(rename = "function_call")]
-    FunctionCall {
-        call_id: String,
-        name: String,
-        arguments: String,
-    },
-    #[serde(rename = "function_call_output")]
-    FunctionCallOutput { call_id: String, output: String },
+struct OpenAIMessage {
+    role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAIToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type")]
-enum InputContent {
-    #[serde(rename = "input_text")]
-    InputText { text: String },
-    #[serde(rename = "output_text")]
-    OutputText { text: String },
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type")]
-enum ResponseTool {
-    #[serde(rename = "function")]
-    Function {
-        name: String,
-        description: String,
-        parameters: serde_json::Value,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        strict: Option<bool>,
-    },
-    #[serde(rename = "web_search")]
-    WebSearch {},
-    #[serde(rename = "code_interpreter")]
-    CodeInterpreter { container: CodeInterpreterContainer },
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct CodeInterpreterContainer {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAITool {
     r#type: String,
+    function: OpenAIFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAIFunction {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAIToolCall {
+    id: String,
+    r#type: String,
+    function: OpenAIFunctionCall,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenAIFunctionCall {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ResponseBody {
-    #[serde(default)]
-    output: Vec<ResponseOutputItem>,
+struct ChatCompletionResponse {
+    choices: Vec<ChatCompletionChoice>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
-enum ResponseOutputItem {
-    #[serde(rename = "message")]
-    Message {
-        #[serde(default)]
-        content: Vec<ResponseContentPart>,
-    },
-    #[serde(rename = "web_search_call")]
-    WebSearchCall {
-        #[serde(default)]
-        action: Option<WebSearchAction>,
-    },
-    #[serde(rename = "function_call")]
-    FunctionCall {
-        #[serde(default)]
-        call_id: Option<String>,
-        #[serde(default)]
-        id: Option<String>,
-        #[serde(default)]
-        name: Option<String>,
-        #[serde(default)]
-        arguments: Option<String>,
-    },
-    #[serde(other)]
-    Other,
+struct ChatCompletionChoice {
+    message: ChatCompletionMessage,
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
-enum ResponseContentPart {
-    #[serde(rename = "output_text")]
-    OutputText {
-        text: String,
-        #[serde(default)]
-        annotations: Vec<ResponseAnnotation>,
-    },
-    #[serde(other)]
-    Other,
+struct ChatCompletionMessage {
+    content: Option<String>,
+    tool_calls: Option<Vec<OpenAIToolCall>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
-enum ResponseAnnotation {
-    #[serde(rename = "url_citation")]
-    UrlCitation {
-        url: String,
-        #[serde(default)]
-        title: Option<String>,
-    },
-    #[serde(other)]
-    Other,
+struct ChatCompletionChunk {
+    choices: Vec<ChatCompletionChunkChoice>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct WebSearchAction {
-    #[serde(default)]
-    sources: Vec<WebSearchSource>,
+struct ChatCompletionChunkChoice {
+    delta: ChatCompletionChunkDelta,
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct WebSearchSource {
-    url: String,
-    #[serde(default)]
-    title: Option<String>,
+struct ChatCompletionChunkDelta {
+    content: Option<String>,
+    tool_calls: Option<Vec<ChatCompletionChunkToolCall>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ChatCompletionChunkToolCall {
+    index: i32,
+    id: Option<String>,
+    function: Option<ChatCompletionChunkFunction>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ChatCompletionChunkFunction {
+    name: Option<String>,
+    arguments: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -166,70 +126,76 @@ impl LlmClient {
         }
     }
 
-    fn build_input(messages: &[Message]) -> Vec<InputItem> {
+    fn build_messages(messages: &[Message]) -> Vec<OpenAIMessage> {
         let mut items = Vec::new();
 
         for m in messages {
             match m.role {
                 Role::Tool => {
-                    if let Some(call_id) = &m.tool_call_id {
-                        items.push(InputItem::FunctionCallOutput {
-                            call_id: call_id.clone(),
-                            output: m.content.clone(),
-                        });
-                    } else if !m.content.is_empty() {
-                        items.push(InputItem::Message {
-                            role: m.role.to_string(),
-                            content: vec![input_content_for_role(&m.role, &m.content)],
-                        });
-                    }
+                    items.push(OpenAIMessage {
+                        role: "tool".to_string(),
+                        content: Some(m.content.clone()),
+                        tool_calls: None,
+                        tool_call_id: m.tool_call_id.clone(),
+                    });
                 }
-                _ => {
-                    if !m.content.is_empty() {
-                        items.push(InputItem::Message {
-                            role: m.role.to_string(),
-                            content: vec![input_content_for_role(&m.role, &m.content)],
-                        });
-                    }
-
-                    if let Some(tc_val) = &m.tool_calls {
+                Role::Assistant => {
+                    let tool_calls = if let Some(tc_val) = &m.tool_calls {
                         if let Ok(flat_calls) =
                             serde_json::from_value::<Vec<ToolCall>>(tc_val.clone())
                         {
-                            for call in flat_calls {
-                                items.push(InputItem::FunctionCall {
-                                    call_id: call.id,
-                                    name: call.name,
-                                    arguments: call.arguments,
-                                });
+                            if flat_calls.is_empty() {
+                                None
+                            } else {
+                                Some(flat_calls.into_iter().map(|c| OpenAIToolCall {
+                                    id: c.id,
+                                    r#type: "function".to_string(),
+                                    function: OpenAIFunctionCall {
+                                        name: c.name,
+                                        arguments: c.arguments,
+                                    },
+                                }).collect())
                             }
+                        } else {
+                            None
                         }
-                    }
+                    } else {
+                        None
+                    };
+
+                    items.push(OpenAIMessage {
+                        role: "assistant".to_string(),
+                        content: if m.content.is_empty() && tool_calls.is_some() { None } else { Some(m.content.clone()) },
+                        tool_calls,
+                        tool_call_id: None,
+                    });
+                }
+                _ => {
+                    items.push(OpenAIMessage {
+                        role: m.role.to_string().to_lowercase(),
+                        content: Some(m.content.clone()),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
                 }
             }
         }
-
         items
     }
 
-    fn build_tools(tools: &[ToolDefinition]) -> Option<Vec<ResponseTool>> {
-        let mut built = Vec::new();
-
-        // built.push(ResponseTool::WebSearch {});
-        // built.push(ResponseTool::CodeInterpreter {
-        //     container: CodeInterpreterContainer { r#type: "auto".to_string() },
-        // });
-
-        for t in tools {
-            built.push(ResponseTool::Function {
+    fn build_tools(tools: &[ToolDefinition]) -> Option<Vec<OpenAITool>> {
+        if tools.is_empty() {
+            return None;
+        }
+        let built = tools.iter().map(|t| OpenAITool {
+            r#type: "function".to_string(),
+            function: OpenAIFunction {
                 name: t.name.clone(),
                 description: t.description.clone(),
                 parameters: t.parameters.clone(),
-                strict: Some(true),
-            });
-        }
-
-        if built.is_empty() { None } else { Some(built) }
+            },
+        }).collect();
+        Some(built)
     }
 
     /// Non-streaming completion. Returns content and optional tool calls.
@@ -238,18 +204,17 @@ impl LlmClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> anyhow::Result<(String, Vec<ToolCall>)> {
-        let req = ResponseRequest {
+        let req = ChatCompletionRequest {
             model: self.model.clone(),
-            input: Self::build_input(messages),
+            messages: Self::build_messages(messages),
             tools: Self::build_tools(tools),
-            tool_choice: Some(serde_json::Value::String("auto".to_string())),
-            include: Some(vec!["web_search_call.action.sources".to_string()]),
+            tool_choice: if tools.is_empty() { None } else { Some(serde_json::Value::String("auto".to_string())) },
             stream: false,
         };
 
         let resp = self
             .client
-            .post(format!("{}/responses", self.api_url))
+            .post(format!("{}/chat/completions", self.api_url))
             .bearer_auth(&self.api_key)
             .json(&req)
             .send()
@@ -261,54 +226,23 @@ impl LlmClient {
             anyhow::bail!("LLM API error {status}: {body}");
         }
 
-        let response: ResponseBody = resp.json().await?;
-        let mut content = String::new();
-        let mut tool_calls = Vec::new();
-        let mut sources: Vec<WebSearchSource> = Vec::new();
-        let mut annotations: Vec<WebSearchSource> = Vec::new();
-
-        for item in response.output {
-            match item {
-                ResponseOutputItem::Message { content: parts } => {
-                    for part in parts {
-                        if let ResponseContentPart::OutputText {
-                            text,
-                            annotations: ann,
-                        } = part
-                        {
-                            content.push_str(&text);
-                            for annotation in ann {
-                                if let ResponseAnnotation::UrlCitation { url, title } = annotation {
-                                    annotations.push(WebSearchSource { url, title });
-                                }
-                            }
-                        }
-                    }
-                }
-                ResponseOutputItem::WebSearchCall { action } => {
-                    if let Some(action) = action {
-                        sources.extend(action.sources);
-                    }
-                }
-                ResponseOutputItem::FunctionCall {
-                    call_id,
-                    id,
-                    name,
-                    arguments,
-                } => {
-                    let Some(name) = name else { continue };
-                    let call_id = call_id.or(id).unwrap_or_default();
+        let response: ChatCompletionResponse = resp.json().await?;
+        if let Some(choice) = response.choices.first() {
+            let content = choice.message.content.clone().unwrap_or_default();
+            let mut tool_calls = Vec::new();
+            if let Some(calls) = &choice.message.tool_calls {
+                for c in calls {
                     tool_calls.push(ToolCall {
-                        id: call_id,
-                        name,
-                        arguments: arguments.unwrap_or_default(),
+                        id: c.id.clone(),
+                        name: c.function.name.clone(),
+                        arguments: c.function.arguments.clone(),
                     });
                 }
-                ResponseOutputItem::Other => {}
             }
+            Ok((content, tool_calls))
+        } else {
+            Ok((String::new(), Vec::new()))
         }
-
-        Ok((content, tool_calls))
     }
 
     /// Streaming completion. Sends events to the channel.
@@ -318,18 +252,17 @@ impl LlmClient {
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamEvent>,
     ) -> anyhow::Result<()> {
-        let req = ResponseRequest {
+        let req = ChatCompletionRequest {
             model: self.model.clone(),
-            input: Self::build_input(messages),
+            messages: Self::build_messages(messages),
             tools: Self::build_tools(tools),
-            tool_choice: Some(serde_json::Value::String("auto".to_string())),
-            include: Some(vec!["web_search_call.action.sources".to_string()]),
+            tool_choice: if tools.is_empty() { None } else { Some(serde_json::Value::String("auto".to_string())) },
             stream: true,
         };
 
         let resp = self
             .client
-            .post(format!("{}/responses", self.api_url))
+            .post(format!("{}/chat/completions", self.api_url))
             .bearer_auth(&self.api_key)
             .json(&req)
             .send()
@@ -348,7 +281,7 @@ impl LlmClient {
 
         let mut stream = resp.bytes_stream();
         let mut buffer = String::new();
-        let mut pending_calls: HashMap<String, PendingToolCall> = HashMap::new();
+        let mut pending_calls: HashMap<i32, PendingToolCall> = HashMap::new();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
@@ -371,108 +304,33 @@ impl LlmClient {
                     return Ok(());
                 }
 
-                let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
+                let Ok(chunk_data) = serde_json::from_str::<ChatCompletionChunk>(data) else {
                     continue;
                 };
-                let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-                match event_type {
-                    "response.output_text.delta" => {
-                        if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
-                            if !delta.is_empty() {
-                                let _ = tx.send(StreamEvent::Delta(delta.to_string())).await;
-                            }
+                for choice in chunk_data.choices {
+                    if let Some(content) = choice.delta.content {
+                         if !content.is_empty() {
+                            let _ = tx.send(StreamEvent::Delta(content)).await;
                         }
                     }
-                    "response.output_item.added" => {
-                        let item_id = event.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
-                        if item_id.is_empty() {
-                            continue;
-                        }
-                        if let Some(item) = event.get("item") {
-                            let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                            if item_type == "function_call" {
-                                let call_id = item
-                                    .get("call_id")
-                                    .and_then(|v| v.as_str())
-                                    .or_else(|| item.get("id").and_then(|v| v.as_str()))
-                                    .map(|s| s.to_string());
-                                let name = item
-                                    .get("name")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
-                                let arguments = item
-                                    .get("arguments")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let entry = pending_calls.entry(item_id.to_string()).or_default();
-                                if entry.call_id.is_none() {
-                                    entry.call_id = call_id;
+
+                    if let Some(tool_calls) = choice.delta.tool_calls {
+                        for tc in tool_calls {
+                            let entry = pending_calls.entry(tc.index).or_default();
+                            if let Some(id) = tc.id {
+                                entry.id = Some(id);
+                            }
+                            if let Some(func) = tc.function {
+                                if let Some(name) = func.name {
+                                    entry.name = Some(name);
                                 }
-                                if entry.name.is_none() {
-                                    entry.name = name;
-                                }
-                                if !arguments.is_empty() {
-                                    entry.arguments.push_str(&arguments);
+                                if let Some(args) = func.arguments {
+                                    entry.arguments.push_str(&args);
                                 }
                             }
                         }
                     }
-                    "response.function_call_arguments.delta" => {
-                        let item_id = event.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
-                        if item_id.is_empty() {
-                            continue;
-                        }
-                        if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
-                            let entry = pending_calls.entry(item_id.to_string()).or_default();
-                            entry.arguments.push_str(delta);
-                        }
-                    }
-                    "response.function_call_arguments.done" => {
-                        let item_id = event.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
-                        if item_id.is_empty() {
-                            continue;
-                        }
-                        let entry = pending_calls.entry(item_id.to_string()).or_default();
-                        if let Some(call_id) = event.get("call_id").and_then(|v| v.as_str()) {
-                            entry.call_id = Some(call_id.to_string());
-                        }
-                        if let Some(name) = event.get("name").and_then(|v| v.as_str()) {
-                            entry.name = Some(name.to_string());
-                        }
-                        if let Some(arguments) = event.get("arguments").and_then(|v| v.as_str()) {
-                            entry.arguments = arguments.to_string();
-                        }
-                    }
-                    "response.completed" => {
-                        if let Some(response_val) = event.get("response") {
-                            let sources = sources_from_response_value(response_val);
-                            if !sources.is_empty() {
-                                let mut suffix = String::new();
-                                append_sources(&mut suffix, &sources);
-                                let _ = tx.send(StreamEvent::Delta(suffix)).await;
-                            }
-                        }
-                        let calls = collect_tool_calls(pending_calls);
-                        if !calls.is_empty() {
-                            let _ = tx.send(StreamEvent::ToolCalls(calls)).await;
-                        }
-                        let _ = tx.send(StreamEvent::Done).await;
-                        return Ok(());
-                    }
-                    "error" => {
-                        let message = event.get("message").and_then(|v| v.as_str()).or_else(|| {
-                            event
-                                .get("error")
-                                .and_then(|e| e.get("message"))
-                                .and_then(|v| v.as_str())
-                        });
-                        if let Some(message) = message {
-                            let _ = tx.send(StreamEvent::Error(message.to_string())).await;
-                        }
-                    }
-                    _ => {}
                 }
             }
         }
@@ -486,134 +344,28 @@ impl LlmClient {
     }
 }
 
-fn input_content_for_role(role: &Role, text: &str) -> InputContent {
-    match role {
-        Role::Assistant | Role::Tool => InputContent::OutputText {
-            text: text.to_string(),
-        },
-        Role::System | Role::User => InputContent::InputText {
-            text: text.to_string(),
-        },
-    }
-}
-
 #[derive(Default)]
 struct PendingToolCall {
-    call_id: Option<String>,
+    id: Option<String>,
     name: Option<String>,
     arguments: String,
 }
 
-fn collect_tool_calls(pending: HashMap<String, PendingToolCall>) -> Vec<ToolCall> {
+fn collect_tool_calls(mut pending: HashMap<i32, PendingToolCall>) -> Vec<ToolCall> {
+    let mut indices: Vec<i32> = pending.keys().cloned().collect();
+    indices.sort();
+    
     let mut calls = Vec::new();
-    for (item_id, pending_call) in pending {
-        let Some(name) = pending_call.name else {
-            continue;
-        };
-        let id = pending_call.call_id.unwrap_or(item_id);
-        calls.push(ToolCall {
-            id,
-            name,
-            arguments: pending_call.arguments,
-        });
+    for idx in indices {
+        if let Some(ptc) = pending.remove(&idx) {
+            if let (Some(id), Some(name)) = (ptc.id, ptc.name) {
+                calls.push(ToolCall {
+                    id,
+                    name,
+                    arguments: ptc.arguments,
+                });
+            }
+        }
     }
     calls
-}
-
-fn append_sources(content: &mut String, sources: &[WebSearchSource]) {
-    if sources.is_empty() {
-        return;
-    }
-    let mut rendered = Vec::with_capacity(sources.len());
-    for source in sources {
-        rendered.push(format_source(source));
-    }
-    let list = join_natural_list(&rendered);
-    content.push_str("\n\nFor reference, I checked ");
-    content.push_str(&list);
-    content.push('.');
-}
-
-fn format_source(source: &WebSearchSource) -> String {
-    if let Some(title) = &source.title {
-        if !title.is_empty() {
-            return format!("{title} ({})", source.url);
-        }
-    }
-    source.url.clone()
-}
-
-fn join_natural_list(items: &[String]) -> String {
-    match items.len() {
-        0 => String::new(),
-        1 => items[0].clone(),
-        2 => format!("{} and {}", items[0], items[1]),
-        _ => {
-            let mut combined = String::new();
-            for (idx, item) in items.iter().enumerate() {
-                if idx > 0 {
-                    if idx + 1 == items.len() {
-                        combined.push_str(", and ");
-                    } else {
-                        combined.push_str(", ");
-                    }
-                }
-                combined.push_str(item);
-            }
-            combined
-        }
-    }
-}
-
-fn merge_sources(
-    primary: Vec<WebSearchSource>,
-    secondary: Vec<WebSearchSource>,
-) -> Vec<WebSearchSource> {
-    let mut seen = HashSet::new();
-    let mut merged = Vec::new();
-    for source in primary.into_iter().chain(secondary) {
-        if seen.insert(source.url.clone()) {
-            merged.push(source);
-        }
-    }
-    merged
-}
-
-fn sources_from_response_value(value: &serde_json::Value) -> Vec<WebSearchSource> {
-    let Ok(body) = serde_json::from_value::<ResponseBody>(value.clone()) else {
-        return Vec::new();
-    };
-    sources_from_response_body(body)
-}
-
-fn sources_from_response_body(body: ResponseBody) -> Vec<WebSearchSource> {
-    let mut sources = Vec::new();
-    let mut annotations = Vec::new();
-
-    for item in body.output {
-        match item {
-            ResponseOutputItem::Message { content: parts } => {
-                for part in parts {
-                    if let ResponseContentPart::OutputText {
-                        annotations: ann, ..
-                    } = part
-                    {
-                        for annotation in ann {
-                            if let ResponseAnnotation::UrlCitation { url, title } = annotation {
-                                annotations.push(WebSearchSource { url, title });
-                            }
-                        }
-                    }
-                }
-            }
-            ResponseOutputItem::WebSearchCall { action } => {
-                if let Some(action) = action {
-                    sources.extend(action.sources);
-                }
-            }
-            ResponseOutputItem::FunctionCall { .. } | ResponseOutputItem::Other => {}
-        }
-    }
-
-    merge_sources(sources, annotations)
 }
