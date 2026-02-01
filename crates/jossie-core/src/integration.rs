@@ -93,11 +93,22 @@ impl IntegrationRegistry {
             .execute(&call.name, &call.arguments)
             .await
         {
-            Ok(content) => ToolResult {
-                tool_call_id: call.id.clone(),
-                content,
-                is_error: false,
-            },
+            Ok(content) => {
+                // Log warning for large outputs to help debug token usage
+                if content.len() > 10_000 {
+                    tracing::warn!(
+                        "⚠️ Tool '{}' returned large output: {} chars. Preview: {:.100}...",
+                        call.name,
+                        content.len(),
+                        content
+                    );
+                }
+                ToolResult {
+                    tool_call_id: call.id.clone(),
+                    content,
+                    is_error: false,
+                }
+            }
             Err(e) => ToolResult {
                 tool_call_id: call.id.clone(),
                 content: format!("Error: {e}"),
