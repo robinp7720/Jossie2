@@ -161,8 +161,20 @@ impl HttpIntegration {
                     HeaderValue::from_str(&v),
                 ) {
                     final_headers.insert(hn, hv);
+                } else {
+                    tracing::warn!("Failed to parse header: {} = {}", k, v);
                 }
             }
+        }
+
+        // Log authentication header presence for troubleshooting
+        if final_headers.contains_key(reqwest::header::AUTHORIZATION) {
+            tracing::debug!("Request includes Authorization header");
+        } else {
+            tracing::debug!("Request does NOT include Authorization header");
+        }
+        if final_headers.contains_key(reqwest::header::COOKIE) {
+            tracing::debug!("Request includes Cookie header");
         }
 
         // Apply query params to initial URL
@@ -259,7 +271,18 @@ impl HttpIntegration {
             }
 
             tracing::info!("HTTP {} {}", current_method, current_url);
-            tracing::debug!("Headers: {}", self.redact_headers(&final_headers));
+            tracing::debug!("Request headers: {}", self.redact_headers(&final_headers));
+
+            // Authentication troubleshooting info
+            if final_headers.contains_key(reqwest::header::AUTHORIZATION) {
+                tracing::info!(
+                    "Sending request WITH Authorization header to {}",
+                    current_url
+                );
+            }
+            if final_headers.contains_key(reqwest::header::COOKIE) {
+                tracing::debug!("Sending request with Cookie header to {}", current_url);
+            }
 
             let mut req_builder = client
                 .request(current_method.clone(), current_url.clone())
@@ -314,8 +337,21 @@ impl HttpIntegration {
                                 current_url,
                                 next_url
                             );
+                            let had_auth =
+                                final_headers.contains_key(reqwest::header::AUTHORIZATION);
+                            let had_cookie = final_headers.contains_key(reqwest::header::COOKIE);
                             final_headers.remove(reqwest::header::AUTHORIZATION);
                             final_headers.remove(reqwest::header::COOKIE);
+                            if had_auth {
+                                tracing::warn!(
+                                    "Stripped Authorization header due to cross-origin redirect"
+                                );
+                            }
+                            if had_cookie {
+                                tracing::warn!(
+                                    "Stripped Cookie header due to cross-origin redirect"
+                                );
+                            }
                         } else {
                             tracing::debug!(
                                 "Redirecting same-origin from {} to {}. Preserving headers.",
@@ -350,6 +386,27 @@ impl HttpIntegration {
                 .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
                 .collect();
             tracing::debug!("Response headers count: {}", res_headers.len());
+
+            // Log authentication-related response headers
+            if res_headers.contains_key("www-authenticate") {
+                tracing::warn!(
+                    "Response includes WWW-Authenticate header (auth challenge): {}",
+                    res_headers
+                        .get("www-authenticate")
+                        .unwrap_or(&"unknown".to_string())
+                );
+            }
+            if status == 401 {
+                tracing::error!(
+                    "Authentication failed: HTTP 401 Unauthorized from {}",
+                    current_url
+                );
+            } else if status == 403 {
+                tracing::error!(
+                    "Authorization failed: HTTP 403 Forbidden from {}",
+                    current_url
+                );
+            }
 
             let body_bytes = resp.bytes().await.map_err(|e| {
                 tracing::error!("Failed to read response body: {}", e);
