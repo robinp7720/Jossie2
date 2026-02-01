@@ -19,8 +19,21 @@ async fn build_system_prompt(state: &AppState, user_message: Option<&str>) -> St
     ));
 
     // Dynamically append agent and user profiles from memory
+
+    // Core Identity (Soul) - High Priority
+    if let Ok(Some(entry)) = state.db.get_memory("agent_profile.soul").await {
+        prompt.push_str("\n\n## Agent Core Identity (Soul)\n");
+        prompt.push_str(&entry.content);
+    }
+
     if let Ok(Some(entry)) = state.db.get_memory("agent_profile").await {
         prompt.push_str("\n\n## Agent Description (Jossie)\n");
+        prompt.push_str(&entry.content);
+    }
+
+    // Current Mood/State
+    if let Ok(Some(entry)) = state.db.get_memory("agent_profile.mood").await {
+        prompt.push_str("\n\n## Current Mood\n");
         prompt.push_str(&entry.content);
     }
 
