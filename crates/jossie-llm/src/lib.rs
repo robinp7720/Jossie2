@@ -28,6 +28,8 @@ struct ChatCompletionRequest {
 struct OpenAIMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OpenAIToolCall>>,
@@ -134,6 +136,7 @@ impl LlmClient {
                 Role::Tool => {
                     items.push(OpenAIMessage {
                         role: "tool".to_string(),
+                        name: None,
                         content: Some(m.content.clone()),
                         tool_calls: None,
                         tool_call_id: m.tool_call_id.clone(),
@@ -147,14 +150,19 @@ impl LlmClient {
                             if flat_calls.is_empty() {
                                 None
                             } else {
-                                Some(flat_calls.into_iter().map(|c| OpenAIToolCall {
-                                    id: c.id,
-                                    r#type: "function".to_string(),
-                                    function: OpenAIFunctionCall {
-                                        name: c.name,
-                                        arguments: c.arguments,
-                                    },
-                                }).collect())
+                                Some(
+                                    flat_calls
+                                        .into_iter()
+                                        .map(|c| OpenAIToolCall {
+                                            id: c.id,
+                                            r#type: "function".to_string(),
+                                            function: OpenAIFunctionCall {
+                                                name: c.name,
+                                                arguments: c.arguments,
+                                            },
+                                        })
+                                        .collect(),
+                                )
                             }
                         } else {
                             None
@@ -165,7 +173,12 @@ impl LlmClient {
 
                     items.push(OpenAIMessage {
                         role: "assistant".to_string(),
-                        content: if m.content.is_empty() && tool_calls.is_some() { None } else { Some(m.content.clone()) },
+                        name: m.name.clone(),
+                        content: if m.content.is_empty() && tool_calls.is_some() {
+                            None
+                        } else {
+                            Some(m.content.clone())
+                        },
                         tool_calls,
                         tool_call_id: None,
                     });
@@ -173,6 +186,7 @@ impl LlmClient {
                 _ => {
                     items.push(OpenAIMessage {
                         role: m.role.to_string().to_lowercase(),
+                        name: m.name.clone(),
                         content: Some(m.content.clone()),
                         tool_calls: None,
                         tool_call_id: None,
@@ -187,14 +201,17 @@ impl LlmClient {
         if tools.is_empty() {
             return None;
         }
-        let built = tools.iter().map(|t| OpenAITool {
-            r#type: "function".to_string(),
-            function: OpenAIFunction {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                parameters: t.parameters.clone(),
-            },
-        }).collect();
+        let built = tools
+            .iter()
+            .map(|t| OpenAITool {
+                r#type: "function".to_string(),
+                function: OpenAIFunction {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    parameters: t.parameters.clone(),
+                },
+            })
+            .collect();
         Some(built)
     }
 
@@ -208,7 +225,11 @@ impl LlmClient {
             model: self.model.clone(),
             messages: Self::build_messages(messages),
             tools: Self::build_tools(tools),
-            tool_choice: if tools.is_empty() { None } else { Some(serde_json::Value::String("auto".to_string())) },
+            tool_choice: if tools.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::String("auto".to_string()))
+            },
             stream: false,
         };
 
@@ -256,7 +277,11 @@ impl LlmClient {
             model: self.model.clone(),
             messages: Self::build_messages(messages),
             tools: Self::build_tools(tools),
-            tool_choice: if tools.is_empty() { None } else { Some(serde_json::Value::String("auto".to_string())) },
+            tool_choice: if tools.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::String("auto".to_string()))
+            },
             stream: true,
         };
 
@@ -310,7 +335,7 @@ impl LlmClient {
 
                 for choice in chunk_data.choices {
                     if let Some(content) = choice.delta.content {
-                         if !content.is_empty() {
+                        if !content.is_empty() {
                             let _ = tx.send(StreamEvent::Delta(content)).await;
                         }
                     }
@@ -354,7 +379,7 @@ struct PendingToolCall {
 fn collect_tool_calls(mut pending: HashMap<i32, PendingToolCall>) -> Vec<ToolCall> {
     let mut indices: Vec<i32> = pending.keys().cloned().collect();
     indices.sort();
-    
+
     let mut calls = Vec::new();
     for idx in indices {
         if let Some(ptc) = pending.remove(&idx) {

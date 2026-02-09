@@ -8,6 +8,23 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[derive(Debug, Clone)]
+pub struct AgentRunOptions {
+    pub allow_schedule_management: bool,
+    pub allow_oob_messages: bool,
+    pub scheduled_execution: bool,
+}
+
+impl Default for AgentRunOptions {
+    fn default() -> Self {
+        Self {
+            allow_schedule_management: true,
+            allow_oob_messages: true,
+            scheduled_execution: false,
+        }
+    }
+}
+
 async fn build_system_prompt(state: &AppState, user_message: Option<&str>) -> String {
     let mut prompt = state.system_prompt.clone();
 
@@ -77,6 +94,14 @@ pub async fn prepend_system_prompt(
 }
 
 pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<String> {
+    run_agent_loop_with_options(state, conv_id, AgentRunOptions::default()).await
+}
+
+pub async fn run_agent_loop_with_options(
+    state: &AppState,
+    conv_id: Uuid,
+    options: AgentRunOptions,
+) -> anyhow::Result<String> {
     // Try to claim this conversation
     {
         let mut active = state.active_conversations.write().await;
@@ -86,7 +111,7 @@ pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<S
     }
 
     // Execute the agent loop and ensure we release the lock even on panic/error
-    let result = run_agent_loop_inner(state, conv_id).await;
+    let result = run_agent_loop_inner(state, conv_id, &options).await;
 
     // Release the conversation lock
     {
@@ -97,10 +122,24 @@ pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<S
     result
 }
 
-async fn run_agent_loop_inner(state: &AppState, conv_id: Uuid) -> anyhow::Result<String> {
-    let tools = state.registry.all_tool_definitions();
+async fn run_agent_loop_inner(
+    state: &AppState,
+    conv_id: Uuid,
+    options: &AgentRunOptions,
+) -> anyhow::Result<String> {
+    let mut tools = state.registry.all_tool_definitions();
+    if !options.allow_schedule_management {
+        tools.retain(|tool| tool.name != "schedule_task" && tool.name != "schedule_recurring_task");
+    }
+    if !options.allow_oob_messages {
+        tools.retain(|tool| tool.name != "send_user_message");
+    }
+
     // Fetch only the relevant context window from DB
-    let mut messages = state.db.get_messages(conv_id, Some(state.max_context_messages)).await?;
+    let mut messages = state
+        .db
+        .get_messages(conv_id, Some(state.max_context_messages))
+        .await?;
 
     // Capture user message for extraction later
     let last_user_msg = messages
@@ -111,6 +150,19 @@ async fn run_agent_loop_inner(state: &AppState, conv_id: Uuid) -> anyhow::Result
     sanitize_context_window(&mut messages);
 
     prepend_system_prompt(state, &mut messages, Some(&last_user_msg)).await;
+    if options.scheduled_execution {
+        let scheduled_mode_msg = Message {
+            id: Uuid::nil(),
+            conversation_id: Uuid::nil(),
+            role: Role::System,
+            content: "Scheduled execution mode: this turn was triggered by an existing schedule. Execute the task now and do not create new schedules unless the user explicitly asks in this same turn.".to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: Some("scheduled_execution_mode".to_string()),
+            created_at: Utc::now(),
+        };
+        messages.insert(1, scheduled_mode_msg);
+    }
 
     for _iteration in 0..state.max_agent_iterations {
         // --- DEBUG: Log Context Size ---
@@ -330,7 +382,10 @@ pub async fn generate_event_message(
     conversation_id: Uuid,
     event: &IntegrationEvent,
 ) -> anyhow::Result<Option<String>> {
-    let mut messages = state.db.get_messages(conversation_id, Some(state.max_context_messages)).await?;
+    let mut messages = state
+        .db
+        .get_messages(conversation_id, Some(state.max_context_messages))
+        .await?;
 
     sanitize_context_window(&mut messages);
 

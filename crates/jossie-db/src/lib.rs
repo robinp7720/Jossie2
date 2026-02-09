@@ -93,9 +93,13 @@ impl Database {
         Ok(())
     }
 
-    pub async fn get_messages(&self, conversation_id: Uuid, limit: Option<usize>) -> anyhow::Result<Vec<Message>> {
+    pub async fn get_messages(
+        &self,
+        conversation_id: Uuid,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<Message>> {
         let conv_str = conversation_id.to_string();
-        
+
         if let Some(limit) = limit {
             let limit_val = limit as i64;
             let mut rows = sqlx::query_as::<_, MessageRow>("SELECT id, conversation_id, role, content, tool_calls, tool_call_id, name, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?")
@@ -257,6 +261,25 @@ impl Database {
                 conversation_id: conv_id,
             })
         }))
+    }
+
+    pub async fn get_telegram_chat_for_conversation(
+        &self,
+        conversation_id: Uuid,
+    ) -> anyhow::Result<Option<i64>> {
+        let conv_str = conversation_id.to_string();
+        let row = sqlx::query_as::<_, TelegramChatIdRow>(
+            "SELECT telegram_chat_id
+             FROM telegram_chats
+             WHERE conversation_id = ?
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )
+        .bind(&conv_str)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| r.telegram_chat_id))
     }
 
     // Integration Settings
@@ -778,6 +801,20 @@ impl Database {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    pub async fn mark_task_running_if_pending(&self, id: &str) -> anyhow::Result<bool> {
+        let now_str = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE scheduled_tasks
+             SET status = 'running', updated_at = ?
+             WHERE id = ? AND status = 'pending'",
+        )
+        .bind(&now_str)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn update_task_next_run(
         &self,
         id: &str,
@@ -787,7 +824,9 @@ impl Database {
         let now_str = Utc::now().to_rfc3339();
         if increment_count {
             sqlx::query(
-                "UPDATE scheduled_tasks SET next_run_at = ?, last_run_at = ?, run_count = run_count + 1, updated_at = ? WHERE id = ?"
+                "UPDATE scheduled_tasks
+                 SET status = 'pending', next_run_at = ?, last_run_at = ?, run_count = run_count + 1, updated_at = ?
+                 WHERE id = ?"
             )
             .bind(next_run)
             .bind(&now_str)
@@ -796,7 +835,9 @@ impl Database {
             .execute(&self.pool)
             .await?;
         } else {
-            sqlx::query("UPDATE scheduled_tasks SET next_run_at = ?, updated_at = ? WHERE id = ?")
+            sqlx::query(
+                "UPDATE scheduled_tasks SET status = 'pending', next_run_at = ?, updated_at = ? WHERE id = ?",
+            )
                 .bind(next_run)
                 .bind(&now_str)
                 .bind(id)
@@ -894,7 +935,15 @@ impl Database {
             "SELECT id, conversation_id, sender, content, priority, status, created_at, sent_at, last_error
              FROM out_of_band_messages
              WHERE status = 'pending'
-             ORDER BY priority DESC, created_at ASC
+             ORDER BY
+               CASE priority
+                 WHEN 'urgent' THEN 3
+                 WHEN 'high' THEN 2
+                 WHEN 'normal' THEN 1
+                 WHEN 'low' THEN 0
+                 ELSE 0
+               END DESC,
+               created_at ASC
              LIMIT ?"
         )
         .bind(limit as i64)
@@ -1148,6 +1197,11 @@ struct TelegramChatLatestRow {
 }
 
 #[derive(sqlx::FromRow)]
+struct TelegramChatIdRow {
+    telegram_chat_id: i64,
+}
+
+#[derive(sqlx::FromRow)]
 struct IntegrationEventRow {
     id: String,
     integration: String,
@@ -1329,6 +1383,79 @@ mod tests {
 
         let unknown = db.get_telegram_conversation(987654321).await.unwrap();
         assert!(unknown.is_none());
+
+        let by_conv = db
+            .get_telegram_chat_for_conversation(conv.id)
+            .await
+            .unwrap();
+        assert_eq!(by_conv, Some(chat_id));
+
+        let unknown_conv = db
+            .get_telegram_chat_for_conversation(Uuid::new_v4())
+            .await
+            .unwrap();
+        assert!(unknown_conv.is_none());
+    }
+
+    #[tokio::test]
+    async fn scheduled_task_claim_and_reschedule() {
+        let db = test_db().await;
+        let conv = db.create_conversation(Some("Tasks")).await.unwrap();
+        let now = Utc::now();
+        let task_data = serde_json::json!({"prompt": "Do thing"});
+
+        let task_id = db
+            .create_scheduled_task(
+                conv.id,
+                "agent_run",
+                &task_data,
+                "interval",
+                "60",
+                Some(&now.to_rfc3339()),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(db.mark_task_running_if_pending(&task_id).await.unwrap());
+        assert!(!db.mark_task_running_if_pending(&task_id).await.unwrap());
+
+        let retry = (Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
+        db.update_task_next_run(&task_id, &retry, false)
+            .await
+            .unwrap();
+        let task = db.get_scheduled_task(&task_id).await.unwrap().unwrap();
+        assert_eq!(task.status, "pending");
+        assert_eq!(task.run_count, 0);
+
+        assert!(db.mark_task_running_if_pending(&task_id).await.unwrap());
+        let next_run = (Utc::now() + chrono::Duration::seconds(90)).to_rfc3339();
+        db.update_task_next_run(&task_id, &next_run, true)
+            .await
+            .unwrap();
+        let task = db.get_scheduled_task(&task_id).await.unwrap().unwrap();
+        assert_eq!(task.status, "pending");
+        assert_eq!(task.run_count, 1);
+    }
+
+    #[tokio::test]
+    async fn oob_priority_ordering_uses_priority_rank() {
+        let db = test_db().await;
+        let conv = db.create_conversation(Some("OOB")).await.unwrap();
+
+        db.queue_oob_message(conv.id, "normal msg", "normal")
+            .await
+            .unwrap();
+        db.queue_oob_message(conv.id, "urgent msg", "urgent")
+            .await
+            .unwrap();
+        db.queue_oob_message(conv.id, "high msg", "high")
+            .await
+            .unwrap();
+
+        let queued = db.list_pending_oob_messages(10).await.unwrap();
+        let contents: Vec<&str> = queued.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(contents, vec!["urgent msg", "high msg", "normal msg"]);
     }
 
     #[tokio::test]

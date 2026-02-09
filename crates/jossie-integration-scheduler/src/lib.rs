@@ -14,6 +14,44 @@ impl SchedulerIntegration {
         Self { db }
     }
 
+    fn normalize_prompt(prompt: &str) -> String {
+        prompt.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    async fn find_existing_agent_run_task(
+        &self,
+        conversation_id: Uuid,
+        schedule_type: &str,
+        schedule_value: &str,
+        prompt: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let prompt_norm = Self::normalize_prompt(prompt);
+        let tasks = self
+            .db
+            .list_scheduled_tasks_for_conversation(conversation_id)
+            .await?;
+
+        for task in tasks {
+            if task.task_type != "agent_run"
+                || task.schedule_type != schedule_type
+                || task.schedule_value != schedule_value
+            {
+                continue;
+            }
+
+            let existing_prompt = task
+                .task_data
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if Self::normalize_prompt(existing_prompt) == prompt_norm {
+                return Ok(Some(task.id));
+            }
+        }
+
+        Ok(None)
+    }
+
     async fn handle_schedule_task(
         &self,
         args: &str,
@@ -31,6 +69,21 @@ impl SchedulerIntegration {
             .run_at
             .parse()
             .map_err(|e| anyhow::anyhow!("Invalid timestamp format: {}", e))?;
+        let now = Utc::now();
+        if run_at <= now {
+            anyhow::bail!("run_at must be in the future");
+        }
+        let run_at_rfc3339 = run_at.to_rfc3339();
+
+        if let Some(existing_id) = self
+            .find_existing_agent_run_task(conversation_id, "once", &run_at_rfc3339, &args.prompt)
+            .await?
+        {
+            return Ok(format!(
+                "A matching one-time task already exists: {}",
+                existing_id
+            ));
+        }
 
         let task_data = serde_json::json!({
             "prompt": args.prompt,
@@ -43,8 +96,8 @@ impl SchedulerIntegration {
                 "agent_run",
                 &task_data,
                 "once",
-                &args.run_at,
-                Some(&run_at.to_rfc3339()),
+                &run_at_rfc3339,
+                Some(&run_at_rfc3339),
                 Some(1),
             )
             .await?;
@@ -80,6 +133,22 @@ impl SchedulerIntegration {
 
         // Calculate first run time
         let first_run = Utc::now() + Duration::seconds(args.interval_seconds);
+        let interval_value = args.interval_seconds.to_string();
+
+        if let Some(existing_id) = self
+            .find_existing_agent_run_task(
+                conversation_id,
+                "interval",
+                &interval_value,
+                &args.prompt,
+            )
+            .await?
+        {
+            return Ok(format!(
+                "A matching recurring task already exists: {}",
+                existing_id
+            ));
+        }
 
         let task_id = self
             .db
@@ -88,7 +157,7 @@ impl SchedulerIntegration {
                 "agent_run",
                 &task_data,
                 "interval",
-                &args.interval_seconds.to_string(),
+                &interval_value,
                 Some(&first_run.to_rfc3339()),
                 args.max_runs,
             )
@@ -214,17 +283,21 @@ impl Integration for SchedulerIntegration {
             },
             ToolDefinition {
                 name: "schedule_recurring_task".to_string(),
-                description: "Schedule a recurring task that runs at regular intervals. The task will run indefinitely unless it fails. To limit runs, mention it in the prompt (e.g., 'check emails 3 times').".to_string(),
+                description: "Schedule a recurring task that runs at regular intervals. Use max_runs to limit how many executions happen.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "prompt": {
                             "type": "string",
-                            "description": "The prompt/task for the agent to execute on each run. Include any run limits or context directly in the prompt."
+                            "description": "The prompt/task for the agent to execute on each run. Keep this focused on the actual work to do during one run."
                         },
                         "interval_seconds": {
                             "type": "integer",
                             "description": "Interval in seconds between runs (minimum 60)"
+                        },
+                        "max_runs": {
+                            "type": "integer",
+                            "description": "Optional maximum number of runs before auto-completion. Omit for indefinite."
                         }
                     },
                     "required": ["prompt", "interval_seconds"],

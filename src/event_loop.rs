@@ -2,6 +2,7 @@ use chrono::Utc;
 use jossie_core::types::{Message, Role};
 use jossie_db::IntegrationEvent;
 use jossie_server::AppState;
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -406,6 +407,13 @@ async fn process_scheduled_tasks(state: &Arc<AppState>) -> anyhow::Result<()> {
     for task in tasks {
         tracing::info!("Processing scheduled task: {}", task.id);
 
+        // Atomically claim task to prevent duplicate execution by concurrent loop iterations.
+        let claimed = state.db.mark_task_running_if_pending(&task.id).await?;
+        if !claimed {
+            tracing::debug!("Task {} already claimed by another worker", task.id);
+            continue;
+        }
+
         // Check if max runs exceeded
         if let Some(max) = task.max_runs {
             if task.run_count >= max {
@@ -453,6 +461,26 @@ async fn execute_scheduled_task(
 
             let conversation_id: Uuid = task.conversation_id.parse()?;
 
+            // If the conversation is currently busy (e.g. user chat), defer this run.
+            if state
+                .active_conversations
+                .read()
+                .await
+                .contains(&conversation_id)
+            {
+                let retry_at = Utc::now() + chrono::Duration::seconds(30);
+                state
+                    .db
+                    .update_task_next_run(&task.id, &retry_at.to_rfc3339(), false)
+                    .await?;
+                tracing::debug!(
+                    "Deferred task {} because conversation {} is busy",
+                    task.id,
+                    conversation_id
+                );
+                return Ok(());
+            }
+
             // Create user message for the scheduled task
             let content = if context.is_empty() {
                 prompt.to_string()
@@ -473,7 +501,33 @@ async fn execute_scheduled_task(
             state.db.save_message(&user_msg).await?;
 
             // Run the agent loop
-            let response = jossie_server::agent::run_agent_loop(state, conversation_id).await?;
+            let response = match jossie_server::agent::run_agent_loop_with_options(
+                state,
+                conversation_id,
+                jossie_server::agent::AgentRunOptions {
+                    allow_schedule_management: false,
+                    allow_oob_messages: false,
+                    scheduled_execution: true,
+                },
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(e) if e.to_string().contains("already being processed") => {
+                    let retry_at = Utc::now() + chrono::Duration::seconds(30);
+                    state
+                        .db
+                        .update_task_next_run(&task.id, &retry_at.to_rfc3339(), false)
+                        .await?;
+                    tracing::debug!(
+                        "Deferred task {} after busy-conversation race: {}",
+                        task.id,
+                        conversation_id
+                    );
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            };
 
             // Send response via Telegram if configured
             if !state.telegram_token.trim().is_empty() {
@@ -524,21 +578,23 @@ async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
     }
 
     let messages = state.db.list_pending_oob_messages(20).await?;
+    let mut chat_cache: HashMap<Uuid, Option<i64>> = HashMap::new();
 
     for msg in messages {
         tracing::info!("Sending OOB message: {}", msg.id);
 
         let conversation_id: Uuid = msg.conversation_id.parse()?;
 
-        // Try to find the Telegram chat for this conversation
-        let chat_id = if let Some(chat) = state.db.get_latest_telegram_chat().await? {
-            if chat.conversation_id == conversation_id {
-                Some(chat.chat_id)
-            } else {
-                None
-            }
+        // Resolve chat id for the specific conversation (cached for this batch).
+        let chat_id = if let Some(cached) = chat_cache.get(&conversation_id) {
+            *cached
         } else {
-            None
+            let resolved = state
+                .db
+                .get_telegram_chat_for_conversation(conversation_id)
+                .await?;
+            chat_cache.insert(conversation_id, resolved);
+            resolved
         };
 
         if let Some(chat_id) = chat_id {
