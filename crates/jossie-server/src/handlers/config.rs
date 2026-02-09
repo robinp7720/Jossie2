@@ -1,11 +1,11 @@
-use std::sync::Arc;
+use crate::errors::AppError;
+use crate::state::AppState;
 use axum::{
-    extract::{State, Path},
     Json,
+    extract::{Path, State},
 };
 use serde::{Deserialize, Serialize};
-use crate::state::AppState;
-use crate::errors::AppError;
+use std::sync::Arc;
 
 #[derive(Serialize)]
 pub struct AccountConfig {
@@ -62,7 +62,10 @@ pub async fn add_account(
     }
 
     // For email, we could validate fields here, but for now just pass through
-    let id = state.db.add_integration_account(&req.integration, &req.name, &req.config).await?;
+    let id = state
+        .db
+        .add_integration_account(&req.integration, &req.name, &req.config)
+        .await?;
     Ok(Json(id))
 }
 

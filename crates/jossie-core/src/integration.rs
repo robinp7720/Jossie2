@@ -239,7 +239,9 @@ mod tests {
         struct LargeIntegration;
         #[async_trait::async_trait]
         impl Integration for LargeIntegration {
-            fn name(&self) -> &str { "large" }
+            fn name(&self) -> &str {
+                "large"
+            }
             fn tools(&self) -> Vec<ToolDefinition> {
                 vec![ToolDefinition {
                     name: "large_tool".to_string(),

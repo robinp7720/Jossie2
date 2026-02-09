@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use axum::{
-    extract::{State, Path, Query},
-    Json,
-};
-use serde::Deserialize;
-use uuid::Uuid;
-use jossie_core::types::Message;
-use crate::state::AppState;
 use crate::errors::AppError;
+use crate::state::AppState;
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+};
+use jossie_core::types::Message;
+use serde::Deserialize;
+use std::sync::Arc;
+use uuid::Uuid;
 
 pub async fn list_conversations(
     State(state): State<Arc<AppState>>,

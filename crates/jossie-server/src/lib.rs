@@ -1,20 +1,20 @@
-pub mod errors;
-pub mod state;
-pub mod middleware;
-pub mod handlers;
 pub mod agent;
+pub mod errors;
+pub mod handlers;
+pub mod middleware;
+pub mod state;
 
-use std::sync::Arc;
+pub use agent::{prepend_system_prompt, run_agent_loop};
 use axum::{
     Router,
-    routing::{get, post, delete},
+    http::{Method, header},
     middleware as axum_middleware,
-    http::{header, Method},
+    routing::{delete, get, post},
 };
-use tower_http::cors::{CorsLayer, Any};
-use tower_http::services::ServeDir;
 pub use state::AppState;
-pub use agent::{run_agent_loop, prepend_system_prompt};
+use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::ServeDir;
 
 pub fn router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
@@ -27,24 +27,49 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/chat", post(handlers::chat::chat_handler))
         .route("/api/chat/stream", get(handlers::chat::ws_handler))
         // Conversations
-        .route("/api/conversations", get(handlers::conversations::list_conversations))
-        .route("/api/conversations/{id}/messages", get(handlers::conversations::get_messages))
+        .route(
+            "/api/conversations",
+            get(handlers::conversations::list_conversations),
+        )
+        .route(
+            "/api/conversations/{id}/messages",
+            get(handlers::conversations::get_messages),
+        )
         .route("/api/graph", get(handlers::graph::graph_handler))
         // Config / Onboarding
-        .route("/api/onboarding", get(handlers::integrations::onboarding_status_handler))
-        .route("/api/config/accounts", get(handlers::config::list_accounts).post(handlers::config::add_account))
-        .route("/api/config/accounts/{id}", delete(handlers::config::delete_account))
-        
-        .layer(axum_middleware::from_fn_with_state(state.clone(), middleware::auth_middleware))
+        .route(
+            "/api/onboarding",
+            get(handlers::integrations::onboarding_status_handler),
+        )
+        .route(
+            "/api/config/accounts",
+            get(handlers::config::list_accounts).post(handlers::config::add_account),
+        )
+        .route(
+            "/api/config/accounts/{id}",
+            delete(handlers::config::delete_account),
+        )
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            middleware::auth_middleware,
+        ))
         .with_state(state.clone());
 
     // Setup routes (Auth protected)
     let setup = Router::new()
-        .route("/setup/google", get(handlers::integrations::setup_google_handler))
-        .layer(axum_middleware::from_fn_with_state(state.clone(), middleware::auth_middleware));
+        .route(
+            "/setup/google",
+            get(handlers::integrations::setup_google_handler),
+        )
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            middleware::auth_middleware,
+        ));
 
-    let public = Router::new()
-        .route("/oauth/callback", get(handlers::integrations::oauth_callback_handler));
+    let public = Router::new().route(
+        "/oauth/callback",
+        get(handlers::integrations::oauth_callback_handler),
+    );
 
     let static_files = ServeDir::new("frontend/dist");
 

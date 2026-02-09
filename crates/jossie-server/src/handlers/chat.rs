@@ -1,16 +1,16 @@
-use std::sync::Arc;
+use crate::agent::{prepend_system_prompt, run_agent_loop};
+use crate::errors::AppError;
+use crate::state::AppState;
 use axum::{
+    Json,
     extract::{State, WebSocketUpgrade, ws},
     response::IntoResponse,
-    Json,
 };
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use chrono::Utc;
 use jossie_core::types::{Message, Role};
-use crate::state::AppState;
-use crate::errors::AppError;
-use crate::agent::{run_agent_loop, prepend_system_prompt};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use uuid::Uuid;
 
 #[derive(Deserialize)]
 pub struct ChatRequest {
@@ -48,7 +48,10 @@ pub async fn chat_handler(
 
     let response = run_agent_loop(&state, conv_id).await?;
 
-    Ok(Json(ChatResponse { conversation_id: conv_id, message: response }))
+    Ok(Json(ChatResponse {
+        conversation_id: conv_id,
+        message: response,
+    }))
 }
 
 pub async fn ws_handler(
@@ -61,12 +64,12 @@ pub async fn ws_handler(
 async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
     tracing::info!("WebSocket connection established");
     while let Some(Ok(msg)) = futures::StreamExt::next(&mut socket).await {
-        let ws::Message::Text(text) = msg else { 
+        let ws::Message::Text(text) = msg else {
             tracing::debug!("Received non-text message");
-            continue; 
+            continue;
         };
         tracing::debug!("Received WS message: {}", text);
-        
+
         let req = match serde_json::from_str::<ChatRequest>(&text) {
             Ok(r) => r,
             Err(e) => {
@@ -99,14 +102,24 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
             name: None,
             created_at: Utc::now(),
         };
-        if state.db.save_message(&user_msg).await.is_err() { continue; }
+        if state.db.save_message(&user_msg).await.is_err() {
+            continue;
+        }
 
         let tools = state.registry.all_tool_definitions();
-        let mut messages = state.db.get_messages(conv_id, Some(state.max_context_messages)).await.unwrap_or_default();
+        let mut messages = state
+            .db
+            .get_messages(conv_id, Some(state.max_context_messages))
+            .await
+            .unwrap_or_default();
         prepend_system_prompt(&state, &mut messages, Some(&last_user_msg)).await;
 
         let max_iters = state.max_agent_iterations;
-        tracing::info!("Starting agent loop for conversation {} with {} max iterations", conv_id, max_iters);
+        tracing::info!(
+            "Starting agent loop for conversation {} with {} max iterations",
+            conv_id,
+            max_iters
+        );
         for iteration in 0..max_iters {
             let (tx, mut rx) = tokio::sync::mpsc::channel(100);
             let llm = state.llm.clone();
@@ -126,9 +139,13 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
                 match event {
                     jossie_llm::StreamEvent::Delta(delta) => {
                         full_content.push_str(&delta);
-                        let _ = socket.send(ws::Message::Text(
-                            serde_json::json!({"type": "delta", "content": delta}).to_string().into()
-                        )).await;
+                        let _ = socket
+                            .send(ws::Message::Text(
+                                serde_json::json!({"type": "delta", "content": delta})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
                     }
                     jossie_llm::StreamEvent::ToolCalls(calls) => {
                         tool_calls = calls;
@@ -137,13 +154,17 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
                         // Stream finished
                     }
                     jossie_llm::StreamEvent::Error(e) => {
-                        let _ = socket.send(ws::Message::Text(
-                            serde_json::json!({"type": "error", "error": e}).to_string().into()
-                        )).await;
+                        let _ = socket
+                            .send(ws::Message::Text(
+                                serde_json::json!({"type": "error", "error": e})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await;
                     }
                 }
             }
-            
+
             if !tool_calls.is_empty() {
                 if iteration + 1 >= max_iters {
                     let _ = socket.send(ws::Message::Text(
@@ -188,9 +209,13 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
             }
 
             // Send done message after stream ends and no more tools to run
-            let _ = socket.send(ws::Message::Text(
-                serde_json::json!({"type": "done", "conversation_id": conv_id}).to_string().into()
-            )).await;
+            let _ = socket
+                .send(ws::Message::Text(
+                    serde_json::json!({"type": "done", "conversation_id": conv_id})
+                        .to_string()
+                        .into(),
+                ))
+                .await;
 
             let assistant_msg = Message {
                 id: Uuid::new_v4(),
@@ -208,7 +233,13 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
             let assistant_reply = assistant_msg.content.clone();
             let user_for_extraction = last_user_msg.clone();
             tokio::spawn(async move {
-                crate::agent::spawn_knowledge_extraction(db, llm, user_for_extraction, assistant_reply).await;
+                crate::agent::spawn_knowledge_extraction(
+                    db,
+                    llm,
+                    user_for_extraction,
+                    assistant_reply,
+                )
+                .await;
             });
             break;
         }

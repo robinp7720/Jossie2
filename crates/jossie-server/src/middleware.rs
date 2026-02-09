@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use axum::{
-    extract::State,
-    http::{StatusCode, HeaderMap},
-    response::{IntoResponse, Response},
-    Json,
-    middleware::Next,
-};
-use crate::state::AppState;
 use crate::errors::ErrorBody;
+use crate::state::AppState;
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
+use std::sync::Arc;
 
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,
@@ -35,7 +35,9 @@ pub async fn auth_middleware(
     match token {
         Some(t) if t == state.auth_token => Ok(next.run(request).await),
         _ => {
-            let body = ErrorBody { error: "unauthorized".to_string() };
+            let body = ErrorBody {
+                error: "unauthorized".to_string(),
+            };
             Err((StatusCode::UNAUTHORIZED, Json(body)).into_response())
         }
     }

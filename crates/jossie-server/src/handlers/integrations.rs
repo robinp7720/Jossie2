@@ -1,16 +1,16 @@
-use std::sync::Arc;
+use crate::errors::AppError;
+use crate::state::AppState;
 use axum::{
-    extract::{State, Query},
-    response::{IntoResponse, Html},
-    http::HeaderMap,
     Json,
+    extract::{Query, State},
+    http::HeaderMap,
+    response::{Html, IntoResponse},
 };
-use serde::{Deserialize, Serialize};
 use jossie_core::integration::OnboardingStatus;
 use jossie_integration_google::GoogleIntegration;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use uuid::Uuid;
-use crate::state::AppState;
-use crate::errors::AppError;
 
 #[derive(Serialize)]
 pub struct IntegrationStatus {
@@ -38,7 +38,10 @@ pub async fn setup_google_handler(
     headers: HeaderMap,
     Query(query): Query<GoogleSetupQuery>,
 ) -> axum::response::Redirect {
-    let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost:3000");
+    let host = headers
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost:3000");
     let redirect_uri = format!("http://{}/oauth/callback", host);
 
     let state_value = query
@@ -54,8 +57,11 @@ pub async fn setup_google_handler(
         })
         .map(|json| urlencoding::encode(&json).into_owned());
 
-    let url =
-        GoogleIntegration::generate_auth_url(&state.google_config, &redirect_uri, state_value.as_deref());
+    let url = GoogleIntegration::generate_auth_url(
+        &state.google_config,
+        &redirect_uri,
+        state_value.as_deref(),
+    );
     axum::response::Redirect::to(&url)
 }
 
@@ -84,12 +90,15 @@ pub async fn oauth_callback_handler(
     if let Some(error) = query.error {
         return Html(format!("<h1>Google Auth Error</h1><p>{}</p>", error));
     }
-    
+
     let Some(code) = query.code else {
         return Html("<h1>Error</h1><p>No code received.</p>".to_string());
     };
 
-    let host = headers.get("host").and_then(|h| h.to_str().ok()).unwrap_or("localhost:3000");
+    let host = headers
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost:3000");
     let redirect_uri = format!("http://{}/oauth/callback", host);
 
     let account_name = query
@@ -102,7 +111,8 @@ pub async fn oauth_callback_handler(
         .filter(|name| !name.is_empty());
 
     let account_id = Uuid::new_v4().to_string();
-    let account_label = account_name.unwrap_or_else(|| format!("Google Account {}", &account_id[..8]));
+    let account_label =
+        account_name.unwrap_or_else(|| format!("Google Account {}", &account_id[..8]));
 
     match GoogleIntegration::exchange_code(&state.google_config, &code, &redirect_uri).await {
         Ok(token) => {
@@ -130,7 +140,7 @@ pub async fn oauth_callback_handler(
                 <script>setTimeout(() => window.close(), 3000);</script>
                 "#
             ))
-        },
+        }
         Err(e) => Html(format!("<h1>Exchange Error</h1><p>{}</p>", e)),
     }
 }
