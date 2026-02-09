@@ -48,7 +48,13 @@ async fn process_pending_events(state: &Arc<AppState>) -> anyhow::Result<()> {
         .db
         .list_pending_integration_events(PENDING_LIMIT)
         .await?;
+    let mut email_events = Vec::new();
     for event in events {
+        if is_email_event(&event) {
+            email_events.push(event);
+            continue;
+        }
+
         tracing::info!("Processing event: {}", event.id);
         if let Err(e) = handle_event(state, &chat, &event).await {
             tracing::error!("Event processing failed for {}: {}", event.id, e);
@@ -59,7 +65,18 @@ async fn process_pending_events(state: &Arc<AppState>) -> anyhow::Result<()> {
         }
     }
 
+    if !email_events.is_empty() {
+        tracing::info!("Batch processing {} email events", email_events.len());
+        if let Err(e) = handle_email_event_batch(state, &chat, &email_events).await {
+            tracing::error!("Email batch processing failed: {}", e);
+        }
+    }
+
     Ok(())
+}
+
+fn is_email_event(event: &IntegrationEvent) -> bool {
+    matches!(event.event_type.as_str(), "new_email" | "gmail_new_message")
 }
 
 async fn handle_event(
@@ -158,28 +175,179 @@ async fn process_event_inner(
     Ok(())
 }
 
+async fn handle_email_event_batch(
+    state: &Arc<AppState>,
+    chat: &jossie_db::TelegramChatLink,
+    events: &[IntegrationEvent],
+) -> anyhow::Result<()> {
+    let mut claimed_events = Vec::new();
+    for event in events {
+        let claimed = state
+            .db
+            .mark_integration_event_processing(&event.id)
+            .await?;
+        if claimed {
+            claimed_events.push(event.clone());
+        } else {
+            tracing::debug!("Event {} already being processed, skipping", event.id);
+        }
+    }
+
+    if claimed_events.is_empty() {
+        return Ok(());
+    }
+
+    let result = process_email_event_batch_inner(state, chat, &claimed_events).await;
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            for event in &claimed_events {
+                state
+                    .db
+                    .mark_integration_event_failed(&event.id, &e.to_string())
+                    .await?;
+            }
+            Err(e)
+        }
+    }
+}
+
+async fn process_email_event_batch_inner(
+    state: &Arc<AppState>,
+    chat: &jossie_db::TelegramChatLink,
+    events: &[IntegrationEvent],
+) -> anyhow::Result<()> {
+    // Enrich each event's entities before generating a combined message.
+    for event in events {
+        let entities = extract_event_entities(event);
+        for entity in &entities {
+            if let Ok(nodes) = state.db.graph_find_nodes(entity).await {
+                if !nodes.is_empty() {
+                    tracing::info!("Enriching event with graph context for: {}", entity);
+                }
+            }
+        }
+    }
+
+    let batched_event = build_email_batch_event(events);
+    let message = match jossie_server::agent::generate_event_message(
+        state,
+        chat.conversation_id,
+        &batched_event,
+    )
+    .await
+    {
+        Ok(msg) => msg,
+        Err(e) if e.to_string().contains("already being processed") => {
+            tracing::debug!(
+                "Skipping email batch - conversation {} is busy",
+                chat.conversation_id
+            );
+            mark_events_processed(state, events).await?;
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+
+    tracing::info!("Generated batched email message: {:?}", message);
+    let Some(message) = message else {
+        mark_events_processed(state, events).await?;
+        return Ok(());
+    };
+
+    tracing::info!("Sending batched email message: {}", message);
+    jossie_telegram::send_message(&state.telegram_token, chat.chat_id, &message).await?;
+    tracing::info!("Batched email message sent: {}", message);
+
+    let assistant_msg = Message {
+        id: Uuid::new_v4(),
+        conversation_id: chat.conversation_id,
+        role: Role::Assistant,
+        content: message,
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+        created_at: Utc::now(),
+    };
+    state.db.save_message(&assistant_msg).await?;
+    mark_events_processed(state, events).await?;
+
+    Ok(())
+}
+
+fn build_email_batch_event(events: &[IntegrationEvent]) -> IntegrationEvent {
+    let integration = if events
+        .iter()
+        .all(|event| event.integration == events[0].integration)
+    {
+        events[0].integration.clone()
+    } else {
+        "mixed".to_string()
+    };
+
+    let account_id = if events
+        .iter()
+        .all(|event| event.account_id == events[0].account_id)
+    {
+        events[0].account_id.clone()
+    } else {
+        "mixed".to_string()
+    };
+
+    let email_events: Vec<serde_json::Value> = events
+        .iter()
+        .map(|event| {
+            serde_json::json!({
+                "id": event.id,
+                "integration": event.integration,
+                "account_id": event.account_id,
+                "event_type": event.event_type,
+                "created_at": event.created_at,
+                "payload": event.payload,
+            })
+        })
+        .collect();
+
+    IntegrationEvent {
+        id: Uuid::new_v4().to_string(),
+        integration,
+        account_id,
+        event_type: "new_email_batch".to_string(),
+        dedupe_key: format!("batch:{}:{}", events.len(), Uuid::new_v4()),
+        payload: serde_json::json!({
+            "count": events.len(),
+            "emails": email_events,
+        }),
+        status: "processing".to_string(),
+        created_at: Utc::now().to_rfc3339(),
+        processed_at: None,
+        last_error: None,
+    }
+}
+
+async fn mark_events_processed(
+    state: &Arc<AppState>,
+    events: &[IntegrationEvent],
+) -> anyhow::Result<()> {
+    for event in events {
+        state.db.mark_integration_event_processed(&event.id).await?;
+    }
+    Ok(())
+}
+
 /// Extract entity names from integration events
 fn extract_event_entities(event: &IntegrationEvent) -> Vec<String> {
     let mut entities = Vec::new();
 
     match event.event_type.as_str() {
-        "new_email" => {
-            // Extract sender and recipients from email payload
-            if let Some(from) = event.payload.get("from").and_then(|v| v.as_str()) {
-                // Extract name from email address or use full address
-                if let Some(name_part) = from.split('<').next() {
-                    let cleaned = name_part.trim().trim_matches('"');
-                    if !cleaned.is_empty() && cleaned != from {
-                        entities.push(cleaned.to_string());
-                    }
-                }
-                entities.push(from.to_string());
-            }
-
-            if let Some(to) = event.payload.get("to").and_then(|v| v.as_array()) {
-                for recipient in to {
-                    if let Some(addr) = recipient.as_str() {
-                        entities.push(addr.to_string());
+        "new_email" | "gmail_new_message" => {
+            extract_email_entities(&event.payload, &mut entities);
+        }
+        "new_email_batch" => {
+            if let Some(emails) = event.payload.get("emails").and_then(|v| v.as_array()) {
+                for email_event in emails {
+                    if let Some(payload) = email_event.get("payload") {
+                        extract_email_entities(payload, &mut entities);
                     }
                 }
             }
@@ -208,6 +376,28 @@ fn extract_event_entities(event: &IntegrationEvent) -> Vec<String> {
     }
 
     entities
+}
+
+fn extract_email_entities(payload: &serde_json::Value, entities: &mut Vec<String>) {
+    // Extract sender
+    if let Some(from) = payload.get("from").and_then(|v| v.as_str()) {
+        if let Some(name_part) = from.split('<').next() {
+            let cleaned = name_part.trim().trim_matches('"');
+            if !cleaned.is_empty() && cleaned != from {
+                entities.push(cleaned.to_string());
+            }
+        }
+        entities.push(from.to_string());
+    }
+
+    // Extract recipients
+    if let Some(to) = payload.get("to").and_then(|v| v.as_array()) {
+        for recipient in to {
+            if let Some(addr) = recipient.as_str() {
+                entities.push(addr.to_string());
+            }
+        }
+    }
 }
 
 async fn process_scheduled_tasks(state: &Arc<AppState>) -> anyhow::Result<()> {
@@ -374,4 +564,100 @@ async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk_event(
+        id: &str,
+        event_type: &str,
+        integration: &str,
+        account_id: &str,
+        payload: serde_json::Value,
+    ) -> IntegrationEvent {
+        IntegrationEvent {
+            id: id.to_string(),
+            integration: integration.to_string(),
+            account_id: account_id.to_string(),
+            event_type: event_type.to_string(),
+            dedupe_key: format!("dedupe_{id}"),
+            payload,
+            status: "new".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            processed_at: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn identifies_email_event_types() {
+        let email_event = mk_event("1", "new_email", "email", "acc_1", serde_json::json!({}));
+        let gmail_event = mk_event(
+            "2",
+            "gmail_new_message",
+            "google",
+            "acc_2",
+            serde_json::json!({}),
+        );
+        let calendar_event = mk_event(
+            "3",
+            "calendar_event",
+            "google",
+            "acc_2",
+            serde_json::json!({}),
+        );
+
+        assert!(is_email_event(&email_event));
+        assert!(is_email_event(&gmail_event));
+        assert!(!is_email_event(&calendar_event));
+    }
+
+    #[test]
+    fn builds_single_batched_email_event() {
+        let e1 = mk_event(
+            "1",
+            "gmail_new_message",
+            "google",
+            "acc_1",
+            serde_json::json!({
+                "from": "alice@example.com",
+                "subject": "Subject 1"
+            }),
+        );
+        let e2 = mk_event(
+            "2",
+            "gmail_new_message",
+            "google",
+            "acc_1",
+            serde_json::json!({
+                "from": "bob@example.com",
+                "subject": "Subject 2"
+            }),
+        );
+
+        let batch = build_email_batch_event(&[e1, e2]);
+        assert_eq!(batch.event_type, "new_email_batch");
+        assert_eq!(batch.integration, "google");
+        assert_eq!(batch.account_id, "acc_1");
+        assert_eq!(batch.payload["count"], serde_json::json!(2));
+        assert_eq!(batch.payload["emails"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn batches_mixed_sources_as_mixed() {
+        let e1 = mk_event("1", "new_email", "email", "acc_1", serde_json::json!({}));
+        let e2 = mk_event(
+            "2",
+            "gmail_new_message",
+            "google",
+            "acc_2",
+            serde_json::json!({}),
+        );
+
+        let batch = build_email_batch_event(&[e1, e2]);
+        assert_eq!(batch.integration, "mixed");
+        assert_eq!(batch.account_id, "mixed");
+    }
 }
