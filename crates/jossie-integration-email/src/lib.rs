@@ -1,12 +1,17 @@
 use jossie_core::config::EmailConfig;
 use jossie_core::integration::{Integration, OnboardingField, OnboardingStatus, ToolDefinition};
 use jossie_db::Database;
+use mailparse::{DispositionType, MailHeaderMap, ParsedMail};
 use serde::Deserialize;
 use std::sync::Arc;
 
 type ImapSession = async_imap::Session<
     async_native_tls::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>,
 >;
+
+const DEFAULT_FOLDER: &str = "INBOX";
+const MAX_EMAIL_BODY_CHARS: usize = 60_000;
+const MAX_FALLBACK_PREVIEW_CHARS: usize = 4_000;
 
 pub struct EmailIntegration {
     default_config: Option<EmailConfig>,
@@ -70,7 +75,11 @@ impl EmailIntegration {
         let mut session = Self::imap_connect(config).await?;
         session.select(folder).await?;
 
-        let search_query = format!("OR SUBJECT \"{}\" FROM \"{}\"", query, query);
+        let escaped_query = escape_imap_query_value(query);
+        let search_query = format!(
+            "OR SUBJECT \"{}\" FROM \"{}\"",
+            escaped_query, escaped_query
+        );
         let uids = session.uid_search(&search_query).await?;
 
         if uids.is_empty() {
@@ -87,9 +96,7 @@ impl EmailIntegration {
             .collect::<Vec<_>>()
             .join(",");
 
-        let fetch_stream = session
-            .uid_fetch(&uid_set, "BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)]")
-            .await?;
+        let fetch_stream = session.uid_fetch(&uid_set, "RFC822.HEADER").await?;
         let fetched: Vec<_> = {
             use futures::TryStreamExt;
             fetch_stream.try_collect().await?
@@ -98,11 +105,15 @@ impl EmailIntegration {
         let mut results = Vec::new();
         for msg in &fetched {
             let uid = msg.uid.unwrap_or(0);
-            let header = msg.body().unwrap_or_default();
-            let header_str = String::from_utf8_lossy(header);
+            let header = msg.header().or_else(|| msg.body()).unwrap_or_default();
+            let header_str = String::from_utf8_lossy(header).trim().to_string();
+            let (from, subject, date) = extract_header_fields(header);
             results.push(serde_json::json!({
                 "uid": uid,
-                "headers": header_str.trim(),
+                "from": from,
+                "subject": subject,
+                "date": date,
+                "headers": header_str,
             }));
         }
 
@@ -126,28 +137,17 @@ impl EmailIntegration {
         };
 
         let result = if let Some(msg) = fetched.first() {
-            let body = msg.body().unwrap_or_default();
-            match mailparse::parse_mail(body) {
+            let raw_message = msg.body().unwrap_or_default();
+            match mailparse::parse_mail(raw_message) {
                 Ok(parsed) => {
                     let subject = parsed
                         .headers
-                        .iter()
-                        .find(|h| h.get_key_ref() == "Subject")
-                        .map(|h| h.get_value())
+                        .get_first_value("Subject")
                         .unwrap_or_default();
-                    let from = parsed
-                        .headers
-                        .iter()
-                        .find(|h| h.get_key_ref() == "From")
-                        .map(|h| h.get_value())
-                        .unwrap_or_default();
-                    let date = parsed
-                        .headers
-                        .iter()
-                        .find(|h| h.get_key_ref() == "Date")
-                        .map(|h| h.get_value())
-                        .unwrap_or_default();
-                    let body_text = parsed.get_body().unwrap_or_default();
+                    let from = parsed.headers.get_first_value("From").unwrap_or_default();
+                    let date = parsed.headers.get_first_value("Date").unwrap_or_default();
+                    let body_text =
+                        truncate_with_notice(extract_message_body(&parsed), MAX_EMAIL_BODY_CHARS);
                     serde_json::json!({
                         "uid": uid,
                         "from": from,
@@ -157,7 +157,18 @@ impl EmailIntegration {
                     })
                     .to_string()
                 }
-                Err(_) => String::from_utf8_lossy(body).to_string(),
+                Err(_) => {
+                    let (from, subject, date) = extract_header_fields(raw_message);
+                    serde_json::json!({
+                        "uid": uid,
+                        "from": from,
+                        "subject": subject,
+                        "date": date,
+                        "body": truncate_with_notice(text_fallback_preview(raw_message), MAX_FALLBACK_PREVIEW_CHARS),
+                        "note": "Email body parsing failed; returned a trimmed raw preview instead.",
+                    })
+                    .to_string()
+                }
             }
         } else {
             "Email not found".to_string()
@@ -344,12 +355,9 @@ impl Integration for EmailIntegration {
                     #[serde(default)]
                     folder: String,
                 }
-                fn default_folder() -> String {
-                    "INBOX".to_string()
-                }
                 let args: Args = serde_json::from_str(arguments)?;
                 let folder = if args.folder.trim().is_empty() {
-                    default_folder()
+                    DEFAULT_FOLDER.to_string()
                 } else {
                     args.folder
                 };
@@ -362,12 +370,9 @@ impl Integration for EmailIntegration {
                     #[serde(default)]
                     folder: String,
                 }
-                fn default_folder() -> String {
-                    "INBOX".to_string()
-                }
                 let args: Args = serde_json::from_str(arguments)?;
                 let folder = if args.folder.trim().is_empty() {
-                    default_folder()
+                    DEFAULT_FOLDER.to_string()
                 } else {
                     args.folder
                 };
@@ -414,5 +419,205 @@ impl Integration for EmailIntegration {
                 }
             ]
         })
+    }
+}
+
+fn escape_imap_query_value(value: &str) -> String {
+    value.replace('\\', r"\\").replace('"', r#"\""#)
+}
+
+fn extract_header_fields(header_bytes: &[u8]) -> (String, String, String) {
+    match mailparse::parse_headers(header_bytes) {
+        Ok((headers, _)) => (
+            headers.get_first_value("From").unwrap_or_default(),
+            headers.get_first_value("Subject").unwrap_or_default(),
+            headers.get_first_value("Date").unwrap_or_default(),
+        ),
+        Err(_) => (String::new(), String::new(), String::new()),
+    }
+}
+
+fn truncate_with_notice(text: String, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+
+    let truncated: String = text.chars().take(max_chars).collect();
+    format!(
+        "{}\n\n[Message truncated to {} characters]",
+        truncated, max_chars
+    )
+}
+
+fn text_fallback_preview(raw_message: &[u8]) -> String {
+    let preview_len = raw_message.len().min(32_000);
+    let preview = String::from_utf8_lossy(&raw_message[..preview_len]);
+    let mut cleaned = String::new();
+    let mut last_was_space = false;
+    for ch in preview.chars() {
+        let normalized = if ch.is_whitespace() { ' ' } else { ch };
+        if normalized == ' ' {
+            if !last_was_space {
+                cleaned.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            cleaned.push(normalized);
+            last_was_space = false;
+        }
+    }
+    cleaned.trim().to_string()
+}
+
+fn extract_message_body(parsed: &ParsedMail<'_>) -> String {
+    let mut text_parts = Vec::new();
+    let mut html_parts = Vec::new();
+    collect_message_parts(parsed, &mut text_parts, &mut html_parts);
+
+    if !text_parts.is_empty() {
+        return text_parts.join("\n\n").trim().to_string();
+    }
+
+    if !html_parts.is_empty() {
+        return html_parts.join("\n\n").trim().to_string();
+    }
+
+    parsed.get_body().unwrap_or_default().trim().to_string()
+}
+
+fn collect_message_parts(
+    part: &ParsedMail<'_>,
+    text_parts: &mut Vec<String>,
+    html_parts: &mut Vec<String>,
+) {
+    if part.get_content_disposition().disposition == DispositionType::Attachment {
+        return;
+    }
+
+    if part.subparts.is_empty() {
+        let mime = part.ctype.mimetype.to_ascii_lowercase();
+        if mime == "text/plain" {
+            if let Ok(body) = part.get_body() {
+                let body = body.trim();
+                if !body.is_empty() {
+                    text_parts.push(body.to_string());
+                }
+            }
+        } else if mime == "text/html" {
+            if let Ok(body) = part.get_body() {
+                let body = html_to_text(&body);
+                if !body.is_empty() {
+                    html_parts.push(body);
+                }
+            }
+        }
+        return;
+    }
+
+    for child in &part.subparts {
+        collect_message_parts(child, text_parts, html_parts);
+    }
+}
+
+fn html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    let mut last_was_space = false;
+
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                if !last_was_space {
+                    out.push(' ');
+                    last_was_space = true;
+                }
+            }
+            _ if in_tag => {}
+            _ => {
+                let normalized = if ch.is_whitespace() { ' ' } else { ch };
+                if normalized == ' ' {
+                    if !last_was_space {
+                        out.push(' ');
+                        last_was_space = true;
+                    }
+                } else {
+                    out.push(normalized);
+                    last_was_space = false;
+                }
+            }
+        }
+    }
+
+    out = out
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+
+    out.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_message_body_prefers_plaintext() {
+        let raw = concat!(
+            "Subject: Test\r\n",
+            "From: sender@example.com\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: multipart/alternative; boundary=\"ALT\"\r\n",
+            "\r\n",
+            "--ALT\r\n",
+            "Content-Type: text/plain; charset=UTF-8\r\n",
+            "\r\n",
+            "Hello from plain text.\r\n",
+            "--ALT\r\n",
+            "Content-Type: text/html; charset=UTF-8\r\n",
+            "\r\n",
+            "<html><body><p>Hello from <b>HTML</b>.</p></body></html>\r\n",
+            "--ALT--\r\n"
+        );
+
+        let parsed = mailparse::parse_mail(raw.as_bytes()).expect("mail should parse");
+        let body = extract_message_body(&parsed);
+        assert!(body.contains("Hello from plain text."));
+    }
+
+    #[test]
+    fn extract_message_body_falls_back_to_html() {
+        let raw = concat!(
+            "Subject: HTML only\r\n",
+            "From: sender@example.com\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: text/html; charset=UTF-8\r\n",
+            "\r\n",
+            "<html><body><h1>Meeting</h1><p>Tomorrow at 10:00.</p></body></html>\r\n"
+        );
+
+        let parsed = mailparse::parse_mail(raw.as_bytes()).expect("mail should parse");
+        let body = extract_message_body(&parsed);
+        assert!(body.contains("Meeting"));
+        assert!(body.contains("Tomorrow at 10:00."));
+    }
+
+    #[test]
+    fn extract_header_fields_reads_common_headers() {
+        let raw = concat!(
+            "From: sender@example.com\r\n",
+            "Subject: Subject line\r\n",
+            "Date: Tue, 10 Feb 2026 09:00:00 +0000\r\n",
+            "\r\n"
+        );
+
+        let (from, subject, date) = extract_header_fields(raw.as_bytes());
+        assert_eq!(from, "sender@example.com");
+        assert_eq!(subject, "Subject line");
+        assert_eq!(date, "Tue, 10 Feb 2026 09:00:00 +0000");
     }
 }
