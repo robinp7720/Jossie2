@@ -1,10 +1,12 @@
 use jossie_core::config::EmailConfig;
-use jossie_core::integration::{Integration, ToolDefinition, OnboardingStatus, OnboardingField};
+use jossie_core::integration::{Integration, OnboardingField, OnboardingStatus, ToolDefinition};
+use jossie_db::Database;
 use serde::Deserialize;
 use std::sync::Arc;
-use jossie_db::Database;
 
-type ImapSession = async_imap::Session<async_native_tls::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>>;
+type ImapSession = async_imap::Session<
+    async_native_tls::TlsStream<tokio_util::compat::Compat<tokio::net::TcpStream>>,
+>;
 
 pub struct EmailIntegration {
     default_config: Option<EmailConfig>,
@@ -39,9 +41,10 @@ impl EmailIntegration {
                 }
                 anyhow::bail!("Account not found: {}", id)
             }
-            _ => {
-                self.default_config.clone().ok_or_else(|| anyhow::anyhow!("No default email account configured"))
-            }
+            _ => self
+                .default_config
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("No default email account configured")),
         }
     }
 
@@ -51,12 +54,19 @@ impl EmailIntegration {
         let tls = async_native_tls::TlsConnector::new();
         let tls_stream = tls.connect(&config.imap_host, tcp.compat()).await?;
         let client = async_imap::Client::new(tls_stream);
-        let session = client.login(&config.username, &config.password).await
+        let session = client
+            .login(&config.username, &config.password)
+            .await
             .map_err(|e| anyhow::anyhow!("IMAP login failed: {}", e.0))?;
         Ok(session)
     }
 
-    async fn do_email_search(&self, config: &EmailConfig, query: &str, folder: &str) -> anyhow::Result<String> {
+    async fn do_email_search(
+        &self,
+        config: &EmailConfig,
+        query: &str,
+        folder: &str,
+    ) -> anyhow::Result<String> {
         let mut session = Self::imap_connect(config).await?;
         session.select(folder).await?;
 
@@ -71,9 +81,15 @@ impl EmailIntegration {
         let mut uid_vec: Vec<u32> = uids.into_iter().collect();
         uid_vec.sort_unstable_by(|a, b| b.cmp(a));
         uid_vec.truncate(20);
-        let uid_set: String = uid_vec.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
+        let uid_set: String = uid_vec
+            .iter()
+            .map(|u| u.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
 
-        let fetch_stream = session.uid_fetch(&uid_set, "BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)]").await?;
+        let fetch_stream = session
+            .uid_fetch(&uid_set, "BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)]")
+            .await?;
         let fetched: Vec<_> = {
             use futures::TryStreamExt;
             fetch_stream.try_collect().await?
@@ -94,7 +110,12 @@ impl EmailIntegration {
         Ok(serde_json::to_string_pretty(&results)?)
     }
 
-    async fn do_email_read(&self, config: &EmailConfig, uid: u32, folder: &str) -> anyhow::Result<String> {
+    async fn do_email_read(
+        &self,
+        config: &EmailConfig,
+        uid: u32,
+        folder: &str,
+    ) -> anyhow::Result<String> {
         let mut session = Self::imap_connect(config).await?;
         session.select(folder).await?;
 
@@ -108,15 +129,21 @@ impl EmailIntegration {
             let body = msg.body().unwrap_or_default();
             match mailparse::parse_mail(body) {
                 Ok(parsed) => {
-                    let subject = parsed.headers.iter()
+                    let subject = parsed
+                        .headers
+                        .iter()
                         .find(|h| h.get_key_ref() == "Subject")
                         .map(|h| h.get_value())
                         .unwrap_or_default();
-                    let from = parsed.headers.iter()
+                    let from = parsed
+                        .headers
+                        .iter()
                         .find(|h| h.get_key_ref() == "From")
                         .map(|h| h.get_value())
                         .unwrap_or_default();
-                    let date = parsed.headers.iter()
+                    let date = parsed
+                        .headers
+                        .iter()
                         .find(|h| h.get_key_ref() == "Date")
                         .map(|h| h.get_value())
                         .unwrap_or_default();
@@ -127,7 +154,8 @@ impl EmailIntegration {
                         "subject": subject,
                         "date": date,
                         "body": body_text,
-                    }).to_string()
+                    })
+                    .to_string()
                 }
                 Err(_) => String::from_utf8_lossy(body).to_string(),
             }
@@ -139,11 +167,16 @@ impl EmailIntegration {
         Ok(result)
     }
 
-    async fn do_email_send(&self, config: &EmailConfig, to: &str, subject: &str, body: &str) -> anyhow::Result<String> {
+    async fn do_email_send(
+        &self,
+        config: &EmailConfig,
+        to: &str,
+        subject: &str,
+        body: &str,
+    ) -> anyhow::Result<String> {
         use lettre::{
-            Message as LettreMessage, AsyncSmtpTransport, AsyncTransport,
+            AsyncSmtpTransport, AsyncTransport, Message as LettreMessage, Tokio1Executor,
             transport::smtp::authentication::Credentials,
-            Tokio1Executor,
         };
 
         let email = LettreMessage::builder()
@@ -152,15 +185,13 @@ impl EmailIntegration {
             .subject(subject)
             .body(body.to_string())?;
 
-        let creds = Credentials::new(
-            config.username.clone(),
-            config.password.clone(),
-        );
+        let creds = Credentials::new(config.username.clone(), config.password.clone());
 
-        let mailer: AsyncSmtpTransport<Tokio1Executor> = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)?
-            .port(config.smtp_port)
-            .credentials(creds)
-            .build();
+        let mailer: AsyncSmtpTransport<Tokio1Executor> =
+            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)?
+                .port(config.smtp_port)
+                .credentials(creds)
+                .build();
 
         mailer.send(email).await?;
         Ok(format!("Email sent to {to}"))
@@ -290,38 +321,70 @@ impl Integration for EmailIntegration {
 
         // Common args struct for account extraction
         #[derive(Deserialize)]
-        struct AccountArgs { #[serde(default)] account_id: String }
-        let base_args: AccountArgs = serde_json::from_str(arguments).unwrap_or(AccountArgs { account_id: String::new() });
+        struct AccountArgs {
+            #[serde(default)]
+            account_id: String,
+        }
+        let base_args: AccountArgs = serde_json::from_str(arguments).unwrap_or(AccountArgs {
+            account_id: String::new(),
+        });
         let account_id = base_args.account_id.trim();
-        let account_id = if account_id.is_empty() || account_id == "default" { None } else { Some(account_id) };
+        let account_id = if account_id.is_empty() || account_id == "default" {
+            None
+        } else {
+            Some(account_id)
+        };
         let config = self.get_account_config(account_id).await?;
 
         match tool_name {
             "email_search" => {
                 #[derive(Deserialize)]
-                struct Args { query: String, #[serde(default)] folder: String }
-                fn default_folder() -> String { "INBOX".to_string() }
+                struct Args {
+                    query: String,
+                    #[serde(default)]
+                    folder: String,
+                }
+                fn default_folder() -> String {
+                    "INBOX".to_string()
+                }
                 let args: Args = serde_json::from_str(arguments)?;
-                let folder = if args.folder.trim().is_empty() { default_folder() } else { args.folder };
+                let folder = if args.folder.trim().is_empty() {
+                    default_folder()
+                } else {
+                    args.folder
+                };
                 self.do_email_search(&config, &args.query, &folder).await
             }
             "email_read" => {
                 #[derive(Deserialize)]
-                struct Args { uid: u32, #[serde(default)] folder: String }
-                fn default_folder() -> String { "INBOX".to_string() }
+                struct Args {
+                    uid: u32,
+                    #[serde(default)]
+                    folder: String,
+                }
+                fn default_folder() -> String {
+                    "INBOX".to_string()
+                }
                 let args: Args = serde_json::from_str(arguments)?;
-                let folder = if args.folder.trim().is_empty() { default_folder() } else { args.folder };
+                let folder = if args.folder.trim().is_empty() {
+                    default_folder()
+                } else {
+                    args.folder
+                };
                 self.do_email_read(&config, args.uid, &folder).await
             }
             "email_send" => {
                 #[derive(Deserialize)]
-                struct Args { to: String, subject: String, body: String }
+                struct Args {
+                    to: String,
+                    subject: String,
+                    body: String,
+                }
                 let args: Args = serde_json::from_str(arguments)?;
-                self.do_email_send(&config, &args.to, &args.subject, &args.body).await
+                self.do_email_send(&config, &args.to, &args.subject, &args.body)
+                    .await
             }
-            "email_list_folders" => {
-                self.do_list_folders(&config).await
-            }
+            "email_list_folders" => self.do_list_folders(&config).await,
             _ => anyhow::bail!("Unknown email tool: {tool_name}"),
         }
     }

@@ -262,7 +262,10 @@ mod tests {
         };
 
         let result = reg.execute(&call).await;
-        assert_eq!(result.content.len(), 100_000 + "\n... [Output truncated. Original size: 150000 chars]".len());
+        assert_eq!(
+            result.content.len(),
+            100_000 + "\n... [Output truncated. Original size: 150000 chars]".len()
+        );
         assert!(result.content.contains("Original size: 150000 chars"));
     }
 }
