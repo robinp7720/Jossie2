@@ -1,7 +1,7 @@
 use crate::state::AppState;
 use chrono::Utc;
 use jossie_core::types::{Message, Role};
-use jossie_db::IntegrationEvent;
+use jossie_db::{IntegrationEvent, MemoryKeyInfo};
 use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -59,6 +59,16 @@ async fn build_system_prompt(state: &AppState, user_message: Option<&str>) -> St
         prompt.push_str(&entry.content);
     }
 
+    match state.db.memory_list_keys().await {
+        Ok(memory_keys) => {
+            prompt.push_str("\n\n");
+            prompt.push_str(&format_memory_index(&memory_keys));
+        }
+        Err(err) => {
+            tracing::warn!("Failed to build memory index for prompt: {err}");
+        }
+    }
+
     if let Some(message) = user_message {
         let graph_context = build_graph_context(state, message).await;
         if !graph_context.is_empty() {
@@ -69,6 +79,30 @@ async fn build_system_prompt(state: &AppState, user_message: Option<&str>) -> St
 
     tracing::debug!("System Prompt Built. Length: {} chars", prompt.len());
     prompt
+}
+
+fn format_memory_index(keys: &[MemoryKeyInfo]) -> String {
+    if keys.is_empty() {
+        return "## Memory Index (All Available Memories)\nNo memories are currently saved. Use memory tools to store durable context when useful.".to_string();
+    }
+
+    let mut section = String::from(
+        "## Memory Index (All Available Memories)\nUse this dynamic list to fill context gaps before asking the user to repeat information.\n",
+    );
+
+    for key_info in keys {
+        section.push_str("- `");
+        section.push_str(&key_info.key);
+        section.push('`');
+        if !key_info.updated_at.is_empty() {
+            section.push_str(" (updated ");
+            section.push_str(&key_info.updated_at);
+            section.push(')');
+        }
+        section.push('\n');
+    }
+
+    section
 }
 
 pub async fn prepend_system_prompt(
@@ -808,6 +842,34 @@ mod tests {
         sanitize_context_window(&mut msgs);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, Role::Assistant);
+    }
+
+    #[test]
+    fn test_memory_index_lists_all_keys() {
+        let keys = vec![
+            MemoryKeyInfo {
+                key: "user_profile.location".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-02T00:00:00Z".to_string(),
+            },
+            MemoryKeyInfo {
+                key: "agent_profile.mood".to_string(),
+                created_at: "2026-01-03T00:00:00Z".to_string(),
+                updated_at: "2026-01-04T00:00:00Z".to_string(),
+            },
+        ];
+
+        let section = format_memory_index(&keys);
+        assert!(section.contains("user_profile.location"));
+        assert!(section.contains("agent_profile.mood"));
+        assert!(section.contains("2026-01-02T00:00:00Z"));
+        assert!(section.contains("2026-01-04T00:00:00Z"));
+    }
+
+    #[test]
+    fn test_memory_index_empty_state() {
+        let section = format_memory_index(&[]);
+        assert!(section.contains("No memories are currently saved"));
     }
 }
 
