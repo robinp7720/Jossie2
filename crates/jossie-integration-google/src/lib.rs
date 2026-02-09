@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 use jossie_core::config::GoogleConfig;
 use jossie_core::integration::{Integration, OnboardingField, OnboardingStatus, ToolDefinition};
 use jossie_db::Database;
@@ -15,6 +15,10 @@ pub struct GoogleIntegration {
     tokens: Arc<RwLock<HashMap<String, TokenData>>>,
     db: Option<Arc<Database>>,
 }
+
+const GOOGLE_INTEGRATION: &str = "google";
+const ACCOUNT_STATUS_PAUSED_INVALID_GRANT: &str = "paused_invalid_grant";
+const RECONNECT_NOTICE_COOLDOWN_HOURS: i64 = 24;
 
 #[derive(Clone)]
 struct TokenData {
@@ -88,6 +92,172 @@ impl GoogleIntegration {
 
     pub fn set_db(&mut self, db: Arc<Database>) {
         self.db = Some(db);
+    }
+
+    fn account_status_key(account_id: &str) -> String {
+        format!("account_status:{account_id}")
+    }
+
+    fn account_status_detail_key(account_id: &str) -> String {
+        format!("account_status_detail:{account_id}")
+    }
+
+    fn account_paused_refresh_key(account_id: &str) -> String {
+        format!("account_paused_refresh_token:{account_id}")
+    }
+
+    fn account_last_reconnect_notice_key(account_id: &str) -> String {
+        format!("last_reconnect_notice_at:{account_id}")
+    }
+
+    fn is_invalid_grant_text(message: &str) -> bool {
+        let lower = message.to_ascii_lowercase();
+        lower.contains("invalid_grant")
+            && (lower.contains("token refresh failed")
+                || lower.contains("token has been expired or revoked"))
+    }
+
+    fn get_account_refresh_token(acc: &IntegrationAccount) -> Option<String> {
+        serde_json::from_str::<StoredAccount>(&acc.data)
+            .ok()
+            .map(|data| data.refresh_token)
+            .filter(|token| !token.trim().is_empty())
+    }
+
+    async fn clear_account_pause_state(
+        &self,
+        db: &Arc<Database>,
+        account_id: &str,
+    ) -> anyhow::Result<()> {
+        db.set_integration_setting(
+            GOOGLE_INTEGRATION,
+            &Self::account_status_key(account_id),
+            "active",
+        )
+        .await?;
+        db.set_integration_setting(
+            GOOGLE_INTEGRATION,
+            &Self::account_status_detail_key(account_id),
+            "",
+        )
+        .await?;
+        db.set_integration_setting(
+            GOOGLE_INTEGRATION,
+            &Self::account_paused_refresh_key(account_id),
+            "",
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn is_account_paused(
+        &self,
+        db: &Arc<Database>,
+        acc: &IntegrationAccount,
+    ) -> anyhow::Result<bool> {
+        let status = db
+            .get_integration_setting(GOOGLE_INTEGRATION, &Self::account_status_key(&acc.id))
+            .await?;
+        if status.as_deref() != Some(ACCOUNT_STATUS_PAUSED_INVALID_GRANT) {
+            return Ok(false);
+        }
+
+        // If refresh token changed since pause, resume polling automatically.
+        let paused_refresh = db
+            .get_integration_setting(
+                GOOGLE_INTEGRATION,
+                &Self::account_paused_refresh_key(&acc.id),
+            )
+            .await?;
+        let current_refresh = Self::get_account_refresh_token(acc);
+        if let (Some(paused), Some(current)) = (paused_refresh, current_refresh) {
+            if !paused.is_empty() && paused != current {
+                tracing::info!(
+                    "Google account {} refresh token changed; clearing paused status",
+                    acc.id
+                );
+                self.clear_account_pause_state(db, &acc.id).await?;
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    async fn pause_account_invalid_grant(
+        &self,
+        db: &Arc<Database>,
+        acc: &IntegrationAccount,
+        error_message: &str,
+    ) -> anyhow::Result<()> {
+        db.set_integration_setting(
+            GOOGLE_INTEGRATION,
+            &Self::account_status_key(&acc.id),
+            ACCOUNT_STATUS_PAUSED_INVALID_GRANT,
+        )
+        .await?;
+
+        let detail = serde_json::json!({
+            "reason": ACCOUNT_STATUS_PAUSED_INVALID_GRANT,
+            "paused_at": Utc::now().to_rfc3339(),
+            "last_error": error_message,
+        });
+        db.set_integration_setting(
+            GOOGLE_INTEGRATION,
+            &Self::account_status_detail_key(&acc.id),
+            &detail.to_string(),
+        )
+        .await?;
+
+        let refresh = Self::get_account_refresh_token(acc).unwrap_or_default();
+        db.set_integration_setting(
+            GOOGLE_INTEGRATION,
+            &Self::account_paused_refresh_key(&acc.id),
+            &refresh,
+        )
+        .await?;
+
+        self.tokens.write().await.remove(&acc.id);
+        Ok(())
+    }
+
+    async fn queue_reconnect_notice_if_due(
+        &self,
+        db: &Arc<Database>,
+        acc: &IntegrationAccount,
+    ) -> anyhow::Result<()> {
+        let last_notice = db
+            .get_integration_setting(
+                GOOGLE_INTEGRATION,
+                &Self::account_last_reconnect_notice_key(&acc.id),
+            )
+            .await?;
+        if let Some(last_notice) = last_notice {
+            if let Ok(last_dt) = DateTime::parse_from_rfc3339(&last_notice) {
+                let cooldown = Duration::hours(RECONNECT_NOTICE_COOLDOWN_HOURS);
+                if Utc::now() - last_dt.with_timezone(&Utc) < cooldown {
+                    return Ok(());
+                }
+            }
+        }
+
+        let Some(chat) = db.get_latest_telegram_chat().await? else {
+            return Ok(());
+        };
+
+        let message = format!(
+            "Google account '{}' needs reconnect: refresh token was expired/revoked. Please reconnect it in settings.",
+            acc.name
+        );
+        db.queue_oob_message(chat.conversation_id, &message, "high")
+            .await?;
+        db.set_integration_setting(
+            GOOGLE_INTEGRATION,
+            &Self::account_last_reconnect_notice_key(&acc.id),
+            &Utc::now().to_rfc3339(),
+        )
+        .await?;
+        Ok(())
     }
 
     pub fn generate_auth_url(
@@ -1778,10 +1948,51 @@ impl Integration for GoogleIntegration {
 
         let accounts = db.list_integration_accounts("google").await?;
         for acc in accounts {
+            if self.is_account_paused(db, &acc).await? {
+                tracing::warn!("Skipping paused Google account {} during poll", acc.id);
+                if let Err(e) = self.queue_reconnect_notice_if_due(db, &acc).await {
+                    tracing::warn!(
+                        "Failed to queue reconnect reminder for paused Google account {}: {e}",
+                        acc.id
+                    );
+                }
+                continue;
+            }
+
             if let Err(e) = self.poll_gmail_for_account(db, &acc).await {
+                if Self::is_invalid_grant_text(&e.to_string()) {
+                    tracing::warn!(
+                        "Pausing Google account {} due to invalid_grant token refresh failure",
+                        acc.id
+                    );
+                    self.pause_account_invalid_grant(db, &acc, &e.to_string())
+                        .await?;
+                    if let Err(notice_err) = self.queue_reconnect_notice_if_due(db, &acc).await {
+                        tracing::warn!(
+                            "Failed to queue reconnect reminder for account {}: {notice_err}",
+                            acc.id
+                        );
+                    }
+                    continue;
+                }
                 tracing::warn!("Gmail poll failed for account {}: {e}", acc.id);
             }
             if let Err(e) = self.poll_calendar_for_account(db, &acc).await {
+                if Self::is_invalid_grant_text(&e.to_string()) {
+                    tracing::warn!(
+                        "Pausing Google account {} due to invalid_grant token refresh failure",
+                        acc.id
+                    );
+                    self.pause_account_invalid_grant(db, &acc, &e.to_string())
+                        .await?;
+                    if let Err(notice_err) = self.queue_reconnect_notice_if_due(db, &acc).await {
+                        tracing::warn!(
+                            "Failed to queue reconnect reminder for account {}: {notice_err}",
+                            acc.id
+                        );
+                    }
+                    continue;
+                }
                 tracing::warn!("Calendar poll failed for account {}: {e}", acc.id);
             }
         }

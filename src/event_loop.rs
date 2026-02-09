@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 const POLL_INTERVAL_SECS: u64 = 120;
 const PENDING_LIMIT: usize = 20;
+const CALENDAR_BATCH_MAX_EVENTS: usize = 50;
 
 pub async fn start_event_loop(state: Arc<AppState>) -> anyhow::Result<()> {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(POLL_INTERVAL_SECS));
@@ -50,9 +51,14 @@ async fn process_pending_events(state: &Arc<AppState>) -> anyhow::Result<()> {
         .list_pending_integration_events(PENDING_LIMIT)
         .await?;
     let mut email_events = Vec::new();
+    let mut calendar_events = Vec::new();
     for event in events {
         if is_email_event(&event) {
             email_events.push(event);
+            continue;
+        }
+        if is_calendar_event(&event) {
+            calendar_events.push(event);
             continue;
         }
 
@@ -72,12 +78,22 @@ async fn process_pending_events(state: &Arc<AppState>) -> anyhow::Result<()> {
             tracing::error!("Email batch processing failed: {}", e);
         }
     }
+    if !calendar_events.is_empty() {
+        tracing::info!("Batch processing {} calendar events", calendar_events.len());
+        if let Err(e) = handle_calendar_event_batch(state, &chat, &calendar_events).await {
+            tracing::error!("Calendar batch processing failed: {}", e);
+        }
+    }
 
     Ok(())
 }
 
 fn is_email_event(event: &IntegrationEvent) -> bool {
     matches!(event.event_type.as_str(), "new_email" | "gmail_new_message")
+}
+
+fn is_calendar_event(event: &IntegrationEvent) -> bool {
+    matches!(event.event_type.as_str(), "calendar_event_updated")
 }
 
 async fn handle_event(
@@ -213,6 +229,43 @@ async fn handle_email_event_batch(
     }
 }
 
+async fn handle_calendar_event_batch(
+    state: &Arc<AppState>,
+    chat: &jossie_db::TelegramChatLink,
+    events: &[IntegrationEvent],
+) -> anyhow::Result<()> {
+    let mut claimed_events = Vec::new();
+    for event in events {
+        let claimed = state
+            .db
+            .mark_integration_event_processing(&event.id)
+            .await?;
+        if claimed {
+            claimed_events.push(event.clone());
+        } else {
+            tracing::debug!("Event {} already being processed, skipping", event.id);
+        }
+    }
+
+    if claimed_events.is_empty() {
+        return Ok(());
+    }
+
+    let result = process_calendar_event_batch_inner(state, chat, &claimed_events).await;
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            for event in &claimed_events {
+                state
+                    .db
+                    .mark_integration_event_failed(&event.id, &e.to_string())
+                    .await?;
+            }
+            Err(e)
+        }
+    }
+}
+
 async fn process_email_event_batch_inner(
     state: &Arc<AppState>,
     chat: &jossie_db::TelegramChatLink,
@@ -259,6 +312,82 @@ async fn process_email_event_batch_inner(
     tracing::info!("Sending batched email message: {}", message);
     jossie_telegram::send_message(&state.telegram_token, chat.chat_id, &message).await?;
     tracing::info!("Batched email message sent: {}", message);
+
+    let assistant_msg = Message {
+        id: Uuid::new_v4(),
+        conversation_id: chat.conversation_id,
+        role: Role::Assistant,
+        content: message,
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+        created_at: Utc::now(),
+    };
+    state.db.save_message(&assistant_msg).await?;
+    mark_events_processed(state, events).await?;
+
+    Ok(())
+}
+
+async fn process_calendar_event_batch_inner(
+    state: &Arc<AppState>,
+    chat: &jossie_db::TelegramChatLink,
+    events: &[IntegrationEvent],
+) -> anyhow::Result<()> {
+    let (reduced_events, omitted_count) = reduce_calendar_events(events, CALENDAR_BATCH_MAX_EVENTS);
+    if reduced_events.is_empty() {
+        tracing::info!(
+            "Skipping calendar batch message; all {} events were filtered",
+            events.len()
+        );
+        mark_events_processed(state, events).await?;
+        return Ok(());
+    }
+
+    // Enrich each event's entities before generating a combined message.
+    for event in &reduced_events {
+        let entities = extract_event_entities(event);
+        for entity in &entities {
+            if let Ok(nodes) = state.db.graph_find_nodes(entity).await {
+                if !nodes.is_empty() {
+                    tracing::info!(
+                        "Enriching calendar event with graph context for: {}",
+                        entity
+                    );
+                }
+            }
+        }
+    }
+
+    let batched_event = build_calendar_batch_event(&reduced_events, events.len(), omitted_count);
+    let message = match jossie_server::agent::generate_event_message(
+        state,
+        chat.conversation_id,
+        &batched_event,
+    )
+    .await
+    {
+        Ok(msg) => msg,
+        Err(e) if e.to_string().contains("already being processed") => {
+            tracing::debug!(
+                "Skipping calendar batch - conversation {} is busy",
+                chat.conversation_id
+            );
+            mark_events_processed(state, events).await?;
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+
+    tracing::info!("Generated batched calendar message: {:?}", message);
+    let Some(message) = message else {
+        mark_events_processed(state, events).await?;
+        return Ok(());
+    };
+
+    tracing::info!("Sending batched calendar message: {}", message);
+    jossie_telegram::send_message(&state.telegram_token, chat.chat_id, &message).await?;
+    tracing::info!("Batched calendar message sent: {}", message);
 
     let assistant_msg = Message {
         id: Uuid::new_v4(),
@@ -326,6 +455,165 @@ fn build_email_batch_event(events: &[IntegrationEvent]) -> IntegrationEvent {
     }
 }
 
+fn build_calendar_batch_event(
+    events: &[IntegrationEvent],
+    original_count: usize,
+    omitted_count: usize,
+) -> IntegrationEvent {
+    let integration = if events
+        .iter()
+        .all(|event| event.integration == events[0].integration)
+    {
+        events[0].integration.clone()
+    } else {
+        "mixed".to_string()
+    };
+
+    let account_id = if events
+        .iter()
+        .all(|event| event.account_id == events[0].account_id)
+    {
+        events[0].account_id.clone()
+    } else {
+        "mixed".to_string()
+    };
+
+    let calendar_events: Vec<serde_json::Value> = events
+        .iter()
+        .map(|event| {
+            serde_json::json!({
+                "id": event.id,
+                "integration": event.integration,
+                "account_id": event.account_id,
+                "event_type": event.event_type,
+                "created_at": event.created_at,
+                "payload": event.payload,
+            })
+        })
+        .collect();
+
+    IntegrationEvent {
+        id: Uuid::new_v4().to_string(),
+        integration,
+        account_id,
+        event_type: "calendar_event_batch".to_string(),
+        dedupe_key: format!("calendar_batch:{}:{}", original_count, Uuid::new_v4()),
+        payload: serde_json::json!({
+            "count": events.len(),
+            "original_count": original_count,
+            "omitted_count": omitted_count,
+            "events": calendar_events,
+        }),
+        status: "processing".to_string(),
+        created_at: Utc::now().to_rfc3339(),
+        processed_at: None,
+        last_error: None,
+    }
+}
+
+fn reduce_calendar_events(
+    events: &[IntegrationEvent],
+    max_events: usize,
+) -> (Vec<IntegrationEvent>, usize) {
+    if events.is_empty() {
+        return (Vec::new(), 0);
+    }
+
+    let mut best_by_key: HashMap<String, IntegrationEvent> = HashMap::new();
+    for event in events {
+        if is_low_value_calendar_event(event) {
+            continue;
+        }
+
+        let key = calendar_logical_key(event);
+        match best_by_key.get(&key) {
+            Some(existing) if calendar_updated_value(event) <= calendar_updated_value(existing) => {
+            }
+            _ => {
+                best_by_key.insert(key, event.clone());
+            }
+        }
+    }
+
+    let mut reduced: Vec<IntegrationEvent> = best_by_key.into_values().collect();
+    reduced.sort_by(|a, b| calendar_updated_value(b).cmp(&calendar_updated_value(a)));
+
+    if reduced.len() > max_events {
+        reduced.truncate(max_events);
+    }
+
+    let omitted_count = events.len().saturating_sub(reduced.len());
+    (reduced, omitted_count)
+}
+
+fn is_low_value_calendar_event(event: &IntegrationEvent) -> bool {
+    let status = event
+        .payload
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if !status.eq_ignore_ascii_case("cancelled") {
+        return false;
+    }
+
+    let summary = event
+        .payload
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim();
+    let start = event
+        .payload
+        .get("start")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+
+    summary.eq_ignore_ascii_case("Untitled")
+        && (start.starts_with("2000-01-01") || start.starts_with("2000-01-02") || start.is_empty())
+}
+
+fn calendar_logical_key(event: &IntegrationEvent) -> String {
+    let payload = &event.payload;
+    let calendar_id = payload
+        .get("calendar_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let summary = payload
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let status = payload
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let start = payload
+        .get("start")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let end = payload
+        .get("end")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+
+    format!(
+        "{}|{}|{}|{}|{}|{}",
+        event.account_id, calendar_id, summary, status, start, end
+    )
+}
+
+fn calendar_updated_value(event: &IntegrationEvent) -> String {
+    event
+        .payload
+        .get("updated")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&event.created_at)
+        .to_string()
+}
+
 async fn mark_events_processed(
     state: &Arc<AppState>,
     events: &[IntegrationEvent],
@@ -353,23 +641,15 @@ fn extract_event_entities(event: &IntegrationEvent) -> Vec<String> {
                 }
             }
         }
-        "calendar_event" => {
-            // Extract attendees from calendar event
-            if let Some(attendees) = event.payload.get("attendees").and_then(|v| v.as_array()) {
-                for attendee in attendees {
-                    if let Some(email) = attendee.get("email").and_then(|v| v.as_str()) {
-                        entities.push(email.to_string());
+        "calendar_event" | "calendar_event_updated" => {
+            extract_calendar_entities(&event.payload, &mut entities);
+        }
+        "calendar_event_batch" => {
+            if let Some(items) = event.payload.get("events").and_then(|v| v.as_array()) {
+                for item in items {
+                    if let Some(payload) = item.get("payload") {
+                        extract_calendar_entities(payload, &mut entities);
                     }
-                    if let Some(name) = attendee.get("displayName").and_then(|v| v.as_str()) {
-                        entities.push(name.to_string());
-                    }
-                }
-            }
-
-            // Extract location if it's a company/place
-            if let Some(location) = event.payload.get("location").and_then(|v| v.as_str()) {
-                if !location.is_empty() {
-                    entities.push(location.to_string());
                 }
             }
         }
@@ -377,6 +657,37 @@ fn extract_event_entities(event: &IntegrationEvent) -> Vec<String> {
     }
 
     entities
+}
+
+fn extract_calendar_entities(payload: &serde_json::Value, entities: &mut Vec<String>) {
+    if let Some(attendees) = payload.get("attendees").and_then(|v| v.as_array()) {
+        for attendee in attendees {
+            if let Some(email) = attendee.get("email").and_then(|v| v.as_str()) {
+                entities.push(email.to_string());
+            }
+            if let Some(name) = attendee.get("displayName").and_then(|v| v.as_str()) {
+                entities.push(name.to_string());
+            }
+        }
+    }
+
+    if let Some(summary) = payload.get("summary").and_then(|v| v.as_str()) {
+        if !summary.trim().is_empty() {
+            entities.push(summary.to_string());
+        }
+    }
+
+    if let Some(account_email) = payload.get("account_email").and_then(|v| v.as_str()) {
+        if !account_email.trim().is_empty() {
+            entities.push(account_email.to_string());
+        }
+    }
+
+    if let Some(location) = payload.get("location").and_then(|v| v.as_str()) {
+        if !location.is_empty() {
+            entities.push(location.to_string());
+        }
+    }
 }
 
 fn extract_email_entities(payload: &serde_json::Value, entities: &mut Vec<String>) {
@@ -671,6 +982,27 @@ mod tests {
     }
 
     #[test]
+    fn identifies_calendar_event_types() {
+        let calendar_event = mk_event(
+            "1",
+            "calendar_event_updated",
+            "google",
+            "acc_1",
+            serde_json::json!({}),
+        );
+        let email_event = mk_event(
+            "2",
+            "gmail_new_message",
+            "google",
+            "acc_1",
+            serde_json::json!({}),
+        );
+
+        assert!(is_calendar_event(&calendar_event));
+        assert!(!is_calendar_event(&email_event));
+    }
+
+    #[test]
     fn builds_single_batched_email_event() {
         let e1 = mk_event(
             "1",
@@ -715,5 +1047,54 @@ mod tests {
         let batch = build_email_batch_event(&[e1, e2]);
         assert_eq!(batch.integration, "mixed");
         assert_eq!(batch.account_id, "mixed");
+    }
+
+    #[test]
+    fn reduces_calendar_events_with_dedupe_and_filtering() {
+        let old = mk_event(
+            "old",
+            "calendar_event_updated",
+            "google",
+            "acc_1",
+            serde_json::json!({
+                "calendar_id": "primary",
+                "summary": "Standup",
+                "status": "confirmed",
+                "start": "2026-02-10T10:00:00Z",
+                "end": "2026-02-10T10:15:00Z",
+                "updated": "2026-02-09T10:00:00Z"
+            }),
+        );
+        let new = mk_event(
+            "new",
+            "calendar_event_updated",
+            "google",
+            "acc_1",
+            serde_json::json!({
+                "calendar_id": "primary",
+                "summary": "Standup",
+                "status": "confirmed",
+                "start": "2026-02-10T10:00:00Z",
+                "end": "2026-02-10T10:15:00Z",
+                "updated": "2026-02-09T11:00:00Z"
+            }),
+        );
+        let low_value = mk_event(
+            "noise",
+            "calendar_event_updated",
+            "google",
+            "acc_1",
+            serde_json::json!({
+                "summary": "Untitled",
+                "status": "cancelled",
+                "start": "2000-01-01T00:00:00Z",
+                "updated": "2026-02-09T12:00:00Z"
+            }),
+        );
+
+        let (reduced, omitted) = reduce_calendar_events(&[old, new.clone(), low_value], 50);
+        assert_eq!(reduced.len(), 1);
+        assert_eq!(omitted, 2);
+        assert_eq!(reduced[0].id, new.id);
     }
 }
