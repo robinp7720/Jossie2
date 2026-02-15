@@ -56,6 +56,54 @@ pub struct Message {
     pub created_at: DateTime<Utc>,
 }
 
+impl Message {
+    /// Create a new message with default optional fields.
+    pub fn new(conversation_id: Uuid, role: Role, content: String) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            conversation_id,
+            role,
+            content,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Create a transient message (nil IDs) for prompt construction.
+    pub fn transient(role: Role, content: String) -> Self {
+        Self {
+            id: Uuid::nil(),
+            conversation_id: Uuid::nil(),
+            role,
+            content,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Set the tool_calls field.
+    pub fn with_tool_calls(mut self, tool_calls: serde_json::Value) -> Self {
+        self.tool_calls = Some(tool_calls);
+        self
+    }
+
+    /// Set the tool_call_id field.
+    pub fn with_tool_call_id(mut self, tool_call_id: String) -> Self {
+        self.tool_call_id = Some(tool_call_id);
+        self
+    }
+
+    /// Set the name field.
+    pub fn with_name(mut self, name: String) -> Self {
+        self.name = Some(name);
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     pub id: Uuid,

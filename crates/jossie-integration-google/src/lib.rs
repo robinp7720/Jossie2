@@ -117,6 +117,32 @@ impl GoogleIntegration {
                 || lower.contains("token has been expired or revoked"))
     }
 
+    /// Check if a poll error is an invalid_grant, and if so pause the account
+    /// and queue a reconnect notice. Returns `true` if the account was paused.
+    async fn handle_poll_invalid_grant(
+        &self,
+        db: &Arc<Database>,
+        acc: &IntegrationAccount,
+        error: &anyhow::Error,
+    ) -> anyhow::Result<bool> {
+        if !Self::is_invalid_grant_text(&error.to_string()) {
+            return Ok(false);
+        }
+        tracing::warn!(
+            "Pausing Google account {} due to invalid_grant token refresh failure",
+            acc.id
+        );
+        self.pause_account_invalid_grant(db, acc, &error.to_string())
+            .await?;
+        if let Err(notice_err) = self.queue_reconnect_notice_if_due(db, acc).await {
+            tracing::warn!(
+                "Failed to queue reconnect reminder for account {}: {notice_err}",
+                acc.id
+            );
+        }
+        Ok(true)
+    }
+
     fn get_account_refresh_token(acc: &IntegrationAccount) -> Option<String> {
         serde_json::from_str::<StoredAccount>(&acc.data)
             .ok()
@@ -391,13 +417,13 @@ impl GoogleIntegration {
     }
 
     async fn list_accounts(&self) -> anyhow::Result<String> {
-        println!("Listing Google integration accounts");
+        tracing::debug!("Listing Google integration accounts");
         let mut accounts = Vec::new();
 
         if let Some(db) = &self.db {
             let db_accounts = db.list_integration_accounts("google").await?;
             for acc in db_accounts {
-                println!("Listing Google account: {} - {}", acc.id, acc.name);
+                tracing::debug!("Listing Google account: {} - {}", acc.id, acc.name);
                 let email = if let Ok(data) = serde_json::from_str::<StoredAccount>(&acc.data) {
                     data.email
                 } else {
@@ -1235,12 +1261,7 @@ impl GoogleIntegration {
             let calendar_id = &calendar.id;
             let updated_key = format!("calendar_updated_min:{}:{}", acc.id, calendar_id);
 
-            // Handle legacy key "calendar_updated_min:{acc.id}" for primary calendar
-            let db_key = if calendar.primary {
-                updated_key.clone()
-            } else {
-                updated_key.clone()
-            };
+            let db_key = updated_key.clone();
 
             let updated_min = match db.get_integration_setting("google", &db_key).await? {
                 Some(val) => val,
@@ -1414,20 +1435,7 @@ fn choose_preferred_body(text: String, html: String) -> String {
 }
 
 fn approx_visible_len(html: &str) -> usize {
-    let mut in_tag = false;
-    let mut count = 0usize;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ => {
-                if !in_tag && !ch.is_whitespace() {
-                    count += 1;
-                }
-            }
-        }
-    }
-    count
+    jossie_core::text::approx_visible_len(html)
 }
 
 fn collect_attachments(payload: &serde_json::Value) -> Vec<serde_json::Value> {
@@ -1960,37 +1968,13 @@ impl Integration for GoogleIntegration {
             }
 
             if let Err(e) = self.poll_gmail_for_account(db, &acc).await {
-                if Self::is_invalid_grant_text(&e.to_string()) {
-                    tracing::warn!(
-                        "Pausing Google account {} due to invalid_grant token refresh failure",
-                        acc.id
-                    );
-                    self.pause_account_invalid_grant(db, &acc, &e.to_string())
-                        .await?;
-                    if let Err(notice_err) = self.queue_reconnect_notice_if_due(db, &acc).await {
-                        tracing::warn!(
-                            "Failed to queue reconnect reminder for account {}: {notice_err}",
-                            acc.id
-                        );
-                    }
+                if self.handle_poll_invalid_grant(db, &acc, &e).await? {
                     continue;
                 }
                 tracing::warn!("Gmail poll failed for account {}: {e}", acc.id);
             }
             if let Err(e) = self.poll_calendar_for_account(db, &acc).await {
-                if Self::is_invalid_grant_text(&e.to_string()) {
-                    tracing::warn!(
-                        "Pausing Google account {} due to invalid_grant token refresh failure",
-                        acc.id
-                    );
-                    self.pause_account_invalid_grant(db, &acc, &e.to_string())
-                        .await?;
-                    if let Err(notice_err) = self.queue_reconnect_notice_if_due(db, &acc).await {
-                        tracing::warn!(
-                            "Failed to queue reconnect reminder for account {}: {notice_err}",
-                            acc.id
-                        );
-                    }
+                if self.handle_poll_invalid_grant(db, &acc, &e).await? {
                     continue;
                 }
                 tracing::warn!("Calendar poll failed for account {}: {e}", acc.id);

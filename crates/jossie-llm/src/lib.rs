@@ -71,6 +71,7 @@ struct ChatCompletionResponse {
 #[derive(Debug, Clone, Deserialize)]
 struct ChatCompletionChoice {
     message: ChatCompletionMessage,
+    #[allow(dead_code)]
     finish_reason: Option<String>,
 }
 
@@ -88,6 +89,7 @@ struct ChatCompletionChunk {
 #[derive(Debug, Clone, Deserialize)]
 struct ChatCompletionChunkChoice {
     delta: ChatCompletionChunkDelta,
+    #[allow(dead_code)]
     finish_reason: Option<String>,
 }
 

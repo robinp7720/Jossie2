@@ -1,5 +1,4 @@
 use crate::state::AppState;
-use chrono::Utc;
 use jossie_core::types::{Message, Role};
 use jossie_db::{IntegrationEvent, MemoryKeyInfo};
 use regex::Regex;
@@ -114,17 +113,7 @@ pub async fn prepend_system_prompt(
     if content.is_empty() {
         return;
     }
-    let sys_msg = Message {
-        id: Uuid::nil(),
-        conversation_id: Uuid::nil(),
-        role: Role::System,
-        content,
-        tool_calls: None,
-        tool_call_id: None,
-        name: None,
-        created_at: Utc::now(),
-    };
-    messages.insert(0, sys_msg);
+    messages.insert(0, Message::transient(Role::System, content));
 }
 
 pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<String> {
@@ -185,17 +174,10 @@ async fn run_agent_loop_inner(
 
     prepend_system_prompt(state, &mut messages, Some(&last_user_msg)).await;
     if options.scheduled_execution {
-        let scheduled_mode_msg = Message {
-            id: Uuid::nil(),
-            conversation_id: Uuid::nil(),
-            role: Role::System,
-            content: "Scheduled execution mode: this turn was triggered by an existing schedule. Execute the task now and do not create new schedules unless the user explicitly asks in this same turn.".to_string(),
-            tool_calls: None,
-            tool_call_id: None,
-            name: Some("scheduled_execution_mode".to_string()),
-            created_at: Utc::now(),
-        };
-        messages.insert(1, scheduled_mode_msg);
+        messages.insert(1, Message::transient(
+            Role::System,
+            "Scheduled execution mode: this turn was triggered by an existing schedule. Execute the task now and do not create new schedules unless the user explicitly asks in this same turn.".to_string(),
+        ).with_name("scheduled_execution_mode".to_string()));
     }
 
     for _iteration in 0..state.max_agent_iterations {
@@ -228,16 +210,7 @@ async fn run_agent_loop_inner(
         let (content, tool_calls) = state.llm.complete(&messages, &tools).await?;
 
         if tool_calls.is_empty() {
-            let msg = Message {
-                id: Uuid::new_v4(),
-                conversation_id: conv_id,
-                role: Role::Assistant,
-                content: content.clone(),
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-                created_at: Utc::now(),
-            };
+            let msg = Message::new(conv_id, Role::Assistant, content.clone());
             state.db.save_message(&msg).await?;
 
             // Trigger background extraction
@@ -253,16 +226,8 @@ async fn run_agent_loop_inner(
         }
 
         let tc_json = serde_json::to_value(&tool_calls)?;
-        let assistant_msg = Message {
-            id: Uuid::new_v4(),
-            conversation_id: conv_id,
-            role: Role::Assistant,
-            content: content.clone(),
-            tool_calls: Some(tc_json),
-            tool_call_id: None,
-            name: None,
-            created_at: Utc::now(),
-        };
+        let assistant_msg =
+            Message::new(conv_id, Role::Assistant, content.clone()).with_tool_calls(tc_json);
         state.db.save_message(&assistant_msg).await?;
         messages.push(assistant_msg);
 
@@ -297,16 +262,9 @@ async fn run_agent_loop_inner(
                 call.name,
                 result.content
             );
-            let tool_msg = Message {
-                id: Uuid::new_v4(),
-                conversation_id: conv_id,
-                role: Role::Tool,
-                content: result.content,
-                tool_calls: None,
-                tool_call_id: Some(call.id.clone()),
-                name: Some(call.name.clone()),
-                created_at: Utc::now(),
-            };
+            let tool_msg = Message::new(conv_id, Role::Tool, result.content)
+                .with_tool_call_id(call.id.clone())
+                .with_name(call.name.clone());
             state.db.save_message(&tool_msg).await?;
             messages.push(tool_msg);
         }
@@ -316,6 +274,145 @@ async fn run_agent_loop_inner(
         "Agent loop exceeded maximum of {} iterations",
         state.max_agent_iterations
     )
+}
+
+/// Events emitted by the streaming agent loop.
+#[derive(Debug, Clone)]
+pub enum AgentStreamEvent {
+    /// A text delta from the LLM response.
+    Delta(String),
+    /// A tool was executed and produced a result.
+    ToolResult { tool: String, result: String },
+    /// The agent loop completed for this conversation.
+    Done { conversation_id: Uuid },
+    /// An error occurred.
+    Error(String),
+}
+
+/// Run the agent loop with streaming, sending events to the caller via an mpsc channel.
+/// This is the streaming counterpart of `run_agent_loop`.
+pub async fn run_agent_loop_streaming(
+    state: &AppState,
+    conv_id: Uuid,
+    event_tx: tokio::sync::mpsc::Sender<AgentStreamEvent>,
+) {
+    let tools = state.registry.all_tool_definitions();
+    let mut messages = match state
+        .db
+        .get_messages(conv_id, Some(state.max_context_messages))
+        .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = event_tx
+                .send(AgentStreamEvent::Error(e.to_string()))
+                .await;
+            return;
+        }
+    };
+
+    let last_user_msg = messages
+        .last()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+
+    prepend_system_prompt(state, &mut messages, Some(&last_user_msg)).await;
+
+    for iteration in 0..state.max_agent_iterations {
+        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(100);
+        let llm = state.llm.clone();
+        let messages_clone = messages.clone();
+        let tools_clone = tools.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = llm
+                .complete_stream(&messages_clone, &tools_clone, stream_tx)
+                .await
+            {
+                tracing::error!("LLM stream error: {e}");
+            }
+        });
+
+        let mut full_content = String::new();
+        let mut tool_calls = Vec::new();
+
+        while let Some(event) = stream_rx.recv().await {
+            match event {
+                jossie_llm::StreamEvent::Delta(delta) => {
+                    full_content.push_str(&delta);
+                    let _ = event_tx.send(AgentStreamEvent::Delta(delta)).await;
+                }
+                jossie_llm::StreamEvent::ToolCalls(calls) => {
+                    tool_calls = calls;
+                }
+                jossie_llm::StreamEvent::Done => {}
+                jossie_llm::StreamEvent::Error(e) => {
+                    let _ = event_tx.send(AgentStreamEvent::Error(e)).await;
+                }
+            }
+        }
+
+        if !tool_calls.is_empty() {
+            if iteration + 1 >= state.max_agent_iterations {
+                let _ = event_tx
+                    .send(AgentStreamEvent::Error(
+                        "Max agent iterations reached".to_string(),
+                    ))
+                    .await;
+                return;
+            }
+
+            let assistant_msg = match serde_json::to_value(&tool_calls) {
+                Ok(tc_json) => Message::new(conv_id, Role::Assistant, full_content.clone())
+                    .with_tool_calls(tc_json),
+                Err(_) => Message::new(conv_id, Role::Assistant, full_content.clone()),
+            };
+            let _ = state.db.save_message(&assistant_msg).await;
+            messages.push(assistant_msg);
+
+            for call in &tool_calls {
+                let result = state.registry.execute(call).await;
+                let _ = event_tx
+                    .send(AgentStreamEvent::ToolResult {
+                        tool: call.name.clone(),
+                        result: result.content.clone(),
+                    })
+                    .await;
+                let tool_msg = Message::new(conv_id, Role::Tool, result.content)
+                    .with_tool_call_id(call.id.clone())
+                    .with_name(call.name.clone());
+                let _ = state.db.save_message(&tool_msg).await;
+                messages.push(tool_msg);
+            }
+            continue;
+        }
+
+        // Final response — save and trigger extraction
+        let assistant_msg = Message::new(conv_id, Role::Assistant, full_content);
+        let _ = state.db.save_message(&assistant_msg).await;
+
+        let db = state.db.clone();
+        let kg_llm = state.kg_llm.clone();
+        let assistant_reply = assistant_msg.content.clone();
+        let user_for_extraction = last_user_msg.clone();
+        tokio::spawn(async move {
+            spawn_knowledge_extraction(db, kg_llm, user_for_extraction, assistant_reply).await;
+        });
+
+        let _ = event_tx
+            .send(AgentStreamEvent::Done {
+                conversation_id: conv_id,
+            })
+            .await;
+        return;
+    }
+
+    let _ = event_tx
+        .send(AgentStreamEvent::Error(format!(
+            "Agent loop exceeded maximum of {} iterations",
+            state.max_agent_iterations
+        )))
+        .await;
 }
 
 pub(crate) async fn spawn_knowledge_extraction(
@@ -348,26 +445,11 @@ Output ONLY valid JSON matching this structure:
 If nothing to extract, output {{ "nodes": [], "edges": [] }}"#
     );
 
-    let sys_msg = Message {
-        id: Uuid::nil(),
-        conversation_id: Uuid::nil(),
-        role: Role::System,
-        content: "You are a Knowledge Graph Extractor. Output strictly JSON.".to_string(),
-        tool_calls: None,
-        tool_call_id: None,
-        name: None,
-        created_at: Utc::now(),
-    };
-    let user_msg = Message {
-        id: Uuid::nil(),
-        conversation_id: Uuid::nil(),
-        role: Role::User,
-        content: prompt,
-        tool_calls: None,
-        tool_call_id: None,
-        name: None,
-        created_at: Utc::now(),
-    };
+    let sys_msg = Message::transient(
+        Role::System,
+        "You are a Knowledge Graph Extractor. Output strictly JSON.".to_string(),
+    );
+    let user_msg = Message::transient(Role::User, prompt);
 
     match kg_llm.complete(&[sys_msg, user_msg], &[]).await {
         Ok((response, _)) => {
@@ -428,17 +510,7 @@ pub async fn generate_event_message(
         "\n\n## Event Mode\nYou are receiving integration events.\nDecide whether to proactively message the user.\nIf yes, respond with a short, friendly message as the assistant.\nIf not, respond exactly: NO_ACTION"
     );
 
-    let sys_msg = Message {
-        id: Uuid::nil(),
-        conversation_id: Uuid::nil(),
-        role: Role::System,
-        content: prompt,
-        tool_calls: None,
-        tool_call_id: None,
-        name: None,
-        created_at: Utc::now(),
-    };
-    messages.insert(0, sys_msg);
+    messages.insert(0, Message::transient(Role::System, prompt));
 
     let event_payload = serde_json::json!({
         "integration": event.integration,
@@ -447,17 +519,10 @@ pub async fn generate_event_message(
         "created_at": event.created_at,
     });
 
-    let event_msg = Message {
-        id: Uuid::nil(),
-        conversation_id: Uuid::nil(),
-        role: Role::System,
-        content: serde_json::to_string_pretty(&event_payload)?,
-        tool_calls: None,
-        tool_call_id: None,
-        name: Some("integration_event".to_string()),
-        created_at: Utc::now(),
-    };
-    messages.push(event_msg);
+    messages.push(
+        Message::transient(Role::System, serde_json::to_string_pretty(&event_payload)?)
+            .with_name("integration_event".to_string()),
+    );
 
     let (content, tool_calls) = state.llm.complete(&messages, &[]).await?;
     if !tool_calls.is_empty() {
@@ -805,16 +870,7 @@ mod tests {
     use uuid::Uuid;
 
     fn make_msg(role: Role) -> Message {
-        Message {
-            id: Uuid::new_v4(),
-            conversation_id: Uuid::new_v4(),
-            role,
-            content: "test".to_string(),
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-            created_at: Utc::now(),
-        }
+        Message::new(Uuid::new_v4(), role, "test".to_string())
     }
 
     #[test]

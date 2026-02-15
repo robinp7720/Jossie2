@@ -438,35 +438,14 @@ fn extract_header_fields(header_bytes: &[u8]) -> (String, String, String) {
 }
 
 fn truncate_with_notice(text: String, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text;
-    }
-
-    let truncated: String = text.chars().take(max_chars).collect();
-    format!(
-        "{}\n\n[Message truncated to {} characters]",
-        truncated, max_chars
-    )
+    jossie_core::text::truncate_with_notice(text, max_chars)
 }
 
 fn text_fallback_preview(raw_message: &[u8]) -> String {
     let preview_len = raw_message.len().min(32_000);
     let preview = String::from_utf8_lossy(&raw_message[..preview_len]);
-    let mut cleaned = String::new();
-    let mut last_was_space = false;
-    for ch in preview.chars() {
-        let normalized = if ch.is_whitespace() { ' ' } else { ch };
-        if normalized == ' ' {
-            if !last_was_space {
-                cleaned.push(' ');
-                last_was_space = true;
-            }
-        } else {
-            cleaned.push(normalized);
-            last_was_space = false;
-        }
-    }
-    cleaned.trim().to_string()
+    // html_to_text also collapses whitespace, so it works on plain text too
+    jossie_core::text::html_to_text(&preview)
 }
 
 fn extract_message_body(parsed: &ParsedMail<'_>) -> String {
@@ -520,45 +499,7 @@ fn collect_message_parts(
 }
 
 fn html_to_text(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    let mut last_was_space = false;
-
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => {
-                in_tag = false;
-                if !last_was_space {
-                    out.push(' ');
-                    last_was_space = true;
-                }
-            }
-            _ if in_tag => {}
-            _ => {
-                let normalized = if ch.is_whitespace() { ' ' } else { ch };
-                if normalized == ' ' {
-                    if !last_was_space {
-                        out.push(' ');
-                        last_was_space = true;
-                    }
-                } else {
-                    out.push(normalized);
-                    last_was_space = false;
-                }
-            }
-        }
-    }
-
-    out = out
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'");
-
-    out.trim().to_string()
+    jossie_core::text::html_to_text(html)
 }
 
 #[cfg(test)]

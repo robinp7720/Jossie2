@@ -1,6 +1,7 @@
 pub mod config;
 pub mod error;
 pub mod integration;
+pub mod text;
 pub mod types;
 
 pub use config::AppConfig;

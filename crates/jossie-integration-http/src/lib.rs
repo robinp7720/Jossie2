@@ -60,6 +60,7 @@ struct MultipartFile {
 #[derive(Deserialize, Debug)]
 struct MultipartBody {
     #[serde(rename = "type")]
+    #[allow(dead_code)]
     body_type: String, // must be "multipart"
     fields: Option<Vec<MultipartField>>,
     files: Option<Vec<MultipartFile>>,
