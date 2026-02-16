@@ -16,3 +16,4 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 urlencoding = { workspace = true }
 url = "2.5"
+tokio = { workspace = true }

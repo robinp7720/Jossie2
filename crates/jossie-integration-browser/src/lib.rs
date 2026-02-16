@@ -1,13 +1,107 @@
 use headless_chrome::{Browser, LaunchOptions};
 use jossie_core::integration::{Integration, ToolDefinition};
+use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 use url::Url;
 
-pub struct BrowserIntegration;
+/// Patterns that indicate a page blocked us (bot detection, CAPTCHA, etc.)
+const BOT_BLOCK_PATTERNS: &[&str] = &[
+    "unusual traffic",
+    "please enable javascript",
+    "captcha",
+    "are not a robot",
+    "blocked your ip",
+    "access denied",
+];
+
+fn is_bot_blocked(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    BOT_BLOCK_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
+pub struct BrowserIntegration {
+    client: reqwest::Client,
+    browser: Arc<OnceCell<Browser>>,
+}
 
 impl BrowserIntegration {
     pub fn new() -> Self {
-        Self
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .build()
+            .expect("Failed to build reqwest client");
+
+        Self {
+            client,
+            browser: Arc::new(OnceCell::new()),
+        }
+    }
+
+    /// Launch or reuse the shared browser, then open a new tab.
+    async fn browser_render(&self, url_str: &str, selector: Option<&str>) -> anyhow::Result<String> {
+        let browser = self
+            .browser
+            .get_or_try_init(|| async {
+                tracing::info!("Launching shared headless browser instance");
+                let options = LaunchOptions::default_builder()
+                    .headless(true)
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("Failed to build launch options: {}", e))?;
+
+                let b = tokio::task::spawn_blocking(move || Browser::new(options))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Join error launching browser: {}", e))?
+                    .map_err(|e| anyhow::anyhow!("Failed to launch browser: {}", e))?;
+
+                Ok::<Browser, anyhow::Error>(b)
+            })
+            .await?;
+
+        let url_owned = url_str.to_string();
+        let selector_owned = selector.map(|s| s.to_string());
+
+        // headless_chrome is sync — open a tab here, then run navigation on a blocking thread.
+        let tab = browser
+            .new_tab()
+            .map_err(|e| anyhow::anyhow!("Failed to open tab: {}", e))?;
+
+        let content = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            tracing::info!("Navigating browser tab to {}", url_owned);
+            tab.navigate_to(&url_owned)
+                .map_err(|e| anyhow::anyhow!("Failed to navigate: {}", e))?;
+
+            tab.wait_until_navigated()
+                .map_err(|e| anyhow::anyhow!("Failed to wait for navigation: {}", e))?;
+
+            if let Some(sel) = &selector_owned {
+                tracing::info!("Waiting for selector: {}", sel);
+                if let Err(e) = tab.wait_for_element(sel) {
+                    tracing::warn!("Selector {} not found: {}", sel, e);
+                }
+            }
+
+            let html = tab
+                .get_content()
+                .map_err(|e| anyhow::anyhow!("Failed to get content: {}", e))?;
+
+            Ok(html)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Join error: {}", e))??;
+
+        let markdown = html2text::from_read(content.as_bytes(), 80);
+
+        if is_bot_blocked(&markdown) {
+            return Ok(
+                "### Page blocked\nThe site blocked this request (bot detection / CAPTCHA). \
+                 Try a different URL or approach."
+                    .into(),
+            );
+        }
+
+        Ok(markdown)
     }
 
     async fn browser_read_page(
@@ -20,17 +114,12 @@ impl BrowserIntegration {
 
         tracing::info!("Browsing to: {}", url);
 
-        // Hybrid approach: Check headers first.
-        tracing::info!("Initializing reqwest client for {}", url);
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(10))
-            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .build()?;
-
-        // Try a HEAD request first to check content type
-        tracing::info!("Sending HEAD request to {}", url);
-        let head_resp = client
-            .head(url.clone())
+        // GET-first approach: try a direct GET and only fall back to the browser
+        // if the content looks like it needs JS rendering.
+        tracing::info!("Fetching {} with direct GET", url);
+        let resp_result = self
+            .client
+            .get(url.clone())
             .header(
                 "Accept",
                 "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -38,137 +127,79 @@ impl BrowserIntegration {
             .send()
             .await;
 
-        let mut should_use_browser = false;
-
-        match head_resp {
+        match resp_result {
             Ok(resp) => {
+                let final_url = resp.url().clone();
                 let status = resp.status();
-                tracing::info!("HEAD response status: {}", status);
-
-                let headers = resp.headers();
-                tracing::info!("HEAD response headers: {:?}", headers);
-
-                let content_type = headers
+                let content_type = resp
+                    .headers()
                     .get("content-type")
                     .and_then(|h| h.to_str().ok())
                     .unwrap_or("")
                     .to_lowercase();
 
-                tracing::info!("Content-Type for {}: '{}'", url, content_type);
+                tracing::info!(
+                    "GET {} -> status={}, content-type='{}'",
+                    final_url,
+                    status,
+                    content_type
+                );
 
-                // If it's explicitly HTML, use browser to handle JS.
-                if content_type.contains("html") {
-                    tracing::info!("Detected HTML content, attempting browser fallback");
-                    should_use_browser = true;
-                } else {
-                    tracing::info!("Content is not HTML, will attempt direct download");
-                }
-            }
-            Err(e) => {
-                tracing::warn!("HEAD request failed: {}. Defaulting to browser.", e);
-                should_use_browser = true;
-            }
-        };
-
-        if !should_use_browser {
-            tracing::info!("Fetching {} with simple HTTP client (GET)", url);
-            let resp_result = client
-                .get(url.clone())
-                .header(
-                    "Accept",
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                )
-                .send()
-                .await;
-
-            match resp_result {
-                Ok(resp) => {
-                    let final_url = resp.url().clone();
-                    let status = resp.status();
-                    tracing::info!("GET final URL: {}", final_url);
-                    tracing::info!("GET response status: {}", status);
-                    tracing::info!("GET response headers: {:?}", resp.headers());
-
-                    // Even if it is an error status (e.g. 400), we probably want to return the body
-                    // so the agent can see "Rate Limit" or "Bad Request" details.
+                if !status.is_success() {
                     let body = resp
                         .text()
                         .await
                         .unwrap_or_else(|e| format!("Failed to read body: {}", e));
+                    return Ok(format!(
+                        "### URL Fetch Failed\n**Final URL**: {}\n**Status**: {}\n\n```\n{}\n```",
+                        final_url, status, body
+                    ));
+                }
 
-                    tracing::info!("GET response body length: {}", body.len());
-                    if body.len() > 100 {
-                        tracing::info!(
-                            "GET response body preview: {}...",
-                            &body[0..100].replace('\n', " ")
-                        );
-                    } else {
-                        tracing::info!("GET response body: {}", body);
-                    }
+                let body = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|e| format!("Failed to read body: {}", e));
 
-                    if !status.is_success() {
-                        tracing::warn!("Simple fetch returned error status {}", status);
-                        // Explicitly formatted error string for LLM awareness
-                        return Ok(format!(
-                            "### URL Fetch Failed\n**Final URL**: {}\n**Status**: {}\n**Reason**: Direct fetch returned error status.\n\n**Response Body**:\n```\n{}\n```",
-                            final_url, status, body
-                        ));
-                    }
-
+                // If it's not HTML, return directly (JSON, plain text, etc.)
+                if !content_type.contains("html") {
                     return Ok(format!(
                         "### Content from {} (Direct Fetch)\n\n{}",
                         domain, body
                     ));
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "Simple fetch network error: {}, falling back to browser request",
-                        e
+
+                // It's HTML — check if it looks like it needs JS rendering.
+                // Heuristics: very short body, or contains noscript warnings.
+                let needs_js = body.len() < 1024
+                    || (body.contains("<noscript>") && body.len() < 4096);
+
+                if needs_js {
+                    tracing::info!(
+                        "HTML response looks like it needs JS (len={}), falling back to browser",
+                        body.len()
                     );
-                    // Network failed, maybe browser can bypass unique network issues? Unlikely but worth a shot.
+                } else {
+                    let markdown = html2text::from_read(body.as_bytes(), 80);
+
+                    if is_bot_blocked(&markdown) {
+                        tracing::info!("Direct GET was bot-blocked, falling back to browser");
+                    } else {
+                        return Ok(format!(
+                            "### Content from {} (Direct Fetch)\n\n{}",
+                            domain, markdown
+                        ));
+                    }
                 }
             }
-        }
-
-        // Headless Chrome Path
-        tracing::info!("Launching headless browser for {}", url);
-        let options = LaunchOptions::default_builder()
-            .headless(true)
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed into build launch options: {}", e))?;
-
-        let browser = Browser::new(options)
-            .map_err(|e| anyhow::anyhow!("Failed to launch browser: {}", e))?;
-
-        let tab = browser
-            .new_tab()
-            .map_err(|e| anyhow::anyhow!("Failed to open tab: {}", e))?;
-
-        // Navigate
-        tracing::info!("Navigating browser tab to {}", url);
-        tab.navigate_to(url_str)
-            .map_err(|e| anyhow::anyhow!("Failed to navigate: {}", e))?;
-
-        tracing::info!("Waiting for navigation to complete...");
-        tab.wait_until_navigated()
-            .map_err(|e| anyhow::anyhow!("Failed to wait for navigation: {}", e))?;
-
-        // Use selector if provided
-        if let Some(sel) = selector {
-            tracing::info!("Waiting for selector: {}", sel);
-            match tab.wait_for_element(sel) {
-                Ok(_) => {}
-                Err(e) => tracing::warn!("Selector {} not found: {}", sel, e),
+            Err(e) => {
+                tracing::warn!("Direct GET failed: {}, falling back to browser", e);
             }
         }
 
-        tracing::info!("Extracting page content");
-        let content = tab
-            .get_content()
-            .map_err(|e| anyhow::anyhow!("Failed to get content: {}", e))?;
-
-        // Convert to markdown
-        let markdown = html2text::from_read(content.as_bytes(), 80);
+        // Headless Chrome fallback
+        tracing::info!("Using headless browser for {}", url);
+        let markdown = self.browser_render(url_str, selector).await?;
 
         Ok(format!(
             "### Content from {} (Browser Rendered)\n\n{}",
@@ -177,13 +208,40 @@ impl BrowserIntegration {
     }
 
     async fn browser_search(&self, query: &str) -> anyhow::Result<String> {
-        // Use DuckDuckGo for privacy and simpler HTML structure if we were scraping,
-        // or Google. Let's try Google first.
         let url = format!(
-            "https://www.google.com/search?q={}",
+            "https://html.duckduckgo.com/html/?q={}",
             urlencoding::encode(query)
         );
-        self.browser_read_page(&url, None).await
+
+        tracing::info!("Searching DuckDuckGo HTML for: {}", query);
+
+        let resp = self
+            .client
+            .get(&url)
+            .header("Accept", "text/html")
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Ok(format!(
+                "### Search Failed\nDuckDuckGo returned status {}. Try again later.",
+                status
+            ));
+        }
+
+        let body = resp.text().await?;
+        let markdown = html2text::from_read(body.as_bytes(), 80);
+
+        if is_bot_blocked(&markdown) {
+            return Ok(
+                "### Search blocked\nThe search engine blocked this request (bot detection). \
+                 Try a different query or wait."
+                    .into(),
+            );
+        }
+
+        Ok(format!("### Search Results\n\n{}", markdown))
     }
 }
 
@@ -218,7 +276,7 @@ impl Integration for BrowserIntegration {
             },
             ToolDefinition {
                 name: "browser_search".to_string(),
-                description: "Searches the web for a query using a search engine.".to_string(),
+                description: "Searches the web for a query using DuckDuckGo.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
