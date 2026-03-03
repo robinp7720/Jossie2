@@ -1357,6 +1357,29 @@ impl GoogleIntegration {
                     }
                 }
                 Err(e) => {
+                    if e.to_string().contains("updatedMinTooLongAgo") {
+                        let reset_to = Utc::now().to_rfc3339();
+                        if let Err(set_err) = db
+                            .set_integration_setting("google", &db_key, &reset_to)
+                            .await
+                        {
+                            tracing::warn!(
+                                "Calendar {} for account {} returned updatedMinTooLongAgo, but failed to reset cursor: {}",
+                                calendar_id,
+                                acc.id,
+                                set_err
+                            );
+                        } else {
+                            tracing::warn!(
+                                "Calendar {} for account {} returned updatedMinTooLongAgo; reset updatedMin cursor to {}",
+                                calendar_id,
+                                acc.id,
+                                reset_to
+                            );
+                        }
+                        continue;
+                    }
+
                     tracing::warn!(
                         "Failed to poll calendar {} for account {}: {}",
                         calendar_id,
