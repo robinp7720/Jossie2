@@ -11,6 +11,7 @@ pub struct LlmClient {
     api_url: String,
     api_key: String,
     model: String,
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -22,6 +23,8 @@ struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -127,7 +130,12 @@ impl LlmClient {
             api_url: api_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
+            reasoning_effort: None,
         }
+    }
+
+    pub fn set_reasoning_effort(&mut self, effort: Option<String>) {
+        self.reasoning_effort = effort;
     }
 
     fn build_messages(messages: &[Message]) -> Vec<OpenAIMessage> {
@@ -233,6 +241,7 @@ impl LlmClient {
                 Some(serde_json::Value::String("auto".to_string()))
             },
             stream: false,
+            reasoning_effort: self.reasoning_effort.clone(),
         };
 
         let resp = self
@@ -285,6 +294,7 @@ impl LlmClient {
                 Some(serde_json::Value::String("auto".to_string()))
             },
             stream: true,
+            reasoning_effort: self.reasoning_effort.clone(),
         };
 
         let resp = self

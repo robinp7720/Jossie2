@@ -128,5 +128,14 @@ CREATE TABLE IF NOT EXISTS out_of_band_messages (
     last_error TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_oob_messages_status 
+CREATE INDEX IF NOT EXISTS idx_oob_messages_status
     ON out_of_band_messages(status, created_at);
+
+-- Conversation summaries for context compression
+CREATE TABLE IF NOT EXISTS conversation_summaries (
+    conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+    summary TEXT NOT NULL,
+    messages_summarized INTEGER NOT NULL DEFAULT 0,
+    last_message_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

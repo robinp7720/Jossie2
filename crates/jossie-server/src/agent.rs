@@ -7,6 +7,54 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
+// --- Goal Tracking (#4) ---
+
+struct GoalTracker {
+    primary_goal: String,
+    completed_steps: Vec<String>,
+}
+
+impl GoalTracker {
+    fn new(user_message: &str) -> Self {
+        // Extract a concise goal from the user message (first 200 chars)
+        let goal = if user_message.len() > 200 {
+            format!("{}...", &user_message[..200])
+        } else {
+            user_message.to_string()
+        };
+        Self {
+            primary_goal: goal,
+            completed_steps: Vec::new(),
+        }
+    }
+
+    fn record_tool_calls(&mut self, calls: &[jossie_core::ToolCall]) {
+        for call in calls {
+            self.completed_steps.push(format!(
+                "Called `{}` with args: {}",
+                call.name,
+                if call.arguments.len() > 100 {
+                    format!("{:.100}...", call.arguments)
+                } else {
+                    call.arguments.clone()
+                }
+            ));
+        }
+    }
+
+    fn build_tracking_message(&self) -> String {
+        let mut msg = format!("## Goal Tracking\n**Primary Goal:** {}\n", self.primary_goal);
+        if !self.completed_steps.is_empty() {
+            msg.push_str("**Completed Steps:**\n");
+            for (i, step) in self.completed_steps.iter().enumerate() {
+                msg.push_str(&format!("{}. {}\n", i + 1, step));
+            }
+        }
+        msg.push_str("**Next:** Decide if the goal is fully addressed or if more tool calls are needed.");
+        msg
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentRunOptions {
     pub allow_schedule_management: bool,
@@ -172,6 +220,9 @@ async fn run_agent_loop_inner(
 
     sanitize_context_window(&mut messages);
 
+    // Summarize older context if it exceeds the threshold
+    maybe_summarize_context(state, conv_id, &mut messages).await;
+
     prepend_system_prompt(state, &mut messages, Some(&last_user_msg)).await;
     if options.scheduled_execution {
         messages.insert(1, Message::transient(
@@ -180,7 +231,26 @@ async fn run_agent_loop_inner(
         ).with_name("scheduled_execution_mode".to_string()));
     }
 
+    let mut goal_tracker = GoalTracker::new(&last_user_msg);
+    let mut reflection_retries_remaining: usize = if state.enable_self_reflection { 1 } else { 0 };
+
     for _iteration in 0..state.max_agent_iterations {
+        // Inject goal tracking message after the first iteration
+        if _iteration > 0 {
+            // Remove previous goal tracking message if present
+            messages.retain(|m| {
+                !(m.role == Role::System
+                    && m.name.as_deref() == Some("goal_tracker")
+                    && m.tool_call_id.is_none())
+            });
+            // Insert goal tracking just after the system prompt
+            let tracking_msg = Message::transient(
+                Role::System,
+                goal_tracker.build_tracking_message(),
+            )
+            .with_name("goal_tracker".to_string());
+            messages.insert(1, tracking_msg);
+        }
         // --- DEBUG: Log Context Size ---
         let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
         let est_tokens = total_chars / 4; // Rough estimate
@@ -210,6 +280,27 @@ async fn run_agent_loop_inner(
         let (content, tool_calls) = state.llm.complete(&messages, &tools).await?;
 
         if tool_calls.is_empty() {
+            // Self-reflection: evaluate response quality before returning
+            if reflection_retries_remaining > 0 {
+                if let Some(feedback) = self_reflect(state, &last_user_msg, &content).await {
+                    reflection_retries_remaining -= 1;
+                    tracing::info!("Self-reflection retry. Feedback: {feedback}");
+                    // Add the assistant's response and feedback, then continue the loop
+                    messages.push(Message::transient(
+                        Role::Assistant,
+                        content.clone(),
+                    ));
+                    messages.push(Message::transient(
+                        Role::System,
+                        format!(
+                            "[SELF-REFLECTION FEEDBACK: Your response needs improvement. {}. Please revise your response.]",
+                            feedback
+                        ),
+                    ));
+                    continue;
+                }
+            }
+
             let msg = Message::new(conv_id, Role::Assistant, content.clone());
             state.db.save_message(&msg).await?;
 
@@ -225,38 +316,68 @@ async fn run_agent_loop_inner(
             return Ok(content);
         }
 
+        goal_tracker.record_tool_calls(&tool_calls);
+
         let tc_json = serde_json::to_value(&tool_calls)?;
         let assistant_msg =
             Message::new(conv_id, Role::Assistant, content.clone()).with_tool_calls(tc_json);
         state.db.save_message(&assistant_msg).await?;
         messages.push(assistant_msg);
 
-        for call in &tool_calls {
-            // Inject conversation_id into scheduler tool arguments
-            let mut call_with_context = call.clone();
-            if call.name.starts_with("schedule_")
-                || call.name == "send_user_message"
-                || call.name == "list_scheduled_tasks"
-            {
-                if let Ok(mut args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
-                    if let Some(obj) = args.as_object_mut() {
-                        obj.insert(
-                            "__conversation_id".to_string(),
-                            serde_json::Value::String(conv_id.to_string()),
-                        );
-                        if let Ok(json_str) = serde_json::to_string(&args) {
-                            call_with_context.arguments = json_str;
+        // Pre-process: inject conversation_id into scheduler tool arguments
+        let prepared_calls: Vec<_> = tool_calls
+            .iter()
+            .map(|call| {
+                let mut call_with_context = call.clone();
+                if call.name.starts_with("schedule_")
+                    || call.name == "send_user_message"
+                    || call.name == "list_scheduled_tasks"
+                {
+                    if let Ok(mut args) =
+                        serde_json::from_str::<serde_json::Value>(&call.arguments)
+                    {
+                        if let Some(obj) = args.as_object_mut() {
+                            obj.insert(
+                                "__conversation_id".to_string(),
+                                serde_json::Value::String(conv_id.to_string()),
+                            );
+                            if let Ok(json_str) = serde_json::to_string(&args) {
+                                call_with_context.arguments = json_str;
+                            }
                         }
                     }
                 }
-            }
+                call_with_context
+            })
+            .collect();
 
+        // Execute all tools concurrently
+        let mut join_set = tokio::task::JoinSet::new();
+        for (idx, call) in prepared_calls.into_iter().enumerate() {
+            let registry = state.registry.clone();
             tracing::info!(
                 "Executing tool: {} with args: {}",
                 call.name,
                 call.arguments
             );
-            let result = state.registry.execute(&call_with_context).await;
+            join_set.spawn(async move {
+                let result = registry.execute(&call).await;
+                (idx, call, result)
+            });
+        }
+
+        // Collect results preserving original order
+        let mut results: Vec<(usize, jossie_core::ToolCall, jossie_core::ToolResult)> =
+            Vec::with_capacity(tool_calls.len());
+        while let Some(res) = join_set.join_next().await {
+            match res {
+                Ok(tuple) => results.push(tuple),
+                Err(e) => tracing::error!("Tool task panicked: {e}"),
+            }
+        }
+        results.sort_by_key(|(idx, _, _)| *idx);
+
+        for (_, call, result) in results {
             tracing::info!(
                 "Tool {} finished. Result preview: {:.200}...",
                 call.name,
@@ -370,8 +491,27 @@ pub async fn run_agent_loop_streaming(
             let _ = state.db.save_message(&assistant_msg).await;
             messages.push(assistant_msg);
 
-            for call in &tool_calls {
-                let result = state.registry.execute(call).await;
+            // Execute all tools concurrently
+            let mut join_set = tokio::task::JoinSet::new();
+            for (idx, call) in tool_calls.iter().cloned().enumerate() {
+                let registry = state.registry.clone();
+                join_set.spawn(async move {
+                    let result = registry.execute(&call).await;
+                    (idx, call, result)
+                });
+            }
+
+            let mut results: Vec<(usize, jossie_core::ToolCall, jossie_core::ToolResult)> =
+                Vec::with_capacity(tool_calls.len());
+            while let Some(res) = join_set.join_next().await {
+                match res {
+                    Ok(tuple) => results.push(tuple),
+                    Err(e) => tracing::error!("Tool task panicked: {e}"),
+                }
+            }
+            results.sort_by_key(|(idx, _, _)| *idx);
+
+            for (_, call, result) in results {
                 let _ = event_tx
                     .send(AgentStreamEvent::ToolResult {
                         tool: call.name.clone(),
@@ -413,6 +553,166 @@ pub async fn run_agent_loop_streaming(
             state.max_agent_iterations
         )))
         .await;
+}
+
+/// Self-reflection: evaluate response quality using kg_llm.
+/// Returns Some(feedback) if the response should be retried, None if it's acceptable.
+async fn self_reflect(
+    state: &AppState,
+    user_message: &str,
+    assistant_response: &str,
+) -> Option<String> {
+    let prompt = format!(
+        r#"Evaluate the quality of this assistant response to the user's message.
+
+User message: {user_message}
+
+Assistant response: {assistant_response}
+
+Evaluate on these criteria:
+1. Does it actually answer the user's question/request?
+2. Is information accurate and complete?
+3. Is the tone appropriate?
+
+Respond with EXACTLY one of:
+- "PASS" if the response is acceptable
+- "RETRY: <specific feedback>" if the response needs improvement
+
+Output only PASS or RETRY: <feedback>, nothing else."#
+    );
+
+    let sys = Message::transient(
+        Role::System,
+        "You are a response quality evaluator. Be concise.".to_string(),
+    );
+    let user = Message::transient(Role::User, prompt);
+
+    match state.kg_llm.complete(&[sys, user], &[]).await {
+        Ok((verdict, _)) => {
+            let trimmed = verdict.trim();
+            if trimmed.starts_with("RETRY:") {
+                let feedback = trimmed.strip_prefix("RETRY:").unwrap_or("").trim();
+                tracing::info!("Self-reflection: retry recommended. Feedback: {feedback}");
+                Some(feedback.to_string())
+            } else {
+                tracing::debug!("Self-reflection: response passed quality check");
+                None
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Self-reflection failed: {e}. Proceeding with original response.");
+            None
+        }
+    }
+}
+
+/// Context compression: summarize older messages when context exceeds threshold.
+/// Keeps the most recent `keep_recent` messages in full and replaces older ones
+/// with a compact summary generated by kg_llm.
+const CONTEXT_CHAR_THRESHOLD: usize = 300_000;
+const KEEP_RECENT_MESSAGES: usize = 10;
+
+async fn maybe_summarize_context(
+    state: &AppState,
+    conv_id: Uuid,
+    messages: &mut Vec<Message>,
+) {
+    let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
+    if total_chars < CONTEXT_CHAR_THRESHOLD || messages.len() <= KEEP_RECENT_MESSAGES {
+        return;
+    }
+
+    tracing::info!(
+        "Context size ({} chars, {} messages) exceeds threshold. Attempting summarization.",
+        total_chars,
+        messages.len()
+    );
+
+    // Check if we already have a recent summary
+    if let Ok(Some(existing)) = state.db.get_conversation_summary(conv_id).await {
+        // If we already summarized most messages, just use the existing summary
+        let unsummarized = messages.len() as i64 - existing.messages_summarized;
+        if unsummarized <= KEEP_RECENT_MESSAGES as i64 + 5 {
+            // Inject existing summary and keep only recent messages
+            let keep_from = messages.len().saturating_sub(KEEP_RECENT_MESSAGES);
+            let recent = messages.split_off(keep_from);
+            messages.clear();
+            messages.push(Message::transient(
+                Role::System,
+                format!(
+                    "## Conversation Summary (previous {} messages)\n{}",
+                    existing.messages_summarized, existing.summary
+                ),
+            ));
+            messages.extend(recent);
+            return;
+        }
+    }
+
+    // Build the older messages to summarize
+    let keep_from = messages.len().saturating_sub(KEEP_RECENT_MESSAGES);
+    let to_summarize: Vec<String> = messages[..keep_from]
+        .iter()
+        .map(|m| format!("{:?}: {}", m.role, &m.content[..m.content.len().min(500)]))
+        .collect();
+
+    if to_summarize.is_empty() {
+        return;
+    }
+
+    let summarize_text = to_summarize.join("\n---\n");
+    let prompt = format!(
+        r#"Summarize the following conversation history into a compact summary.
+Preserve: key facts, decisions made, tool results, ongoing goals, and any commitments.
+Omit: pleasantries, redundant information, and tool call arguments.
+Be concise but complete.
+
+Conversation:
+{summarize_text}"#
+    );
+
+    let sys = Message::transient(
+        Role::System,
+        "You are a conversation summarizer. Output a concise summary.".to_string(),
+    );
+    let user = Message::transient(Role::User, prompt);
+
+    match state.kg_llm.complete(&[sys, user], &[]).await {
+        Ok((summary, _)) => {
+            let messages_count = keep_from as i64;
+            let last_id = messages.get(keep_from.saturating_sub(1)).map(|m| m.id.to_string());
+            let _ = state
+                .db
+                .save_conversation_summary(
+                    conv_id,
+                    &summary,
+                    messages_count,
+                    last_id.as_deref(),
+                )
+                .await;
+
+            let recent = messages.split_off(keep_from);
+            messages.clear();
+            messages.push(Message::transient(
+                Role::System,
+                format!(
+                    "## Conversation Summary (previous {} messages)\n{}",
+                    messages_count, summary
+                ),
+            ));
+            messages.extend(recent);
+
+            tracing::info!(
+                "Summarized {} messages into {} chars. New context: {} messages.",
+                messages_count,
+                summary.len(),
+                messages.len()
+            );
+        }
+        Err(e) => {
+            tracing::warn!("Failed to summarize context: {e}. Continuing with full context.");
+        }
+    }
 }
 
 pub(crate) async fn spawn_knowledge_extraction(

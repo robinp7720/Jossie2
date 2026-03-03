@@ -6,5 +6,8 @@ pub mod types;
 
 pub use config::AppConfig;
 pub use error::JossieError;
-pub use integration::{Integration, IntegrationRegistry, ToolCall, ToolDefinition, ToolResult};
+pub use integration::{
+    classify_error, validate_tool_result, Integration, IntegrationRegistry, ResultQuality,
+    ToolCall, ToolDefinition, ToolErrorKind, ToolResult,
+};
 pub use types::{Conversation, Message, Role};

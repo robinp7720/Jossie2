@@ -33,7 +33,8 @@ async fn main() -> Result<()> {
     db.migrate().await?;
     let db = Arc::new(db);
 
-    let llm = LlmClient::new(&config.llm.api_url, &config.llm.api_key, &config.llm.model);
+    let mut llm = LlmClient::new(&config.llm.api_url, &config.llm.api_key, &config.llm.model);
+    llm.set_reasoning_effort(config.llm.reasoning_effort.clone());
 
     // Initialize KG LLM client - use cheaper model if configured, otherwise use primary model
     let kg_llm = if let Some(kg_model) = &config.llm.kg_model {
@@ -41,7 +42,9 @@ async fn main() -> Result<()> {
             "Using dedicated model for knowledge graph extraction: {}",
             kg_model
         );
-        LlmClient::new(&config.llm.api_url, &config.llm.api_key, kg_model)
+        let mut client = LlmClient::new(&config.llm.api_url, &config.llm.api_key, kg_model);
+        client.set_reasoning_effort(config.llm.reasoning_effort.clone());
+        client
     } else {
         tracing::info!("Using primary model for knowledge graph extraction");
         llm.clone()
@@ -95,7 +98,7 @@ async fn main() -> Result<()> {
         db: db.clone(),
         llm,
         kg_llm,
-        registry,
+        registry: Arc::new(registry),
         auth_token: config.server.auth_token.clone(), // Changed from cfg.auth_token
         system_prompt: config.llm.system_prompt.clone(), // Changed from cfg.system_prompt
         max_agent_iterations: config.llm.max_agent_iterations, // Changed from cfg.max_agent_iterations
@@ -103,6 +106,7 @@ async fn main() -> Result<()> {
         google_config: config.google.clone(),                  // Changed from cfg.google
         google_integration,
         telegram_token: config.telegram.bot_token.clone(), // Changed from cfg.telegram_token
+        enable_self_reflection: config.llm.enable_self_reflection,
         active_conversations: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
     });
 

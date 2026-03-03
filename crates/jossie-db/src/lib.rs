@@ -900,6 +900,44 @@ impl Database {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    // Conversation Summaries
+
+    pub async fn get_conversation_summary(
+        &self,
+        conversation_id: Uuid,
+    ) -> anyhow::Result<Option<ConversationSummary>> {
+        let conv_str = conversation_id.to_string();
+        let row = sqlx::query_as::<_, ConversationSummaryRow>(
+            "SELECT conversation_id, summary, messages_summarized, last_message_id, created_at FROM conversation_summaries WHERE conversation_id = ?",
+        )
+        .bind(&conv_str)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Into::into))
+    }
+
+    pub async fn save_conversation_summary(
+        &self,
+        conversation_id: Uuid,
+        summary: &str,
+        messages_summarized: i64,
+        last_message_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let conv_str = conversation_id.to_string();
+        let now_str = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT OR REPLACE INTO conversation_summaries (conversation_id, summary, messages_summarized, last_message_id, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&conv_str)
+        .bind(summary)
+        .bind(messages_summarized)
+        .bind(last_message_id)
+        .bind(&now_str)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     // Out-of-Band Messages
 
     pub async fn queue_oob_message(
@@ -1660,6 +1698,36 @@ struct OutOfBandMessageRow {
     created_at: String,
     sent_at: Option<String>,
     last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConversationSummary {
+    pub conversation_id: String,
+    pub summary: String,
+    pub messages_summarized: i64,
+    pub last_message_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct ConversationSummaryRow {
+    conversation_id: String,
+    summary: String,
+    messages_summarized: i64,
+    last_message_id: Option<String>,
+    created_at: String,
+}
+
+impl From<ConversationSummaryRow> for ConversationSummary {
+    fn from(r: ConversationSummaryRow) -> Self {
+        ConversationSummary {
+            conversation_id: r.conversation_id,
+            summary: r.summary,
+            messages_summarized: r.messages_summarized,
+            last_message_id: r.last_message_id,
+            created_at: r.created_at,
+        }
+    }
 }
 
 impl From<OutOfBandMessageRow> for OutOfBandMessage {

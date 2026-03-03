@@ -11,7 +11,7 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub llm: LlmClient,
     pub kg_llm: LlmClient,
-    pub registry: IntegrationRegistry,
+    pub registry: Arc<IntegrationRegistry>,
     pub auth_token: String,
     pub system_prompt: String,
     pub max_agent_iterations: usize,
@@ -19,5 +19,6 @@ pub struct AppState {
     pub google_config: jossie_core::config::GoogleConfig,
     pub google_integration: Option<Arc<GoogleIntegration>>,
     pub telegram_token: String,
+    pub enable_self_reflection: bool,
     pub active_conversations: Arc<RwLock<HashSet<Uuid>>>,
 }
