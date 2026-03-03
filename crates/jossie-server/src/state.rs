@@ -16,6 +16,7 @@ pub struct AppState {
     pub system_prompt: String,
     pub max_agent_iterations: usize,
     pub max_context_messages: usize,
+    pub event_max_context_messages: usize,
     pub google_config: jossie_core::config::GoogleConfig,
     pub google_integration: Option<Arc<GoogleIntegration>>,
     pub telegram_token: String,

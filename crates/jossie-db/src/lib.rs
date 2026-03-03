@@ -408,9 +408,10 @@ impl Database {
         payload: &serde_json::Value,
     ) -> anyhow::Result<bool> {
         let id = Uuid::new_v4().to_string();
+        let created_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let payload_str = serde_json::to_string(payload)?;
         let res = sqlx::query(
-            "INSERT OR IGNORE INTO integration_events (id, integration, account_id, event_type, dedupe_key, payload) VALUES (?, ?, ?, ?, ?, ?)"
+            "INSERT OR IGNORE INTO integration_events (id, integration, account_id, event_type, dedupe_key, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&id)
         .bind(integration)
@@ -418,6 +419,7 @@ impl Database {
         .bind(event_type)
         .bind(dedupe_key)
         .bind(&payload_str)
+        .bind(&created_at)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() > 0)
@@ -431,7 +433,7 @@ impl Database {
             "SELECT id, integration, account_id, event_type, dedupe_key, payload, status, created_at, processed_at, last_error
              FROM integration_events
              WHERE status = 'new'
-             ORDER BY created_at ASC
+             ORDER BY julianday(created_at) ASC, id ASC
              LIMIT ?"
         )
         .bind(limit as i64)
@@ -458,6 +460,14 @@ impl Database {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn mark_integration_event_new(&self, id: &str) -> anyhow::Result<()> {
+        sqlx::query("UPDATE integration_events SET status = 'new', last_error = NULL WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn mark_integration_event_failed(&self, id: &str, error: &str) -> anyhow::Result<()> {

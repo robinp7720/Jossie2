@@ -46,6 +46,8 @@ pub struct GmailMessageSummary {
     pub subject: String,
     pub date: String,
     pub snippet: String,
+    pub received_at: String,
+    pub internal_ts_ms: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -474,7 +476,8 @@ impl GoogleIntegration {
     ) -> anyhow::Result<GmailHistoryOutcome> {
         let token = self.get_access_token(account_id).await?;
         let mut page_token: Option<String> = None;
-        let mut message_ids: HashSet<String> = HashSet::new();
+        let mut seen_message_ids: HashSet<String> = HashSet::new();
+        let mut message_ids: Vec<String> = Vec::new();
         let mut latest_history_id: Option<String> = None;
 
         loop {
@@ -540,7 +543,9 @@ impl GoogleIntegration {
                 if let Some(added) = item.messages_added {
                     for entry in added {
                         if let Some(message) = entry.message {
-                            message_ids.insert(message.id);
+                            if seen_message_ids.insert(message.id.clone()) {
+                                message_ids.push(message.id);
+                            }
                         }
                     }
                 }
@@ -562,6 +567,11 @@ impl GoogleIntegration {
                 messages.push(summary);
             }
         }
+        messages.sort_by(|a, b| {
+            a.internal_ts_ms
+                .cmp(&b.internal_ts_ms)
+                .then_with(|| a.id.cmp(&b.id))
+        });
 
         Ok(GmailHistoryOutcome::Updated(GmailHistoryPollResult {
             history_id: latest_history_id.unwrap_or_else(|| start_history_id.to_string()),
@@ -600,6 +610,8 @@ impl GoogleIntegration {
             id: String,
             #[serde(rename = "threadId")]
             thread_id: String,
+            #[serde(rename = "internalDate")]
+            internal_date: Option<String>,
             snippet: Option<String>,
             payload: Option<MessagePayload>,
         }
@@ -626,6 +638,15 @@ impl GoogleIntegration {
                 .unwrap_or_default()
         };
 
+        let internal_ts_ms_opt = msg
+            .internal_date
+            .as_deref()
+            .and_then(|v| v.parse::<i64>().ok());
+        let received_at = internal_ts_ms_opt
+            .and_then(chrono::DateTime::<Utc>::from_timestamp_millis)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+
         Ok(GmailMessageSummary {
             id: msg.id,
             thread_id: msg.thread_id,
@@ -633,6 +654,8 @@ impl GoogleIntegration {
             subject: header_value("Subject"),
             date: header_value("Date"),
             snippet: msg.snippet.unwrap_or_default(),
+            received_at,
+            internal_ts_ms: internal_ts_ms_opt.unwrap_or(0),
         })
     }
 
@@ -1216,10 +1239,13 @@ impl GoogleIntegration {
                     tracing::info!("New Gmail message: {}", msg.id);
                     let payload = serde_json::json!({
                         "message_id": msg.id,
+                        "message_unique_id": msg.id,
                         "thread_id": msg.thread_id,
                         "from": msg.from,
                         "subject": msg.subject,
                         "date": msg.date,
+                        "received_at": msg.received_at,
+                        "event_semantics": "new_message_arrival",
                         "snippet": msg.snippet,
                         "account_id": acc.id,
                         "account_email": account_email,

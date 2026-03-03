@@ -41,6 +41,8 @@ pub struct LlmConfig {
     pub max_agent_iterations: usize,
     #[serde(default = "default_max_context_messages")]
     pub max_context_messages: usize,
+    #[serde(default = "default_event_max_context_messages")]
+    pub event_max_context_messages: usize,
     #[serde(default)]
     pub enable_self_reflection: bool,
     #[serde(default)]
@@ -49,6 +51,10 @@ pub struct LlmConfig {
 
 fn default_max_context_messages() -> usize {
     50
+}
+
+fn default_event_max_context_messages() -> usize {
+    12
 }
 
 fn default_system_prompt() -> String {

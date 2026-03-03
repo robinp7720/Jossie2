@@ -155,13 +155,13 @@ async fn process_event_inner(
     {
         Ok(msg) => msg,
         Err(e) if e.to_string().contains("already being processed") => {
-            // Conversation is busy with Telegram chat or another event, skip this event
+            // Conversation is busy with Telegram chat or another event, retry later.
             tracing::debug!(
-                "Skipping event {} - conversation {} is busy",
+                "Deferring event {} - conversation {} is busy",
                 event.id,
                 chat.conversation_id
             );
-            state.db.mark_integration_event_processed(&event.id).await?;
+            state.db.mark_integration_event_new(&event.id).await?;
             return Ok(());
         }
         Err(e) => return Err(e),
@@ -184,7 +184,7 @@ async fn process_event_inner(
         content: message,
         tool_calls: None,
         tool_call_id: None,
-        name: None,
+        name: Some("integration_event_notification".to_string()),
         created_at: Utc::now(),
     };
     state.db.save_message(&assistant_msg).await?;
@@ -294,10 +294,10 @@ async fn process_email_event_batch_inner(
         Ok(msg) => msg,
         Err(e) if e.to_string().contains("already being processed") => {
             tracing::debug!(
-                "Skipping email batch - conversation {} is busy",
+                "Deferring email batch - conversation {} is busy",
                 chat.conversation_id
             );
-            mark_events_processed(state, events).await?;
+            mark_events_new(state, events).await?;
             return Ok(());
         }
         Err(e) => return Err(e),
@@ -320,7 +320,7 @@ async fn process_email_event_batch_inner(
         content: message,
         tool_calls: None,
         tool_call_id: None,
-        name: None,
+        name: Some("integration_event_notification".to_string()),
         created_at: Utc::now(),
     };
     state.db.save_message(&assistant_msg).await?;
@@ -370,10 +370,10 @@ async fn process_calendar_event_batch_inner(
         Ok(msg) => msg,
         Err(e) if e.to_string().contains("already being processed") => {
             tracing::debug!(
-                "Skipping calendar batch - conversation {} is busy",
+                "Deferring calendar batch - conversation {} is busy",
                 chat.conversation_id
             );
-            mark_events_processed(state, events).await?;
+            mark_events_new(state, events).await?;
             return Ok(());
         }
         Err(e) => return Err(e),
@@ -396,7 +396,7 @@ async fn process_calendar_event_batch_inner(
         content: message,
         tool_calls: None,
         tool_call_id: None,
-        name: None,
+        name: Some("integration_event_notification".to_string()),
         created_at: Utc::now(),
     };
     state.db.save_message(&assistant_msg).await?;
@@ -406,25 +406,32 @@ async fn process_calendar_event_batch_inner(
 }
 
 fn build_email_batch_event(events: &[IntegrationEvent]) -> IntegrationEvent {
-    let integration = if events
+    let mut sorted_events: Vec<IntegrationEvent> = events.to_vec();
+    sorted_events.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let integration = if sorted_events
         .iter()
-        .all(|event| event.integration == events[0].integration)
+        .all(|event| event.integration == sorted_events[0].integration)
     {
-        events[0].integration.clone()
+        sorted_events[0].integration.clone()
     } else {
         "mixed".to_string()
     };
 
-    let account_id = if events
+    let account_id = if sorted_events
         .iter()
-        .all(|event| event.account_id == events[0].account_id)
+        .all(|event| event.account_id == sorted_events[0].account_id)
     {
-        events[0].account_id.clone()
+        sorted_events[0].account_id.clone()
     } else {
         "mixed".to_string()
     };
 
-    let email_events: Vec<serde_json::Value> = events
+    let email_events: Vec<serde_json::Value> = sorted_events
         .iter()
         .map(|event| {
             serde_json::json!({
@@ -443,9 +450,9 @@ fn build_email_batch_event(events: &[IntegrationEvent]) -> IntegrationEvent {
         integration,
         account_id,
         event_type: "new_email_batch".to_string(),
-        dedupe_key: format!("batch:{}:{}", events.len(), Uuid::new_v4()),
+        dedupe_key: format!("batch:{}:{}", sorted_events.len(), Uuid::new_v4()),
         payload: serde_json::json!({
-            "count": events.len(),
+            "count": sorted_events.len(),
             "emails": email_events,
         }),
         status: "processing".to_string(),
@@ -620,6 +627,13 @@ async fn mark_events_processed(
 ) -> anyhow::Result<()> {
     for event in events {
         state.db.mark_integration_event_processed(&event.id).await?;
+    }
+    Ok(())
+}
+
+async fn mark_events_new(state: &Arc<AppState>, events: &[IntegrationEvent]) -> anyhow::Result<()> {
+    for event in events {
+        state.db.mark_integration_event_new(&event.id).await?;
     }
     Ok(())
 }

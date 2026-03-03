@@ -2,7 +2,7 @@ use crate::state::AppState;
 use jossie_core::types::{Message, Role};
 use jossie_db::{IntegrationEvent, MemoryKeyInfo};
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -43,14 +43,19 @@ impl GoalTracker {
     }
 
     fn build_tracking_message(&self) -> String {
-        let mut msg = format!("## Goal Tracking\n**Primary Goal:** {}\n", self.primary_goal);
+        let mut msg = format!(
+            "## Goal Tracking\n**Primary Goal:** {}\n",
+            self.primary_goal
+        );
         if !self.completed_steps.is_empty() {
             msg.push_str("**Completed Steps:**\n");
             for (i, step) in self.completed_steps.iter().enumerate() {
                 msg.push_str(&format!("{}. {}\n", i + 1, step));
             }
         }
-        msg.push_str("**Next:** Decide if the goal is fully addressed or if more tool calls are needed.");
+        msg.push_str(
+            "**Next:** Decide if the goal is fully addressed or if more tool calls are needed.",
+        );
         msg
     }
 }
@@ -244,11 +249,9 @@ async fn run_agent_loop_inner(
                     && m.tool_call_id.is_none())
             });
             // Insert goal tracking just after the system prompt
-            let tracking_msg = Message::transient(
-                Role::System,
-                goal_tracker.build_tracking_message(),
-            )
-            .with_name("goal_tracker".to_string());
+            let tracking_msg =
+                Message::transient(Role::System, goal_tracker.build_tracking_message())
+                    .with_name("goal_tracker".to_string());
             messages.insert(1, tracking_msg);
         }
         // --- DEBUG: Log Context Size ---
@@ -286,10 +289,7 @@ async fn run_agent_loop_inner(
                     reflection_retries_remaining -= 1;
                     tracing::info!("Self-reflection retry. Feedback: {feedback}");
                     // Add the assistant's response and feedback, then continue the loop
-                    messages.push(Message::transient(
-                        Role::Assistant,
-                        content.clone(),
-                    ));
+                    messages.push(Message::transient(Role::Assistant, content.clone()));
                     messages.push(Message::transient(
                         Role::System,
                         format!(
@@ -333,8 +333,7 @@ async fn run_agent_loop_inner(
                     || call.name == "send_user_message"
                     || call.name == "list_scheduled_tasks"
                 {
-                    if let Ok(mut args) =
-                        serde_json::from_str::<serde_json::Value>(&call.arguments)
+                    if let Ok(mut args) = serde_json::from_str::<serde_json::Value>(&call.arguments)
                     {
                         if let Some(obj) = args.as_object_mut() {
                             obj.insert(
@@ -425,9 +424,7 @@ pub async fn run_agent_loop_streaming(
     {
         Ok(m) => m,
         Err(e) => {
-            let _ = event_tx
-                .send(AgentStreamEvent::Error(e.to_string()))
-                .await;
+            let _ = event_tx.send(AgentStreamEvent::Error(e.to_string())).await;
             return;
         }
     };
@@ -612,11 +609,7 @@ Output only PASS or RETRY: <feedback>, nothing else."#
 const CONTEXT_CHAR_THRESHOLD: usize = 300_000;
 const KEEP_RECENT_MESSAGES: usize = 10;
 
-async fn maybe_summarize_context(
-    state: &AppState,
-    conv_id: Uuid,
-    messages: &mut Vec<Message>,
-) {
+async fn maybe_summarize_context(state: &AppState, conv_id: Uuid, messages: &mut Vec<Message>) {
     let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
     if total_chars < CONTEXT_CHAR_THRESHOLD || messages.len() <= KEEP_RECENT_MESSAGES {
         return;
@@ -680,15 +673,12 @@ Conversation:
     match state.kg_llm.complete(&[sys, user], &[]).await {
         Ok((summary, _)) => {
             let messages_count = keep_from as i64;
-            let last_id = messages.get(keep_from.saturating_sub(1)).map(|m| m.id.to_string());
+            let last_id = messages
+                .get(keep_from.saturating_sub(1))
+                .map(|m| m.id.to_string());
             let _ = state
                 .db
-                .save_conversation_summary(
-                    conv_id,
-                    &summary,
-                    messages_count,
-                    last_id.as_deref(),
-                )
+                .save_conversation_summary(conv_id, &summary, messages_count, last_id.as_deref())
                 .await;
 
             let recent = messages.split_off(keep_from);
@@ -798,16 +788,60 @@ pub async fn generate_event_message(
     conversation_id: Uuid,
     event: &IntegrationEvent,
 ) -> anyhow::Result<Option<String>> {
+    {
+        let mut active = state.active_conversations.write().await;
+        if !active.insert(conversation_id) {
+            anyhow::bail!(
+                "Conversation {} is already being processed",
+                conversation_id
+            );
+        }
+    }
+
+    let result = generate_event_message_inner(state, conversation_id, event).await;
+
+    {
+        let mut active = state.active_conversations.write().await;
+        active.remove(&conversation_id);
+    }
+
+    result
+}
+
+#[derive(Debug, Deserialize)]
+struct EventModeResponse {
+    action: String,
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EventNotificationState {
+    fingerprint: String,
+    sent_at: String,
+}
+
+const EVENT_NOTIFICATION_MARKER: &str = "integration_event_notification";
+const EVENT_MODE_SETTINGS_NAMESPACE: &str = "event_mode";
+const EVENT_NOTIFY_COOLDOWN_SECONDS: i64 = 120;
+
+async fn generate_event_message_inner(
+    state: &AppState,
+    conversation_id: Uuid,
+    event: &IntegrationEvent,
+) -> anyhow::Result<Option<String>> {
     let mut messages = state
         .db
-        .get_messages(conversation_id, Some(state.max_context_messages))
+        .get_messages(conversation_id, Some(state.event_max_context_messages))
         .await?;
+    messages.retain(|m| !is_event_notification_message(m));
 
     sanitize_context_window(&mut messages);
 
-    let mut prompt = build_system_prompt(state, None).await;
+    let event_context = build_event_context_hint(event);
+    let mut prompt = build_system_prompt(state, Some(&event_context)).await;
     prompt.push_str(
-        "\n\n## Event Mode\nYou are receiving integration events.\nDecide whether to proactively message the user.\nIf yes, respond with a short, friendly message as the assistant.\nIf not, respond exactly: NO_ACTION"
+        "\n\n## Event Mode\nYou are receiving a new integration event.\nInterpret this event independently as a fresh arrival.\nDo NOT imply that you made a prior mistake, correction, or retraction unless the event payload explicitly says so.\nFor `gmail_new_message` and `new_email_batch`, frame updates as newly arrived emails, even when similar to prior ones.\nRespond with strict JSON only:\n{\"action\":\"notify\",\"message\":\"<short user-facing message>\"}\nor\n{\"action\":\"skip\",\"message\":\"\"}"
     );
 
     messages.insert(0, Message::transient(Role::System, prompt));
@@ -819,14 +853,51 @@ pub async fn generate_event_message(
         "created_at": event.created_at,
     });
 
-    messages.push(
-        Message::transient(Role::System, serde_json::to_string_pretty(&event_payload)?)
-            .with_name("integration_event".to_string()),
-    );
+    messages.push(Message::transient(
+        Role::User,
+        format!(
+            "New integration event to evaluate:\n{}",
+            serde_json::to_string_pretty(&event_payload)?
+        ),
+    ));
 
     let (content, tool_calls) = state.llm.complete(&messages, &[]).await?;
     if !tool_calls.is_empty() {
         tracing::warn!("Event loop returned tool calls; ignoring for now");
+    }
+
+    let fingerprint = event_notification_fingerprint(event);
+
+    let mut normalized_content = content.trim().to_string();
+    if normalized_content.starts_with("```") {
+        normalized_content = normalized_content
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim()
+            .to_string();
+    }
+
+    if let Ok(decision) = serde_json::from_str::<EventModeResponse>(&normalized_content) {
+        let action = decision.action.trim().to_ascii_lowercase();
+        if action == "skip" {
+            return Ok(None);
+        }
+        if action == "notify" {
+            let message = decision.message.trim();
+            if message.is_empty() {
+                return Ok(None);
+            }
+            if should_suppress_event_notification(state, conversation_id, &fingerprint).await? {
+                tracing::debug!(
+                    "Suppressing duplicate event notification for conversation {}",
+                    conversation_id
+                );
+                return Ok(None);
+            }
+            record_event_notification(state, conversation_id, &fingerprint).await?;
+            return Ok(Some(message.to_string()));
+        }
     }
 
     let trimmed = content.trim();
@@ -834,8 +905,165 @@ pub async fn generate_event_message(
     if normalized.eq_ignore_ascii_case("no_action") || normalized.is_empty() {
         return Ok(None);
     }
+    if should_suppress_event_notification(state, conversation_id, &fingerprint).await? {
+        tracing::debug!(
+            "Suppressing duplicate event notification for conversation {}",
+            conversation_id
+        );
+        return Ok(None);
+    }
+    record_event_notification(state, conversation_id, &fingerprint).await?;
 
     Ok(Some(trimmed.to_string()))
+}
+
+fn is_event_notification_message(message: &Message) -> bool {
+    message.role == Role::Assistant && message.name.as_deref() == Some(EVENT_NOTIFICATION_MARKER)
+}
+
+fn build_event_context_hint(event: &IntegrationEvent) -> String {
+    let mut lines = vec![
+        format!("Event type: {}", event.event_type),
+        format!("Integration: {}", event.integration),
+    ];
+
+    match event.event_type.as_str() {
+        "gmail_new_message" | "new_email" => {
+            if let Some(from) = event.payload.get("from").and_then(|v| v.as_str()) {
+                lines.push(format!("Sender: {}", from));
+            }
+            if let Some(subject) = event.payload.get("subject").and_then(|v| v.as_str()) {
+                lines.push(format!("Subject: {}", subject));
+            }
+        }
+        "new_email_batch" => {
+            if let Some(emails) = event.payload.get("emails").and_then(|v| v.as_array()) {
+                lines.push(format!("Email count: {}", emails.len()));
+                let mut subjects = Vec::new();
+                for email in emails.iter().take(5) {
+                    if let Some(subject) = email
+                        .get("payload")
+                        .and_then(|p| p.get("subject"))
+                        .and_then(|v| v.as_str())
+                    {
+                        if !subject.trim().is_empty() {
+                            subjects.push(subject.trim().to_string());
+                        }
+                    }
+                }
+                if !subjects.is_empty() {
+                    lines.push(format!("Subjects: {}", subjects.join(" | ")));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    lines.join("\n")
+}
+
+fn event_notification_fingerprint(event: &IntegrationEvent) -> String {
+    match event.event_type.as_str() {
+        "gmail_new_message" | "new_email" => {
+            let message_id = event
+                .payload
+                .get("message_unique_id")
+                .or_else(|| event.payload.get("message_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(event.dedupe_key.as_str());
+            format!(
+                "{}|{}|{}|{}",
+                event.integration, event.account_id, event.event_type, message_id
+            )
+        }
+        "new_email_batch" => {
+            let mut ids: Vec<String> = event
+                .payload
+                .get("emails")
+                .and_then(|v| v.as_array())
+                .map(|emails| {
+                    emails
+                        .iter()
+                        .filter_map(|email_event| {
+                            let payload = email_event.get("payload")?;
+                            payload
+                                .get("message_unique_id")
+                                .or_else(|| payload.get("message_id"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .or_else(|| {
+                                    email_event
+                                        .get("id")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string())
+                                })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            ids.sort();
+            ids.dedup();
+            format!(
+                "{}|{}|{}|{}",
+                event.integration,
+                event.account_id,
+                event.event_type,
+                ids.join(",")
+            )
+        }
+        _ => format!(
+            "{}|{}|{}|{}",
+            event.integration, event.account_id, event.event_type, event.dedupe_key
+        ),
+    }
+}
+
+async fn should_suppress_event_notification(
+    state: &AppState,
+    conversation_id: Uuid,
+    fingerprint: &str,
+) -> anyhow::Result<bool> {
+    let key = format!("last_notification:{}", conversation_id);
+    let Some(raw) = state
+        .db
+        .get_integration_setting(EVENT_MODE_SETTINGS_NAMESPACE, &key)
+        .await?
+    else {
+        return Ok(false);
+    };
+
+    let Ok(last_state) = serde_json::from_str::<EventNotificationState>(&raw) else {
+        return Ok(false);
+    };
+    if last_state.fingerprint != fingerprint {
+        return Ok(false);
+    }
+
+    let Ok(last_sent) = chrono::DateTime::parse_from_rfc3339(&last_state.sent_at) else {
+        return Ok(false);
+    };
+    let elapsed = chrono::Utc::now() - last_sent.with_timezone(&chrono::Utc);
+    Ok(elapsed < chrono::Duration::seconds(EVENT_NOTIFY_COOLDOWN_SECONDS))
+}
+
+async fn record_event_notification(
+    state: &AppState,
+    conversation_id: Uuid,
+    fingerprint: &str,
+) -> anyhow::Result<()> {
+    let key = format!("last_notification:{}", conversation_id);
+    let state_value = EventNotificationState {
+        fingerprint: fingerprint.to_string(),
+        sent_at: chrono::Utc::now().to_rfc3339(),
+    };
+    state
+        .db
+        .set_integration_setting(
+            EVENT_MODE_SETTINGS_NAMESPACE,
+            &key,
+            &serde_json::to_string(&state_value)?,
+        )
+        .await
 }
 
 async fn build_graph_context(state: &AppState, user_message: &str) -> String {

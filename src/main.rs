@@ -27,6 +27,7 @@ async fn main() -> Result<()> {
 
     // Override secrets from environment variables
     override_config_from_env(&mut config);
+    validate_llm_config(&mut config);
 
     tracing::info!("Connecting to database...");
     let db = Database::new(&config.database.url).await?;
@@ -103,7 +104,8 @@ async fn main() -> Result<()> {
         system_prompt: config.llm.system_prompt.clone(), // Changed from cfg.system_prompt
         max_agent_iterations: config.llm.max_agent_iterations, // Changed from cfg.max_agent_iterations
         max_context_messages: config.llm.max_context_messages, // Changed from cfg.max_context_messages
-        google_config: config.google.clone(),                  // Changed from cfg.google
+        event_max_context_messages: config.llm.event_max_context_messages,
+        google_config: config.google.clone(), // Changed from cfg.google
         google_integration,
         telegram_token: config.telegram.bot_token.clone(), // Changed from cfg.telegram_token
         enable_self_reflection: config.llm.enable_self_reflection,
@@ -144,6 +146,29 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn validate_llm_config(config: &mut AppConfig) {
+    const MIN_CHAT_CONTEXT_MESSAGES: usize = 20;
+    const MIN_EVENT_CONTEXT_MESSAGES: usize = 8;
+
+    if config.llm.max_context_messages < MIN_CHAT_CONTEXT_MESSAGES {
+        tracing::warn!(
+            "llm.max_context_messages={} is too low; clamping to {}",
+            config.llm.max_context_messages,
+            MIN_CHAT_CONTEXT_MESSAGES
+        );
+        config.llm.max_context_messages = MIN_CHAT_CONTEXT_MESSAGES;
+    }
+
+    if config.llm.event_max_context_messages < MIN_EVENT_CONTEXT_MESSAGES {
+        tracing::warn!(
+            "llm.event_max_context_messages={} is too low; clamping to {}",
+            config.llm.event_max_context_messages,
+            MIN_EVENT_CONTEXT_MESSAGES
+        );
+        config.llm.event_max_context_messages = MIN_EVENT_CONTEXT_MESSAGES;
+    }
+}
+
 fn override_config_from_env(config: &mut AppConfig) {
     use std::env;
 
@@ -155,6 +180,16 @@ fn override_config_from_env(config: &mut AppConfig) {
     }
     if let Ok(val) = env::var("JOSSIE_LLM_SYSTEM_PROMPT") {
         config.llm.system_prompt = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_LLM_MAX_CONTEXT_MESSAGES") {
+        if let Ok(parsed) = val.parse::<usize>() {
+            config.llm.max_context_messages = parsed;
+        }
+    }
+    if let Ok(val) = env::var("JOSSIE_LLM_EVENT_MAX_CONTEXT_MESSAGES") {
+        if let Ok(parsed) = val.parse::<usize>() {
+            config.llm.event_max_context_messages = parsed;
+        }
     }
     if let Ok(val) = env::var("JOSSIE_TELEGRAM_BOT_TOKEN") {
         config.telegram.bot_token = val.trim().to_string();

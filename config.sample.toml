@@ -165,6 +165,11 @@ max_agent_iterations = 20
 # Default: 50
 max_context_messages = 50
 
+# Maximum number of recent chat messages to include when generating
+# proactive integration-event notifications.
+# Default: 12
+event_max_context_messages = 12
+
 # ----------------------------------------------------------------------------
 # DATABASE CONFIGURATION
 # ----------------------------------------------------------------------------
