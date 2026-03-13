@@ -80,11 +80,11 @@ All IDs are UUID v4 stored as TEXT. All timestamps are RFC3339 TEXT.
 
 ### LLM Client (`jossie-llm`)
 
-OpenAI-compatible. Two modes:
+Uses OpenAI's Responses API. Two modes:
 - `complete()` — non-streaming, returns `(String, Vec<ToolCall>)`
-- `complete_stream()` — SSE streaming via `mpsc::Sender<StreamEvent>`, accumulates tool call deltas
+- `complete_stream()` — SSE streaming via `mpsc::Sender<StreamEvent>`, accumulates `response.function_call_arguments.*` events
 
-The streaming parser handles SSE `data:` lines and `[DONE]` sentinel.
+History is serialized as Responses API input items (`message`, `function_call`, `function_call_output`).
 
 ### HTTP API (`jossie-server`)
 

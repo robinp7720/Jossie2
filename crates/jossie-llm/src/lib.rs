@@ -2,6 +2,7 @@ use futures::StreamExt;
 use jossie_core::integration::{ToolCall, ToolDefinition};
 use jossie_core::types::{Message, Role};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
@@ -15,104 +16,137 @@ pub struct LlmClient {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ChatCompletionRequest {
+struct ResponsesRequest {
     model: String,
-    messages: Vec<OpenAIMessage>,
+    input: Vec<ResponseInputItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<OpenAITool>>,
+    tools: Option<Vec<ResponseTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_effort: Option<String>,
+    reasoning: Option<ResponseReasoningConfig>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct OpenAIMessage {
+#[serde(untagged)]
+enum ResponseInputItem {
+    InputMessage(ResponseInputMessage),
+    AssistantMessage(ResponseAssistantMessage),
+    FunctionCall(ResponseFunctionCallInput),
+    FunctionCallOutput(ResponseFunctionCallOutputInput),
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResponseInputMessage {
+    #[serde(rename = "type")]
+    item_type: &'static str,
     role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<OpenAIToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
+    content: Vec<ResponseInputText>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResponseAssistantMessage {
+    #[serde(rename = "type")]
+    item_type: &'static str,
+    role: &'static str,
+    content: Vec<ResponseOutputText>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResponseInputText {
+    #[serde(rename = "type")]
+    item_type: &'static str,
+    text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResponseOutputText {
+    #[serde(rename = "type")]
+    item_type: &'static str,
+    text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAITool {
-    r#type: String,
-    function: OpenAIFunction,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAIFunction {
+struct ResponseTool {
+    #[serde(rename = "type")]
+    item_type: String,
     name: String,
     description: String,
     parameters: serde_json::Value,
+    strict: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAIToolCall {
-    id: String,
-    r#type: String,
-    function: OpenAIFunctionCall,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OpenAIFunctionCall {
+#[derive(Debug, Clone, Serialize)]
+struct ResponseFunctionCallInput {
+    #[serde(rename = "type")]
+    item_type: &'static str,
+    call_id: String,
     name: String,
     arguments: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct ChatCompletionResponse {
-    choices: Vec<ChatCompletionChoice>,
+#[derive(Debug, Clone, Serialize)]
+struct ResponseFunctionCallOutputInput {
+    #[serde(rename = "type")]
+    item_type: &'static str,
+    call_id: String,
+    output: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResponseReasoningConfig {
+    effort: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ChatCompletionChoice {
-    message: ChatCompletionMessage,
+struct ResponsesResponse {
+    #[serde(default)]
+    output: Vec<ResponseOutputItem>,
     #[allow(dead_code)]
-    finish_reason: Option<String>,
+    status: Option<String>,
+    #[serde(default)]
+    error: Option<ResponseError>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ChatCompletionMessage {
-    content: Option<String>,
-    tool_calls: Option<Vec<OpenAIToolCall>>,
+struct ResponseError {
+    message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ChatCompletionChunk {
-    choices: Vec<ChatCompletionChunkChoice>,
+#[serde(tag = "type")]
+enum ResponseOutputItem {
+    #[serde(rename = "message")]
+    Message(ResponseOutputMessage),
+    #[serde(rename = "function_call")]
+    FunctionCall(ResponseFunctionCall),
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ChatCompletionChunkChoice {
-    delta: ChatCompletionChunkDelta,
-    #[allow(dead_code)]
-    finish_reason: Option<String>,
+struct ResponseOutputMessage {
+    #[serde(default)]
+    content: Vec<ResponseOutputContent>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ChatCompletionChunkDelta {
-    content: Option<String>,
-    tool_calls: Option<Vec<ChatCompletionChunkToolCall>>,
+#[serde(tag = "type")]
+enum ResponseOutputContent {
+    #[serde(rename = "output_text")]
+    OutputText { text: String },
+    #[serde(rename = "refusal")]
+    Refusal { refusal: String },
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ChatCompletionChunkToolCall {
-    index: i32,
-    id: Option<String>,
-    function: Option<ChatCompletionChunkFunction>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ChatCompletionChunkFunction {
-    name: Option<String>,
-    arguments: Option<String>,
+struct ResponseFunctionCall {
+    call_id: String,
+    name: String,
+    arguments: String,
 }
 
 #[derive(Debug, Clone)]
@@ -138,91 +172,104 @@ impl LlmClient {
         self.reasoning_effort = effort;
     }
 
-    fn build_messages(messages: &[Message]) -> Vec<OpenAIMessage> {
+    fn build_input(messages: &[Message]) -> Vec<ResponseInputItem> {
         let mut items = Vec::new();
 
-        for m in messages {
-            match m.role {
-                Role::Tool => {
-                    items.push(OpenAIMessage {
-                        role: "tool".to_string(),
-                        name: None,
-                        content: Some(m.content.clone()),
-                        tool_calls: None,
-                        tool_call_id: m.tool_call_id.clone(),
-                    });
+        for message in messages {
+            match message.role {
+                Role::System | Role::User => {
+                    items.push(ResponseInputItem::InputMessage(ResponseInputMessage {
+                        item_type: "message",
+                        role: message.role.to_string(),
+                        content: vec![ResponseInputText {
+                            item_type: "input_text",
+                            text: message.content.clone(),
+                        }],
+                    }));
                 }
                 Role::Assistant => {
-                    let tool_calls = if let Some(tc_val) = &m.tool_calls {
-                        if let Ok(flat_calls) =
-                            serde_json::from_value::<Vec<ToolCall>>(tc_val.clone())
-                        {
-                            if flat_calls.is_empty() {
-                                None
-                            } else {
-                                Some(
-                                    flat_calls
-                                        .into_iter()
-                                        .map(|c| OpenAIToolCall {
-                                            id: c.id,
-                                            r#type: "function".to_string(),
-                                            function: OpenAIFunctionCall {
-                                                name: c.name,
-                                                arguments: c.arguments,
-                                            },
-                                        })
-                                        .collect(),
-                                )
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
+                    if !message.content.is_empty() {
+                        items.push(ResponseInputItem::AssistantMessage(
+                            ResponseAssistantMessage {
+                                item_type: "message",
+                                role: "assistant",
+                                content: vec![ResponseOutputText {
+                                    item_type: "output_text",
+                                    text: message.content.clone(),
+                                }],
+                            },
+                        ));
+                    }
 
-                    items.push(OpenAIMessage {
-                        role: "assistant".to_string(),
-                        name: m.name.clone(),
-                        content: if m.content.is_empty() && tool_calls.is_some() {
-                            None
-                        } else {
-                            Some(m.content.clone())
-                        },
-                        tool_calls,
-                        tool_call_id: None,
-                    });
+                    if let Some(tool_calls) = tool_calls_from_message(message) {
+                        for call in tool_calls {
+                            items.push(ResponseInputItem::FunctionCall(
+                                ResponseFunctionCallInput {
+                                    item_type: "function_call",
+                                    call_id: call.id,
+                                    name: call.name,
+                                    arguments: call.arguments,
+                                },
+                            ));
+                        }
+                    }
                 }
-                _ => {
-                    items.push(OpenAIMessage {
-                        role: m.role.to_string().to_lowercase(),
-                        name: m.name.clone(),
-                        content: Some(m.content.clone()),
-                        tool_calls: None,
-                        tool_call_id: None,
-                    });
+                Role::Tool => {
+                    if let Some(call_id) = &message.tool_call_id {
+                        items.push(ResponseInputItem::FunctionCallOutput(
+                            ResponseFunctionCallOutputInput {
+                                item_type: "function_call_output",
+                                call_id: call_id.clone(),
+                                output: message.content.clone(),
+                            },
+                        ));
+                    }
                 }
             }
         }
+
         items
     }
 
-    fn build_tools(tools: &[ToolDefinition]) -> Option<Vec<OpenAITool>> {
+    fn build_tools(tools: &[ToolDefinition]) -> Option<Vec<ResponseTool>> {
         if tools.is_empty() {
             return None;
         }
+
         let built = tools
             .iter()
-            .map(|t| OpenAITool {
-                r#type: "function".to_string(),
-                function: OpenAIFunction {
-                    name: t.name.clone(),
-                    description: t.description.clone(),
-                    parameters: t.parameters.clone(),
-                },
+            .map(|tool| ResponseTool {
+                item_type: "function".to_string(),
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                parameters: tool.parameters.clone(),
+                strict: true,
             })
             .collect();
         Some(built)
+    }
+
+    fn build_request(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        stream: bool,
+    ) -> ResponsesRequest {
+        ResponsesRequest {
+            model: self.model.clone(),
+            input: Self::build_input(messages),
+            tools: Self::build_tools(tools),
+            tool_choice: if tools.is_empty() {
+                None
+            } else {
+                Some(Value::String("auto".to_string()))
+            },
+            stream,
+            reasoning: self
+                .reasoning_effort
+                .clone()
+                .map(|effort| ResponseReasoningConfig { effort }),
+        }
     }
 
     /// Non-streaming completion. Returns content and optional tool calls.
@@ -231,22 +278,11 @@ impl LlmClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> anyhow::Result<(String, Vec<ToolCall>)> {
-        let req = ChatCompletionRequest {
-            model: self.model.clone(),
-            messages: Self::build_messages(messages),
-            tools: Self::build_tools(tools),
-            tool_choice: if tools.is_empty() {
-                None
-            } else {
-                Some(serde_json::Value::String("auto".to_string()))
-            },
-            stream: false,
-            reasoning_effort: self.reasoning_effort.clone(),
-        };
+        let req = self.build_request(messages, tools, false);
 
         let resp = self
             .client
-            .post(format!("{}/chat/completions", self.api_url))
+            .post(format!("{}/responses", self.api_url))
             .bearer_auth(&self.api_key)
             .json(&req)
             .send()
@@ -258,23 +294,8 @@ impl LlmClient {
             anyhow::bail!("LLM API error {status}: {body}");
         }
 
-        let response: ChatCompletionResponse = resp.json().await?;
-        if let Some(choice) = response.choices.first() {
-            let content = choice.message.content.clone().unwrap_or_default();
-            let mut tool_calls = Vec::new();
-            if let Some(calls) = &choice.message.tool_calls {
-                for c in calls {
-                    tool_calls.push(ToolCall {
-                        id: c.id.clone(),
-                        name: c.function.name.clone(),
-                        arguments: c.function.arguments.clone(),
-                    });
-                }
-            }
-            Ok((content, tool_calls))
-        } else {
-            Ok((String::new(), Vec::new()))
-        }
+        let response: ResponsesResponse = resp.json().await?;
+        collect_response_output(response)
     }
 
     /// Streaming completion. Sends events to the channel.
@@ -284,22 +305,11 @@ impl LlmClient {
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamEvent>,
     ) -> anyhow::Result<()> {
-        let req = ChatCompletionRequest {
-            model: self.model.clone(),
-            messages: Self::build_messages(messages),
-            tools: Self::build_tools(tools),
-            tool_choice: if tools.is_empty() {
-                None
-            } else {
-                Some(serde_json::Value::String("auto".to_string()))
-            },
-            stream: true,
-            reasoning_effort: self.reasoning_effort.clone(),
-        };
+        let req = self.build_request(messages, tools, true);
 
         let resp = self
             .client
-            .post(format!("{}/chat/completions", self.api_url))
+            .post(format!("{}/responses", self.api_url))
             .bearer_auth(&self.api_key)
             .json(&req)
             .send()
@@ -331,44 +341,13 @@ impl LlmClient {
                 if line.is_empty() || !line.starts_with("data: ") {
                     continue;
                 }
+
                 let data = &line[6..];
                 if data == "[DONE]" {
-                    let calls = collect_tool_calls(pending_calls);
-                    if !calls.is_empty() {
-                        let _ = tx.send(StreamEvent::ToolCalls(calls)).await;
-                    }
-                    let _ = tx.send(StreamEvent::Done).await;
-                    return Ok(());
+                    break;
                 }
 
-                let Ok(chunk_data) = serde_json::from_str::<ChatCompletionChunk>(data) else {
-                    continue;
-                };
-
-                for choice in chunk_data.choices {
-                    if let Some(content) = choice.delta.content {
-                        if !content.is_empty() {
-                            let _ = tx.send(StreamEvent::Delta(content)).await;
-                        }
-                    }
-
-                    if let Some(tool_calls) = choice.delta.tool_calls {
-                        for tc in tool_calls {
-                            let entry = pending_calls.entry(tc.index).or_default();
-                            if let Some(id) = tc.id {
-                                entry.id = Some(id);
-                            }
-                            if let Some(func) = tc.function {
-                                if let Some(name) = func.name {
-                                    entry.name = Some(name);
-                                }
-                                if let Some(args) = func.arguments {
-                                    entry.arguments.push_str(&args);
-                                }
-                            }
-                        }
-                    }
-                }
+                handle_stream_event(data, &mut pending_calls, &tx).await;
             }
         }
 
@@ -378,6 +357,134 @@ impl LlmClient {
         }
         let _ = tx.send(StreamEvent::Done).await;
         Ok(())
+    }
+}
+
+fn tool_calls_from_message(message: &Message) -> Option<Vec<ToolCall>> {
+    let tool_calls = message.tool_calls.as_ref()?;
+    let parsed = serde_json::from_value::<Vec<ToolCall>>(tool_calls.clone()).ok()?;
+    if parsed.is_empty() {
+        None
+    } else {
+        Some(parsed)
+    }
+}
+
+fn collect_response_output(response: ResponsesResponse) -> anyhow::Result<(String, Vec<ToolCall>)> {
+    if let Some(error) = response.error {
+        anyhow::bail!("LLM API error: {}", error.message);
+    }
+
+    let mut content = String::new();
+    let mut tool_calls = Vec::new();
+
+    for item in response.output {
+        match item {
+            ResponseOutputItem::Message(message) => {
+                for part in message.content {
+                    match part {
+                        ResponseOutputContent::OutputText { text } => content.push_str(&text),
+                        ResponseOutputContent::Refusal { refusal } => content.push_str(&refusal),
+                        ResponseOutputContent::Other => {}
+                    }
+                }
+            }
+            ResponseOutputItem::FunctionCall(call) => {
+                tool_calls.push(ToolCall {
+                    id: call.call_id,
+                    name: call.name,
+                    arguments: call.arguments,
+                });
+            }
+            ResponseOutputItem::Other => {}
+        }
+    }
+
+    Ok((content, tool_calls))
+}
+
+async fn handle_stream_event(
+    data: &str,
+    pending_calls: &mut HashMap<i32, PendingToolCall>,
+    tx: &mpsc::Sender<StreamEvent>,
+) {
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return;
+    };
+
+    let Some(event_type) = value.get("type").and_then(Value::as_str) else {
+        return;
+    };
+
+    match event_type {
+        "response.output_text.delta" => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                if !delta.is_empty() {
+                    let _ = tx.send(StreamEvent::Delta(delta.to_string())).await;
+                }
+            }
+        }
+        "response.output_item.added" => {
+            let Some(index) = value.get("output_index").and_then(Value::as_i64) else {
+                return;
+            };
+            let Some(item) = value.get("item") else {
+                return;
+            };
+            if item.get("type").and_then(Value::as_str) != Some("function_call") {
+                return;
+            }
+
+            let entry = pending_calls.entry(index as i32).or_default();
+            entry.id = item
+                .get("call_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            entry.name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
+                entry.arguments = arguments.to_string();
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            let Some(index) = value.get("output_index").and_then(Value::as_i64) else {
+                return;
+            };
+            let entry = pending_calls.entry(index as i32).or_default();
+            if let Some(call_id) = value.get("call_id").and_then(Value::as_str) {
+                entry.id = Some(call_id.to_string());
+            }
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                entry.arguments.push_str(delta);
+            }
+        }
+        "response.function_call_arguments.done" => {
+            let Some(index) = value.get("output_index").and_then(Value::as_i64) else {
+                return;
+            };
+            let entry = pending_calls.entry(index as i32).or_default();
+            if let Some(call_id) = value.get("call_id").and_then(Value::as_str) {
+                entry.id = Some(call_id.to_string());
+            }
+            if let Some(name) = value.get("name").and_then(Value::as_str) {
+                entry.name = Some(name.to_string());
+            }
+            if let Some(arguments) = value.get("arguments").and_then(Value::as_str) {
+                entry.arguments = arguments.to_string();
+            }
+        }
+        "error" => {
+            let message = value
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .or_else(|| value.get("message").and_then(Value::as_str))
+                .unwrap_or("unknown streaming error");
+            let _ = tx.send(StreamEvent::Error(message.to_string())).await;
+        }
+        _ => {}
     }
 }
 
@@ -405,4 +512,89 @@ fn collect_tool_calls(mut pending: HashMap<i32, PendingToolCall>) -> Vec<ToolCal
         }
     }
     calls
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn make_message(role: Role, content: &str) -> Message {
+        Message {
+            id: Uuid::new_v4(),
+            conversation_id: Uuid::new_v4(),
+            role,
+            content: content.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn build_input_preserves_assistant_tool_calls_and_outputs() {
+        let mut assistant = make_message(Role::Assistant, "Checking...");
+        assistant.tool_calls = Some(json!([
+            {
+                "id": "call_123",
+                "name": "weather_lookup",
+                "arguments": "{\"city\":\"Berlin\"}"
+            }
+        ]));
+
+        let mut tool = make_message(Role::Tool, "{\"temp\":12}");
+        tool.tool_call_id = Some("call_123".to_string());
+
+        let items = LlmClient::build_input(&[
+            make_message(Role::System, "You are helpful."),
+            make_message(Role::User, "What's the weather?"),
+            assistant,
+            tool,
+        ]);
+
+        let json = serde_json::to_value(items).unwrap();
+        assert_eq!(json[0]["role"], "system");
+        assert_eq!(json[0]["content"][0]["type"], "input_text");
+        assert_eq!(json[1]["role"], "user");
+        assert_eq!(json[2]["role"], "assistant");
+        assert_eq!(json[2]["content"][0]["type"], "output_text");
+        assert_eq!(json[3]["type"], "function_call");
+        assert_eq!(json[3]["call_id"], "call_123");
+        assert_eq!(json[4]["type"], "function_call_output");
+        assert_eq!(json[4]["call_id"], "call_123");
+    }
+
+    #[test]
+    fn collect_response_output_extracts_text_and_function_calls() {
+        let response = ResponsesResponse {
+            output: vec![
+                ResponseOutputItem::Message(ResponseOutputMessage {
+                    content: vec![
+                        ResponseOutputContent::OutputText {
+                            text: "Hello ".to_string(),
+                        },
+                        ResponseOutputContent::Refusal {
+                            refusal: "world".to_string(),
+                        },
+                    ],
+                }),
+                ResponseOutputItem::FunctionCall(ResponseFunctionCall {
+                    call_id: "call_456".to_string(),
+                    name: "lookup".to_string(),
+                    arguments: "{\"q\":\"test\"}".to_string(),
+                }),
+            ],
+            status: Some("completed".to_string()),
+            error: None,
+        };
+
+        let (content, tool_calls) = collect_response_output(response).unwrap();
+        assert_eq!(content, "Hello world");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call_456");
+        assert_eq!(tool_calls[0].name, "lookup");
+    }
 }

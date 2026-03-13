@@ -100,7 +100,7 @@ The `IntegrationRegistry` collects all integrations and dispatches tool calls fr
 
 1. User sends message → saved to database
 2. Load conversation history + all tool definitions
-3. Call LLM with streaming or non-streaming
+3. Call the LLM through OpenAI's Responses API with streaming or non-streaming
 4. If LLM returns `tool_calls` → execute via registry → append results → loop back
 5. If LLM returns plain text → save as assistant message, return to user
 
