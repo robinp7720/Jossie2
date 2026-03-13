@@ -40,7 +40,11 @@ impl BrowserIntegration {
     }
 
     /// Launch or reuse the shared browser, then open a new tab.
-    async fn browser_render(&self, url_str: &str, selector: Option<&str>) -> anyhow::Result<String> {
+    async fn browser_render(
+        &self,
+        url_str: &str,
+        selector: Option<&str>,
+    ) -> anyhow::Result<String> {
         let browser = self
             .browser
             .get_or_try_init(|| async {
@@ -171,8 +175,8 @@ impl BrowserIntegration {
 
                 // It's HTML — check if it looks like it needs JS rendering.
                 // Heuristics: very short body, or contains noscript warnings.
-                let needs_js = body.len() < 1024
-                    || (body.contains("<noscript>") && body.len() < 4096);
+                let needs_js =
+                    body.len() < 1024 || (body.contains("<noscript>") && body.len() < 4096);
 
                 if needs_js {
                     tracing::info!(

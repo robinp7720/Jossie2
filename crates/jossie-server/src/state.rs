@@ -22,4 +22,6 @@ pub struct AppState {
     pub telegram_token: String,
     pub enable_self_reflection: bool,
     pub active_conversations: Arc<RwLock<HashSet<Uuid>>>,
+    pub cors_origins: Vec<String>,
+    pub max_request_body_bytes: usize,
 }

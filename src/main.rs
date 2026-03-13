@@ -16,11 +16,17 @@ async fn main() -> Result<()> {
     // Load .env file if it exists
     dotenvy::dotenv().ok();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    let env_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+
+    if std::env::var("JOSSIE_LOG_JSON").is_ok() {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(env_filter)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    }
 
     let config_str = std::fs::read_to_string("config.toml").expect("Failed to read config.toml");
     let mut config: AppConfig = toml::from_str(&config_str).expect("Failed to parse config.toml");
@@ -110,6 +116,8 @@ async fn main() -> Result<()> {
         telegram_token: config.telegram.bot_token.clone(), // Changed from cfg.telegram_token
         enable_self_reflection: config.llm.enable_self_reflection,
         active_conversations: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        cors_origins: config.server.cors_origins.clone(),
+        max_request_body_bytes: config.server.max_request_body_bytes,
     });
 
     // Start Telegram bot if configured

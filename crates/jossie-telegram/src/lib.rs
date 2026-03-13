@@ -41,7 +41,7 @@ impl TelegramBot {
                     };
 
                     let chat_id = msg.chat.id.0;
-                    
+
                     // Check if user is authorized
                     if let Some(allowed_id) = allowed_user_id {
                         if let Some(user) = &msg.from {
@@ -58,7 +58,7 @@ impl TelegramBot {
                             return respond_ok();
                         }
                     }
-                    
+
                     tracing::info!("Received Telegram message from {chat_id}: {:.20}...", text);
 
                 let conv_id = match state.db.get_telegram_conversation(chat_id).await {

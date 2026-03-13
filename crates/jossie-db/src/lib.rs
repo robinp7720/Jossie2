@@ -18,15 +18,37 @@ impl Database {
     }
 
     pub async fn migrate(&self) -> anyhow::Result<()> {
-        sqlx::query(include_str!("../../jossie-db/migrations.sql"))
-            .execute(&self.pool)
-            .await
-            .ok(); // ignore if already exists
+        // Split migrations into individual statements and run each one.
+        // IF NOT EXISTS clauses handle idempotency; real errors are propagated.
+        let sql = include_str!("../../jossie-db/migrations.sql");
+        for statement in sql.split(';') {
+            let statement = statement.trim();
+            if statement.is_empty() {
+                continue;
+            }
+            if let Err(e) = sqlx::query(statement).execute(&self.pool).await {
+                // FTS5 virtual tables can't use IF NOT EXISTS, so ignore "already exists" errors
+                let msg = e.to_string();
+                if msg.contains("already exists") {
+                    tracing::debug!(
+                        "Migration statement skipped (already exists): {}",
+                        &statement[..statement.len().min(80)]
+                    );
+                } else {
+                    tracing::error!("Migration failed: {e}");
+                    return Err(e.into());
+                }
+            }
+        }
         Ok(())
     }
 
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    pub async fn health_check(&self) -> bool {
+        sqlx::query("SELECT 1").execute(&self.pool).await.is_ok()
     }
 
     // Conversations
@@ -627,7 +649,10 @@ impl Database {
                     id: r.node_id,
                     label: r.label,
                     node_type: r.node_type,
-                    properties: serde_json::from_str(&r.node_properties).unwrap_or_default(),
+                    properties: serde_json::from_str(&r.node_properties).unwrap_or_else(|e| {
+                        tracing::warn!("Failed to parse graph node properties: {e}");
+                        serde_json::Value::default()
+                    }),
                 },
             });
         }
@@ -640,7 +665,10 @@ impl Database {
                     id: r.node_id,
                     label: r.label,
                     node_type: r.node_type,
-                    properties: serde_json::from_str(&r.node_properties).unwrap_or_default(),
+                    properties: serde_json::from_str(&r.node_properties).unwrap_or_else(|e| {
+                        tracing::warn!("Failed to parse graph node properties: {e}");
+                        serde_json::Value::default()
+                    }),
                 },
             });
         }
@@ -737,7 +765,10 @@ impl Database {
                     id: r.id,
                     label: r.label,
                     node_type: r.node_type,
-                    properties: serde_json::from_str(&r.properties).unwrap_or_default(),
+                    properties: serde_json::from_str(&r.properties).unwrap_or_else(|e| {
+                        tracing::warn!("Failed to parse graph node properties: {e}");
+                        serde_json::Value::default()
+                    }),
                 };
                 (node, r.connection_count)
             })
@@ -1068,7 +1099,10 @@ impl From<GraphNodeRow> for GraphNode {
             id: r.id,
             label: r.label,
             node_type: r.node_type,
-            properties: serde_json::from_str(&r.properties).unwrap_or_default(),
+            properties: serde_json::from_str(&r.properties).unwrap_or_else(|e| {
+                tracing::warn!("Failed to parse graph node properties: {e}");
+                serde_json::Value::default()
+            }),
         }
     }
 }
@@ -1095,7 +1129,10 @@ impl From<GraphEdgeRow> for GraphEdge {
             target_id: r.target_id,
             relation: r.relation,
             weight: r.weight,
-            properties: serde_json::from_str(&r.properties).unwrap_or_default(),
+            properties: serde_json::from_str(&r.properties).unwrap_or_else(|e| {
+                tracing::warn!("Failed to parse graph edge properties: {e}");
+                serde_json::Value::default()
+            }),
         }
     }
 }
@@ -1152,10 +1189,25 @@ struct ConversationRow {
 impl From<ConversationRow> for Conversation {
     fn from(r: ConversationRow) -> Self {
         Conversation {
-            id: r.id.parse().unwrap_or_default(),
+            id: r.id.parse().unwrap_or_else(|e| {
+                tracing::warn!("Failed to parse conversation id '{}': {e}", r.id);
+                Uuid::default()
+            }),
             title: r.title,
-            created_at: r.created_at.parse().unwrap_or_default(),
-            updated_at: r.updated_at.parse().unwrap_or_default(),
+            created_at: r.created_at.parse().unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to parse conversation created_at '{}': {e}",
+                    r.created_at
+                );
+                chrono::DateTime::default()
+            }),
+            updated_at: r.updated_at.parse().unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to parse conversation updated_at '{}': {e}",
+                    r.updated_at
+                );
+                chrono::DateTime::default()
+            }),
         }
     }
 }
@@ -1175,14 +1227,33 @@ struct MessageRow {
 impl From<MessageRow> for Message {
     fn from(r: MessageRow) -> Self {
         Message {
-            id: r.id.parse().unwrap_or_default(),
-            conversation_id: r.conversation_id.parse().unwrap_or_default(),
+            id: r.id.parse().unwrap_or_else(|e| {
+                tracing::warn!("Failed to parse message id '{}': {e}", r.id);
+                Uuid::default()
+            }),
+            conversation_id: r.conversation_id.parse().unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to parse message conversation_id '{}': {e}",
+                    r.conversation_id
+                );
+                Uuid::default()
+            }),
             role: r.role.parse().unwrap_or(Role::User),
             content: r.content,
-            tool_calls: r.tool_calls.and_then(|s| serde_json::from_str(&s).ok()),
+            tool_calls: r.tool_calls.and_then(|s| {
+                serde_json::from_str(&s)
+                    .map_err(|e| {
+                        tracing::warn!("Failed to parse tool_calls JSON: {e}");
+                        e
+                    })
+                    .ok()
+            }),
             tool_call_id: r.tool_call_id,
             name: r.name,
-            created_at: r.created_at.parse().unwrap_or_default(),
+            created_at: r.created_at.parse().unwrap_or_else(|e| {
+                tracing::warn!("Failed to parse message created_at '{}': {e}", r.created_at);
+                chrono::DateTime::default()
+            }),
         }
     }
 }
@@ -1271,7 +1342,10 @@ impl From<IntegrationEventRow> for IntegrationEvent {
             account_id: r.account_id,
             event_type: r.event_type,
             dedupe_key: r.dedupe_key,
-            payload: serde_json::from_str(&r.payload).unwrap_or_default(),
+            payload: serde_json::from_str(&r.payload).unwrap_or_else(|e| {
+                tracing::warn!("Failed to parse integration event payload: {e}");
+                serde_json::Value::default()
+            }),
             status: r.status,
             created_at: r.created_at,
             processed_at: r.processed_at,
@@ -1669,7 +1743,10 @@ impl From<ScheduledTaskRow> for ScheduledTask {
             id: r.id,
             conversation_id: r.conversation_id,
             task_type: r.task_type,
-            task_data: serde_json::from_str(&r.task_data).unwrap_or_default(),
+            task_data: serde_json::from_str(&r.task_data).unwrap_or_else(|e| {
+                tracing::warn!("Failed to parse scheduled task data: {e}");
+                serde_json::Value::default()
+            }),
             schedule_type: r.schedule_type,
             schedule_value: r.schedule_value,
             status: r.status,

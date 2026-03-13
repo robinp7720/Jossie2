@@ -1,0 +1,11 @@
+target/
+frontend/node_modules/
+.git/
+.github/
+*.db
+*.db-shm
+*.db-wal
+.env
+.claude/
+TODO.md
+AGENTS.md

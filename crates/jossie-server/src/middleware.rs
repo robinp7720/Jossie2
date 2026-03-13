@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,
@@ -33,7 +34,9 @@ pub async fn auth_middleware(
         });
 
     match token {
-        Some(t) if t == state.auth_token => Ok(next.run(request).await),
+        Some(t) if t.as_bytes().ct_eq(state.auth_token.as_bytes()).into() => {
+            Ok(next.run(request).await)
+        }
         _ => {
             let body = ErrorBody {
                 error: "unauthorized".to_string(),

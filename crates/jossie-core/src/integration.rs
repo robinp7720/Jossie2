@@ -253,11 +253,7 @@ impl IntegrationRegistry {
                     // Validate the result and append hints
                     let (quality, hint) = validate_tool_result(&call.name, &final_content);
                     if let Some(hint_text) = hint {
-                        tracing::debug!(
-                            "Tool '{}' result quality: {:?}",
-                            call.name,
-                            quality
-                        );
+                        tracing::debug!("Tool '{}' result quality: {:?}", call.name, quality);
                         final_content.push('\n');
                         final_content.push_str(&hint_text);
                     }
@@ -468,28 +464,49 @@ mod tests {
 
     #[test]
     fn test_validate_truncated() {
-        let (q, _) = validate_tool_result("test", "data...\n[Output truncated. Original size: 200000 chars]");
+        let (q, _) = validate_tool_result(
+            "test",
+            "data...\n[Output truncated. Original size: 200000 chars]",
+        );
         assert_eq!(q, ResultQuality::Partial);
     }
 
     #[test]
     fn test_classify_transient_errors() {
-        assert_eq!(classify_error("connection timeout"), ToolErrorKind::Transient);
-        assert_eq!(classify_error("rate limit exceeded"), ToolErrorKind::Transient);
+        assert_eq!(
+            classify_error("connection timeout"),
+            ToolErrorKind::Transient
+        );
+        assert_eq!(
+            classify_error("rate limit exceeded"),
+            ToolErrorKind::Transient
+        );
         assert_eq!(classify_error("HTTP 503"), ToolErrorKind::Transient);
-        assert_eq!(classify_error("connection refused"), ToolErrorKind::Transient);
+        assert_eq!(
+            classify_error("connection refused"),
+            ToolErrorKind::Transient
+        );
     }
 
     #[test]
     fn test_classify_bad_input() {
-        assert_eq!(classify_error("invalid parameter 'foo'"), ToolErrorKind::BadInput);
+        assert_eq!(
+            classify_error("invalid parameter 'foo'"),
+            ToolErrorKind::BadInput
+        );
         assert_eq!(classify_error("400 Bad Request"), ToolErrorKind::BadInput);
-        assert_eq!(classify_error("missing required field"), ToolErrorKind::BadInput);
+        assert_eq!(
+            classify_error("missing required field"),
+            ToolErrorKind::BadInput
+        );
     }
 
     #[test]
     fn test_classify_auth_errors() {
-        assert_eq!(classify_error("401 Unauthorized"), ToolErrorKind::AuthFailure);
+        assert_eq!(
+            classify_error("401 Unauthorized"),
+            ToolErrorKind::AuthFailure
+        );
         assert_eq!(classify_error("403 Forbidden"), ToolErrorKind::AuthFailure);
         assert_eq!(classify_error("token expired"), ToolErrorKind::AuthFailure);
     }
@@ -497,12 +514,18 @@ mod tests {
     #[test]
     fn test_classify_not_found() {
         assert_eq!(classify_error("404 not found"), ToolErrorKind::NotFound);
-        assert_eq!(classify_error("no such file or directory"), ToolErrorKind::NotFound);
+        assert_eq!(
+            classify_error("no such file or directory"),
+            ToolErrorKind::NotFound
+        );
     }
 
     #[test]
     fn test_classify_unknown() {
-        assert_eq!(classify_error("something weird happened"), ToolErrorKind::Unknown);
+        assert_eq!(
+            classify_error("something weird happened"),
+            ToolErrorKind::Unknown
+        );
     }
 
     #[tokio::test]

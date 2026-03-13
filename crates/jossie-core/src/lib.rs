@@ -1,13 +1,11 @@
 pub mod config;
-pub mod error;
 pub mod integration;
 pub mod text;
 pub mod types;
 
 pub use config::AppConfig;
-pub use error::JossieError;
 pub use integration::{
-    classify_error, validate_tool_result, Integration, IntegrationRegistry, ResultQuality,
-    ToolCall, ToolDefinition, ToolErrorKind, ToolResult,
+    Integration, IntegrationRegistry, ResultQuality, ToolCall, ToolDefinition, ToolErrorKind,
+    ToolResult, classify_error, validate_tool_result,
 };
 pub use types::{Conversation, Message, Role};
