@@ -74,7 +74,8 @@ struct ResponseTool {
     name: String,
     description: String,
     parameters: serde_json::Value,
-    strict: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -243,7 +244,7 @@ impl LlmClient {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
                 parameters: tool.parameters.clone(),
-                strict: true,
+                strict: None,
             })
             .collect();
         Some(built)
