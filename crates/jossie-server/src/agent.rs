@@ -835,6 +835,7 @@ async fn generate_event_message_inner(
         .get_messages(conversation_id, Some(state.event_max_context_messages))
         .await?;
     messages.retain(|m| !is_event_notification_message(m));
+    strip_tool_activity_from_event_context(&mut messages);
 
     sanitize_context_window(&mut messages);
 
@@ -868,17 +869,7 @@ async fn generate_event_message_inner(
 
     let fingerprint = event_notification_fingerprint(event);
 
-    let mut normalized_content = content.trim().to_string();
-    if normalized_content.starts_with("```") {
-        normalized_content = normalized_content
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim()
-            .to_string();
-    }
-
-    if let Ok(decision) = serde_json::from_str::<EventModeResponse>(&normalized_content) {
+    if let Some(decision) = parse_event_mode_response(&content) {
         let action = decision.action.trim().to_ascii_lowercase();
         if action == "skip" {
             return Ok(None);
@@ -901,24 +892,98 @@ async fn generate_event_message_inner(
     }
 
     let trimmed = content.trim();
-    let normalized = trimmed.trim_matches(|c| c == '"' || c == '`').trim();
-    if normalized.eq_ignore_ascii_case("no_action") || normalized.is_empty() {
+    if trimmed
+        .trim_matches(|c| c == '"' || c == '`')
+        .trim()
+        .eq_ignore_ascii_case("no_action")
+        || trimmed.is_empty()
+    {
         return Ok(None);
     }
-    if should_suppress_event_notification(state, conversation_id, &fingerprint).await? {
-        tracing::debug!(
-            "Suppressing duplicate event notification for conversation {}",
-            conversation_id
-        );
-        return Ok(None);
-    }
-    record_event_notification(state, conversation_id, &fingerprint).await?;
 
-    Ok(Some(trimmed.to_string()))
+    tracing::warn!(
+        "Dropping invalid event-mode output instead of forwarding raw content: {:.400}",
+        trimmed
+    );
+    Ok(None)
 }
 
 fn is_event_notification_message(message: &Message) -> bool {
     message.role == Role::Assistant && message.name.as_deref() == Some(EVENT_NOTIFICATION_MARKER)
+}
+
+fn strip_tool_activity_from_event_context(messages: &mut Vec<Message>) {
+    messages.retain(|message| message.role != Role::Tool);
+    for message in messages.iter_mut() {
+        if message.role == Role::Assistant {
+            message.tool_calls = None;
+            message.tool_call_id = None;
+        }
+    }
+}
+
+fn parse_event_mode_response(content: &str) -> Option<EventModeResponse> {
+    let normalized = strip_code_fence(content);
+    serde_json::from_str::<EventModeResponse>(normalized)
+        .ok()
+        .or_else(|| extract_embedded_event_mode_response(normalized))
+}
+
+fn strip_code_fence(content: &str) -> &str {
+    let trimmed = content.trim();
+    if trimmed.starts_with("```") {
+        trimmed
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim()
+    } else {
+        trimmed
+    }
+}
+
+fn extract_embedded_event_mode_response(content: &str) -> Option<EventModeResponse> {
+    let mut in_string = false;
+    let mut escape = false;
+    let mut depth = 0usize;
+    let mut object_start = None;
+    let mut last_match = None;
+
+    for (idx, ch) in content.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_string => {
+                escape = true;
+            }
+            '"' => {
+                in_string = !in_string;
+            }
+            '{' if !in_string => {
+                if depth == 0 {
+                    object_start = Some(idx);
+                }
+                depth += 1;
+            }
+            '}' if !in_string && depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(start) = object_start.take() {
+                        let candidate = &content[start..=idx];
+                        if let Ok(parsed) = serde_json::from_str::<EventModeResponse>(candidate) {
+                            last_match = Some(parsed);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    last_match
 }
 
 fn build_event_context_hint(event: &IntegrationEvent) -> String {
@@ -1454,6 +1519,22 @@ mod tests {
     fn test_memory_index_empty_state() {
         let section = format_memory_index(&[]);
         assert!(section.contains("No memories are currently saved"));
+    }
+
+    #[test]
+    fn test_parse_event_mode_response_extracts_embedded_json() {
+        let content = r#"to=multi_tool_use.parallel blah
+{"tool_uses":[{"recipient_name":"functions.gmail_read","parameters":{"message_id":"abc"}}]}
+{"action":"notify","message":"Two transaction emails just came in."}"#;
+
+        let parsed = parse_event_mode_response(content).expect("expected parsed response");
+        assert_eq!(parsed.action, "notify");
+        assert_eq!(parsed.message, "Two transaction emails just came in.");
+    }
+
+    #[test]
+    fn test_parse_event_mode_response_rejects_non_json_text() {
+        assert!(parse_event_mode_response("let me check those emails first").is_none());
     }
 }
 
