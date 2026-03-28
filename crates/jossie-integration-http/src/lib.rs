@@ -4,39 +4,99 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use url::Url;
 
-// Ensure we don't allow SSRF to internal networks
-fn is_globally_reachable(url: &Url) -> bool {
-    // Simple check: scheme must be http or https
-    if url.scheme() != "http" && url.scheme() != "https" {
-        return false;
-    }
-
+fn is_allowed_test_host(host: &str) -> bool {
     #[cfg(test)]
-    if url.host_str() == Some("127.0.0.1") || url.host_str() == Some("localhost") {
-        return true;
+    {
+        host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
     }
 
-    // Check host type
-    match url.host_str() {
-        Some(host) => {
-            // Block localhost, 127.0.0.1, internal ranges, etc.
-            // This is a basic implementation. For robust SSRF, we'd need to resolve IP and check against private ranges.
-            // For this iterate, we'll block common local identifiers.
-            let lower = host.to_lowercase();
-            if lower == "localhost"
-                || lower.starts_with("127.")
-                || lower.starts_with("10.")
-                || lower.starts_with("192.168.")
-                || lower == "::1"
-            {
-                return false;
-            }
-            true
-        }
-        None => false,
+    #[cfg(not(test))]
+    {
+        let _ = host;
+        false
     }
+}
+
+fn is_public_ipv4(addr: Ipv4Addr) -> bool {
+    let octets = addr.octets();
+    !addr.is_private()
+        && !addr.is_loopback()
+        && !addr.is_link_local()
+        && !addr.is_broadcast()
+        && !addr.is_documentation()
+        && !addr.is_unspecified()
+        && !addr.is_multicast()
+        && octets[0] != 0
+        && !(octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000)
+        && !(octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
+    // Shared address space 100.64.0.0/10 and benchmarking 198.18.0.0/15.
+}
+
+fn is_public_ipv6(addr: Ipv6Addr) -> bool {
+    let segments = addr.segments();
+    !addr.is_loopback()
+        && !addr.is_unspecified()
+        && !addr.is_multicast()
+        && !addr.is_unique_local()
+        && !addr.is_unicast_link_local()
+        && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+        && !(segments[0] & 0xffc0 == 0xfe80)
+}
+
+fn is_public_ip(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(addr) => is_public_ipv4(addr),
+        IpAddr::V6(addr) => is_public_ipv6(addr),
+    }
+}
+
+async fn validate_url_target(url: &Url) -> anyhow::Result<()> {
+    if url.scheme() != "http" && url.scheme() != "https" {
+        anyhow::bail!("Blocked: URL must use http or https.");
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("Blocked: URL is missing a host."))?;
+    if is_allowed_test_host(host) {
+        return Ok(());
+    }
+    if host.eq_ignore_ascii_case("localhost") {
+        anyhow::bail!("Blocked: URL targets a local hostname.");
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if !is_public_ip(ip) {
+            anyhow::bail!("Blocked: URL targets a local or private IP address.");
+        }
+        return Ok(());
+    }
+
+    let port = url.port_or_known_default().unwrap_or(80);
+    let resolved = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| anyhow::anyhow!("Blocked: failed to resolve host '{host}': {e}"))?;
+
+    let mut had_addresses = false;
+    for socket_addr in resolved {
+        had_addresses = true;
+        if !is_public_ip(socket_addr.ip()) {
+            anyhow::bail!(
+                "Blocked: host '{}' resolved to a local or private address ({})",
+                host,
+                socket_addr.ip()
+            );
+        }
+    }
+
+    if !had_addresses {
+        anyhow::bail!("Blocked: host '{host}' did not resolve to any addresses.");
+    }
+
+    Ok(())
 }
 
 pub struct HttpIntegration {
@@ -207,15 +267,7 @@ impl HttpIntegration {
             anyhow::anyhow!("Invalid URL: {}", e)
         })?;
 
-        if !is_globally_reachable(&url) {
-            tracing::warn!(
-                "SSRF protection: Blocked request to non-globally-reachable URL: {}",
-                url
-            );
-            return Err(anyhow::anyhow!(
-                "Blocked: URL targets a local or private network address."
-            ));
-        }
+        validate_url_target(&url).await?;
         tracing::debug!("URL passed SSRF validation: {}", url);
 
         let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| {
@@ -714,24 +766,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_globally_reachable() {
-        assert!(is_globally_reachable(
-            &Url::parse("https://google.com").unwrap()
-        ));
-        // In test mode, we allow localhost/127.0.0.1 for integration tests
-        assert!(is_globally_reachable(
-            &Url::parse("http://localhost:8080").unwrap()
-        ));
-        assert!(is_globally_reachable(
-            &Url::parse("http://127.0.0.1").unwrap()
-        ));
-        // Internal IPs like 10.x are still blocked if they don't match localhost check logic (which only checks hostname)
-        // is_globally_reachable check for "10." is: lower.starts_with("10.")
-        // Our test override only checks for "localhost" or "127.0.0.1".
-        // So 10.0.0.5 should still fail.
-        assert!(!is_globally_reachable(
-            &Url::parse("http://10.0.0.5").unwrap()
-        ));
+    fn test_public_ip_classification() {
+        assert!(is_public_ip("8.8.8.8".parse().unwrap()));
+        assert!(!is_public_ip("10.0.0.5".parse().unwrap()));
+        assert!(!is_public_ip("100.64.0.1".parse().unwrap()));
+        assert!(!is_public_ip("198.18.0.1".parse().unwrap()));
+        assert!(!is_public_ip("127.0.0.1".parse().unwrap()));
     }
 
     #[test]

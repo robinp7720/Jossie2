@@ -11,7 +11,8 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
-url = "2.5"
+tokio = { workspace = true }
+url = { workspace = true }
 regex = "1.10"
 base64 = "0.22"
 

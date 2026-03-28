@@ -2,10 +2,15 @@ use jossie_core::integration::IntegrationRegistry;
 use jossie_db::Database;
 use jossie_integration_google::GoogleIntegration;
 use jossie_llm::LlmClient;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+pub struct PendingGoogleOAuth {
+    pub account_name: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
 
 pub struct AppState {
     pub db: Arc<Database>,
@@ -13,6 +18,7 @@ pub struct AppState {
     pub kg_llm: LlmClient,
     pub registry: Arc<IntegrationRegistry>,
     pub auth_token: String,
+    pub public_base_url: Option<String>,
     pub system_prompt: String,
     pub max_agent_iterations: usize,
     pub max_context_messages: usize,
@@ -22,6 +28,7 @@ pub struct AppState {
     pub telegram_token: String,
     pub enable_self_reflection: bool,
     pub active_conversations: Arc<RwLock<HashSet<Uuid>>>,
+    pub pending_google_oauth: Arc<RwLock<HashMap<String, PendingGoogleOAuth>>>,
     pub cors_origins: Vec<String>,
     pub max_request_body_bytes: usize,
 }

@@ -173,27 +173,61 @@ pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<S
     run_agent_loop_with_options(state, conv_id, AgentRunOptions::default()).await
 }
 
+async fn claim_conversation(state: &AppState, conv_id: Uuid) -> anyhow::Result<()> {
+    let mut active = state.active_conversations.write().await;
+    if !active.insert(conv_id) {
+        anyhow::bail!("Conversation {} is already being processed", conv_id);
+    }
+    Ok(())
+}
+
+async fn release_conversation(state: &AppState, conv_id: Uuid) {
+    let mut active = state.active_conversations.write().await;
+    active.remove(&conv_id);
+}
+
+fn prepare_tool_calls_for_execution(
+    tool_calls: &[jossie_core::ToolCall],
+    conv_id: Uuid,
+) -> Vec<jossie_core::ToolCall> {
+    tool_calls
+        .iter()
+        .map(|call| {
+            let mut call_with_context = call.clone();
+            if call.name.starts_with("schedule_")
+                || call.name == "send_user_message"
+                || call.name == "list_scheduled_tasks"
+            {
+                if let Ok(mut args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+                    if let Some(obj) = args.as_object_mut() {
+                        obj.insert(
+                            "__conversation_id".to_string(),
+                            serde_json::Value::String(conv_id.to_string()),
+                        );
+                        if let Ok(json_str) = serde_json::to_string(&args) {
+                            call_with_context.arguments = json_str;
+                        }
+                    }
+                }
+            }
+            call_with_context
+        })
+        .collect()
+}
+
 pub async fn run_agent_loop_with_options(
     state: &AppState,
     conv_id: Uuid,
     options: AgentRunOptions,
 ) -> anyhow::Result<String> {
     // Try to claim this conversation
-    {
-        let mut active = state.active_conversations.write().await;
-        if !active.insert(conv_id) {
-            anyhow::bail!("Conversation {} is already being processed", conv_id);
-        }
-    }
+    claim_conversation(state, conv_id).await?;
 
     // Execute the agent loop and ensure we release the lock even on panic/error
     let result = run_agent_loop_inner(state, conv_id, &options).await;
 
     // Release the conversation lock
-    {
-        let mut active = state.active_conversations.write().await;
-        active.remove(&conv_id);
-    }
+    release_conversation(state, conv_id).await;
 
     result
 }
@@ -324,31 +358,7 @@ async fn run_agent_loop_inner(
         state.db.save_message(&assistant_msg).await?;
         messages.push(assistant_msg);
 
-        // Pre-process: inject conversation_id into scheduler tool arguments
-        let prepared_calls: Vec<_> = tool_calls
-            .iter()
-            .map(|call| {
-                let mut call_with_context = call.clone();
-                if call.name.starts_with("schedule_")
-                    || call.name == "send_user_message"
-                    || call.name == "list_scheduled_tasks"
-                {
-                    if let Ok(mut args) = serde_json::from_str::<serde_json::Value>(&call.arguments)
-                    {
-                        if let Some(obj) = args.as_object_mut() {
-                            obj.insert(
-                                "__conversation_id".to_string(),
-                                serde_json::Value::String(conv_id.to_string()),
-                            );
-                            if let Ok(json_str) = serde_json::to_string(&args) {
-                                call_with_context.arguments = json_str;
-                            }
-                        }
-                    }
-                }
-                call_with_context
-            })
-            .collect();
+        let prepared_calls = prepare_tool_calls_for_execution(&tool_calls, conv_id);
 
         // Execute all tools concurrently
         let mut join_set = tokio::task::JoinSet::new();
@@ -416,6 +426,20 @@ pub async fn run_agent_loop_streaming(
     conv_id: Uuid,
     event_tx: tokio::sync::mpsc::Sender<AgentStreamEvent>,
 ) {
+    if let Err(e) = claim_conversation(state, conv_id).await {
+        let _ = event_tx.send(AgentStreamEvent::Error(e.to_string())).await;
+        return;
+    }
+
+    run_agent_loop_streaming_inner(state, conv_id, event_tx).await;
+    release_conversation(state, conv_id).await;
+}
+
+async fn run_agent_loop_streaming_inner(
+    state: &AppState,
+    conv_id: Uuid,
+    event_tx: tokio::sync::mpsc::Sender<AgentStreamEvent>,
+) {
     let tools = state.registry.all_tool_definitions();
     let mut messages = match state
         .db
@@ -453,6 +477,7 @@ pub async fn run_agent_loop_streaming(
 
         let mut full_content = String::new();
         let mut tool_calls = Vec::new();
+        let mut stream_failed = false;
 
         while let Some(event) = stream_rx.recv().await {
             match event {
@@ -465,9 +490,14 @@ pub async fn run_agent_loop_streaming(
                 }
                 jossie_llm::StreamEvent::Done => {}
                 jossie_llm::StreamEvent::Error(e) => {
+                    stream_failed = true;
                     let _ = event_tx.send(AgentStreamEvent::Error(e)).await;
                 }
             }
+        }
+
+        if stream_failed {
+            return;
         }
 
         if !tool_calls.is_empty() {
@@ -488,9 +518,10 @@ pub async fn run_agent_loop_streaming(
             let _ = state.db.save_message(&assistant_msg).await;
             messages.push(assistant_msg);
 
-            // Execute all tools concurrently
+            let prepared_calls = prepare_tool_calls_for_execution(&tool_calls, conv_id);
+
             let mut join_set = tokio::task::JoinSet::new();
-            for (idx, call) in tool_calls.iter().cloned().enumerate() {
+            for (idx, call) in prepared_calls.into_iter().enumerate() {
                 let registry = state.registry.clone();
                 join_set.spawn(async move {
                     let result = registry.execute(&call).await;
@@ -1535,6 +1566,33 @@ mod tests {
     #[test]
     fn test_parse_event_mode_response_rejects_non_json_text() {
         assert!(parse_event_mode_response("let me check those emails first").is_none());
+    }
+
+    #[test]
+    fn test_prepare_tool_calls_injects_conversation_id_for_scheduler_tools() {
+        let conv_id = Uuid::new_v4();
+        let calls = vec![
+            jossie_core::ToolCall {
+                id: "call_1".to_string(),
+                name: "schedule_task".to_string(),
+                arguments: r#"{"prompt":"check in","run_at":"2026-04-01T12:00:00Z"}"#.to_string(),
+            },
+            jossie_core::ToolCall {
+                id: "call_2".to_string(),
+                name: "memory_search".to_string(),
+                arguments: r#"{"query":"hi"}"#.to_string(),
+            },
+        ];
+
+        let prepared = prepare_tool_calls_for_execution(&calls, conv_id);
+        let scheduler_args: serde_json::Value =
+            serde_json::from_str(&prepared[0].arguments).expect("scheduler args should be JSON");
+
+        assert_eq!(
+            scheduler_args["__conversation_id"],
+            serde_json::Value::String(conv_id.to_string())
+        );
+        assert_eq!(prepared[1].arguments, calls[1].arguments);
     }
 }
 

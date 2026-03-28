@@ -28,8 +28,10 @@ async fn main() -> Result<()> {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
 
-    let config_str = std::fs::read_to_string("config.toml").expect("Failed to read config.toml");
-    let mut config: AppConfig = toml::from_str(&config_str).expect("Failed to parse config.toml");
+    let config_str = std::fs::read_to_string("config.toml")
+        .map_err(|e| anyhow::anyhow!("Failed to read config.toml: {e}"))?;
+    let mut config: AppConfig = toml::from_str(&config_str)
+        .map_err(|e| anyhow::anyhow!("Failed to parse config.toml: {e}"))?;
 
     // Override secrets from environment variables
     override_config_from_env(&mut config);
@@ -107,6 +109,7 @@ async fn main() -> Result<()> {
         kg_llm,
         registry: Arc::new(registry),
         auth_token: config.server.auth_token.clone(), // Changed from cfg.auth_token
+        public_base_url: config.server.public_base_url.clone(),
         system_prompt: config.llm.system_prompt.clone(), // Changed from cfg.system_prompt
         max_agent_iterations: config.llm.max_agent_iterations, // Changed from cfg.max_agent_iterations
         max_context_messages: config.llm.max_context_messages, // Changed from cfg.max_context_messages
@@ -116,6 +119,7 @@ async fn main() -> Result<()> {
         telegram_token: config.telegram.bot_token.clone(), // Changed from cfg.telegram_token
         enable_self_reflection: config.llm.enable_self_reflection,
         active_conversations: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        pending_google_oauth: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         cors_origins: config.server.cors_origins.clone(),
         max_request_body_bytes: config.server.max_request_body_bytes,
     });
@@ -182,6 +186,14 @@ fn override_config_from_env(config: &mut AppConfig) {
 
     if let Ok(val) = env::var("JOSSIE_SERVER_AUTH_TOKEN") {
         config.server.auth_token = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_SERVER_PUBLIC_BASE_URL") {
+        let trimmed = val.trim();
+        config.server.public_base_url = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
     }
     if let Ok(val) = env::var("JOSSIE_LLM_API_KEY") {
         config.llm.api_key = val;

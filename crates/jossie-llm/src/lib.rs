@@ -308,13 +308,24 @@ impl LlmClient {
     ) -> anyhow::Result<()> {
         let req = self.build_request(messages, tools, true);
 
-        let resp = self
+        let resp = match self
             .client
             .post(format!("{}/responses", self.api_url))
             .bearer_auth(&self.api_key)
             .json(&req)
             .send()
-            .await?;
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                let _ = tx
+                    .send(StreamEvent::Error(format!(
+                        "LLM request failed before streaming started: {e}"
+                    )))
+                    .await;
+                return Ok(());
+            }
+        };
 
         let status = resp.status();
         if !status.is_success() {
@@ -330,9 +341,20 @@ impl LlmClient {
         let mut stream = resp.bytes_stream();
         let mut buffer = String::new();
         let mut pending_calls: HashMap<i32, PendingToolCall> = HashMap::new();
+        let mut done_received = false;
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(e) => {
+                    let _ = tx
+                        .send(StreamEvent::Error(format!(
+                            "LLM stream transport error: {e}"
+                        )))
+                        .await;
+                    return Ok(());
+                }
+            };
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             while let Some(line_end) = buffer.find('\n') {
@@ -345,10 +367,15 @@ impl LlmClient {
 
                 let data = &line[6..];
                 if data == "[DONE]" {
+                    done_received = true;
                     break;
                 }
 
                 handle_stream_event(data, &mut pending_calls, &tx).await;
+            }
+
+            if done_received {
+                break;
             }
         }
 

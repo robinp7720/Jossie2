@@ -22,6 +22,43 @@ pub struct AddAccountRequest {
     pub config: serde_json::Value,
 }
 
+fn redact_secret_fields(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let redacted = map
+                .into_iter()
+                .map(|(key, value)| {
+                    let lower = key.to_ascii_lowercase();
+                    let value = if lower.contains("password")
+                        || lower.contains("refresh_token")
+                        || lower.contains("access_token")
+                        || lower.contains("client_secret")
+                        || lower == "token"
+                        || lower.ends_with("_token")
+                        || lower.contains("api_key")
+                    {
+                        serde_json::Value::String("[REDACTED]".to_string())
+                    } else {
+                        redact_secret_fields(value)
+                    };
+                    (key, value)
+                })
+                .collect();
+            serde_json::Value::Object(redacted)
+        }
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(redact_secret_fields).collect())
+        }
+        other => other,
+    }
+}
+
+fn sanitize_account_details(raw: &str) -> serde_json::Value {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .map(redact_secret_fields)
+        .unwrap_or_else(|_| serde_json::json!({}))
+}
+
 pub async fn list_accounts(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<AccountConfig>>, AppError> {
@@ -34,7 +71,7 @@ pub async fn list_accounts(
             id: acc.id,
             integration: "google".to_string(),
             name: acc.name,
-            details: serde_json::from_str(&acc.data).unwrap_or_default(),
+            details: sanitize_account_details(&acc.data),
         });
     }
 
@@ -45,7 +82,7 @@ pub async fn list_accounts(
             id: acc.id,
             integration: "email".to_string(),
             name: acc.name,
-            details: serde_json::from_str(&acc.data).unwrap_or_default(),
+            details: sanitize_account_details(&acc.data),
         });
     }
 
@@ -75,4 +112,27 @@ pub async fn delete_account(
 ) -> Result<Json<()>, AppError> {
     state.db.delete_integration_account(&id).await?;
     Ok(Json(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_account_details;
+
+    #[test]
+    fn sanitize_account_details_redacts_common_secrets() {
+        let value = sanitize_account_details(
+            r#"{
+                "username":"me@example.com",
+                "password":"secret",
+                "nested":{"refresh_token":"abc","access_token":"def"},
+                "items":[{"client_secret":"ghi"}]
+            }"#,
+        );
+
+        assert_eq!(value["username"], "me@example.com");
+        assert_eq!(value["password"], "[REDACTED]");
+        assert_eq!(value["nested"]["refresh_token"], "[REDACTED]");
+        assert_eq!(value["nested"]["access_token"], "[REDACTED]");
+        assert_eq!(value["items"][0]["client_secret"], "[REDACTED]");
+    }
 }

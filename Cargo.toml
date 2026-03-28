@@ -8,10 +8,10 @@ members = [
     "crates/jossie-integration-email",
     "crates/jossie-integration-google",
     "crates/jossie-integration-graph",
-    "crates/jossie-llm",
-    "crates/jossie-server",
-    "crates/jossie-telegram",
-    "crates/jossie-integration-http", "crates/jossie-integration-scheduler",
+    "crates/jossie-integration-memory",
+    "crates/jossie-integration-browser",
+    "crates/jossie-integration-http",
+    "crates/jossie-integration-scheduler",
 ]
 resolver = "3"
 
@@ -50,6 +50,7 @@ dotenvy = "0.15"
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 urlencoding = "2.1"
+url = "2.5"
 regex = "1"
 subtle = "2"
 headless_chrome = { version = "1.0", features = ["fetch"] }

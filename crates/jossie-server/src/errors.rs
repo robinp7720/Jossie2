@@ -10,6 +10,7 @@ pub struct ErrorBody {
     pub error: String,
 }
 
+#[derive(Debug)]
 pub struct AppError(pub anyhow::Error);
 
 impl From<anyhow::Error> for AppError {

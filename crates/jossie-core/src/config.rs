@@ -27,6 +27,8 @@ pub struct ServerConfig {
     pub port: u16,
     pub auth_token: String,
     #[serde(default)]
+    pub public_base_url: Option<String>,
+    #[serde(default)]
     pub cors_origins: Vec<String>,
     #[serde(default = "default_max_request_body_bytes")]
     pub max_request_body_bytes: usize,
