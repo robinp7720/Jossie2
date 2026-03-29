@@ -2,184 +2,248 @@
 
 ## What This Is
 
-An agentic LLM assistant with a plugin-based integration system, WebSocket streaming API, and multiple chat frontends. Rust workspace, edition 2024.
+Jossie2 is an agentic LLM companion built as a Rust workspace plus a React frontend. It exposes an authenticated HTTP/WebSocket API, serves a browser UI, supports a Telegram bot frontend, persists long-term state in SQLite, and can run background polling/scheduled work.
+
+This file reflects the current codebase, not the older roadmap docs. If another doc disagrees with source, trust the source.
 
 ## Project Layout
 
-```
+```text
 Jossie2/
-  Cargo.toml              # workspace root + binary package
-  config.toml             # runtime config (not committed with real secrets)
-  src/main.rs             # binary: loads config, inits DB, registers integrations, starts server
-  migrations/001_init.sql # reference copy of schema (not used at runtime)
+  Cargo.toml                    # workspace root + binary package
+  config.sample.toml            # committed sample config; copy to config.toml locally
+  src/main.rs                   # loads config, wires integrations, starts server/bot
+  src/event_loop.rs             # background polling + scheduled/OOB processing
+  frontend/                     # Vite + React web UI
   crates/
-    jossie-core/          # traits, types, config, registry — no IO, no side effects
-    jossie-llm/           # OpenAI-compatible LLM client (streaming + non-streaming)
-    jossie-db/            # SQLite persistence via sqlx; embeds its own migrations.sql
-    jossie-server/        # axum HTTP + WebSocket API, agent loop, auth middleware
-    jossie-telegram/      # Telegram bot frontend (STUB)
-    jossie-integration-email/   # IMAP + SMTP (STUB)
-    jossie-integration-google/  # Gmail, Drive (STUB)
-    jossie-integration-memory/  # keyword/FTS5 memory (COMPLETE)
+    jossie-core/               # shared types, config, integration trait/registry
+    jossie-llm/                # OpenAI-compatible Responses API client
+    jossie-db/                 # SQLite persistence + embedded SQL migrations
+    jossie-server/             # axum API, auth, handlers, agent loop
+    jossie-telegram/           # teloxide Telegram frontend
+    jossie-integration-memory/ # long-term memory tools
+    jossie-integration-graph/  # knowledge graph tools
+    jossie-integration-email/  # IMAP/SMTP email tools
+    jossie-integration-google/ # Gmail, Drive, Calendar, OAuth, polling
+    jossie-integration-browser/# headless browser + DuckDuckGo search
+    jossie-integration-http/   # outbound HTTP requests with guardrails
+    jossie-integration-scheduler/ # scheduled tasks + out-of-band messages
 ```
 
-## Dependency Graph
+## Workspace Summary
 
-```
-jossie-core  (no internal deps — everything depends on this)
-    ^
-    |--- jossie-llm          (core)
-    |--- jossie-db           (core)
-    |--- jossie-server       (core, llm, db)
-    |--- jossie-integration-memory  (core, db)
-    |--- jossie-integration-email   (core)
-    |--- jossie-integration-google  (core)
-    |--- jossie-telegram     (core, llm, db)
-```
+| Component | Current role |
+|---|---|
+| `jossie-core` | Shared config, message/tool types, integration registry, onboarding types |
+| `jossie-llm` | Non-streaming and streaming Responses API client |
+| `jossie-db` | Conversations, messages, memory, graph, accounts, events, scheduler, OOB queue |
+| `jossie-server` | Authenticated REST + WS API, static frontend hosting, agent loop |
+| `jossie-telegram` | Real Telegram chat frontend backed by the shared agent loop |
+| `integration-memory` | `memory_save`, `memory_search`, `memory_list_keys`, `memory_list_all` |
+| `integration-graph` | graph node/edge mutation and query tools |
+| `integration-email` | account listing, IMAP search/read, SMTP send, folder listing |
+| `integration-google` | Google OAuth onboarding, Gmail, Drive, Calendar, polling |
+| `integration-browser` | page fetch/render via headless Chrome, DDG-style search |
+| `integration-http` | generic HTTP requests with SSRF-style blocking and domain controls |
+| `integration-scheduler` | one-shot/recurring tasks, cancel/list, out-of-band notifications |
+| `frontend` | React chat UI, onboarding/accounts UI, knowledge graph view |
 
-The binary (`src/main.rs`) depends on core, llm, db, server, and integration-memory.
-
-## Architecture
+## Core Architecture
 
 ### Integration System
 
-Every integration implements the `Integration` trait (`jossie-core/src/integration.rs`):
+Every integration implements `jossie_core::integration::Integration` in [`crates/jossie-core/src/integration.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-core/src/integration.rs):
 
 ```rust
 #[async_trait]
 pub trait Integration: Send + Sync {
     fn name(&self) -> &str;
-    fn tools(&self) -> Vec<ToolDefinition>;              // OpenAI function-calling schema
+    fn tools(&self) -> Vec<ToolDefinition>;
     async fn execute(&self, tool_name: &str, arguments: &str) -> anyhow::Result<String>;
+    async fn check_onboarding(&self) -> anyhow::Result<OnboardingStatus> { ... }
+    async fn poll(&self) -> anyhow::Result<()> { ... }
 }
 ```
 
-`IntegrationRegistry` collects integrations and dispatches `ToolCall`s by tool name. To add a new integration:
+`IntegrationRegistry` stores integrations, maps tool names to implementations, retries transient-looking failures, truncates oversized tool output, and appends quality hints for empty/partial/error-like results.
 
-1. Create a crate under `crates/jossie-integration-<name>/`
-2. Implement `Integration` for your struct
-3. Register it in `main.rs`: `registry.register(Arc::new(YourIntegration::new(...)))`
+### Agent Loop
 
-### Agent Loop (`jossie-server/src/lib.rs`)
+The main loop lives in [`crates/jossie-server/src/agent.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-server/src/agent.rs), not in `lib.rs`.
 
-1. User sends message -> saved to DB
-2. Load conversation history + all tool definitions from registry
-3. Call `LlmClient::complete()` (non-streaming) or `complete_stream()` (streaming)
-4. If LLM returns `tool_calls` -> execute each via registry -> append tool results as `Role::Tool` messages -> loop back to step 3
-5. If LLM returns plain text -> save as `Role::Assistant` message, return to client
+Current behavior:
 
-The agent loop has no hardcoded iteration limit. Add one if needed.
+1. User message is saved to SQLite.
+2. Recent conversation history is loaded with a configurable context cap.
+3. A dynamic system prompt is prepended.
+   It includes the configured base prompt, current time, memory index, selected memory entries, and graph context.
+4. The LLM is called through `LlmClient`.
+5. Tool calls are executed through the registry and saved as assistant/tool messages.
+6. The loop repeats until a final assistant reply is produced or `max_agent_iterations` is reached.
 
-### Database (`jossie-db`)
+Notable current features:
 
-SQLite via sqlx. Schema is embedded in `crates/jossie-db/migrations.sql` and applied via `Database::migrate()` (raw SQL execution, not sqlx migrations).
+- There is a hard iteration limit: `llm.max_agent_iterations` defaults to `20`.
+- WebSocket chat uses real token streaming via `complete_stream()`.
+- Optional self-reflection is supported via `kg_llm` when `llm.enable_self_reflection = true`.
+- Scheduler tools get `__conversation_id` injected before execution.
+- The server tracks active conversations to avoid concurrent processing of the same conversation.
 
-Tables: `conversations`, `messages`, `memory` (FTS5 virtual table), `memory_metadata`.
+### Background Event Loop
 
-All IDs are UUID v4 stored as TEXT. All timestamps are RFC3339 TEXT.
+[`src/event_loop.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/src/event_loop.rs) is a real background worker. It:
 
-### LLM Client (`jossie-llm`)
+- polls integrations that implement `poll()`
+- processes queued `integration_events`
+- executes due scheduled tasks
+- delivers queued out-of-band messages
 
-Uses OpenAI's Responses API. Two modes:
-- `complete()` — non-streaming, returns `(String, Vec<ToolCall>)`
-- `complete_stream()` — SSE streaming via `mpsc::Sender<StreamEvent>`, accumulates `response.function_call_arguments.*` events
+Important caveat: the event loop is only started from [`src/main.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/src/main.rs) when Telegram is configured, and proactive notifications are currently delivered through Telegram chat links.
 
-History is serialized as Responses API input items (`message`, `function_call`, `function_call_output`).
+## Database Reality
 
-### HTTP API (`jossie-server`)
+SQLite schema is embedded in [`crates/jossie-db/migrations.sql`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-db/migrations.sql) and applied by `Database::migrate()` in [`crates/jossie-db/src/lib.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-db/src/lib.rs).
 
-All routes require `Authorization: Bearer <token>` header (configured in `config.toml`).
+Current schema includes:
 
-| Route | Method | Description |
+- `conversations`
+- `messages`
+- `memory` (FTS5)
+- `memory_metadata`
+- `telegram_chats`
+- `integration_settings`
+- `integration_accounts`
+- `integration_events`
+- `graph_nodes`
+- `graph_edges`
+- `scheduled_tasks`
+- `out_of_band_messages`
+- `conversation_summaries`
+
+Do not assume all IDs or timestamps follow one format. Conversations/messages/tasks/events are generally app-generated UUID strings, but some keys are arbitrary strings and Telegram chat IDs are integers. Some timestamps are written as RFC3339 by application code, while schema defaults still use SQLite `datetime('now')`.
+
+## HTTP API And Frontends
+
+The router is assembled in [`crates/jossie-server/src/lib.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-server/src/lib.rs).
+
+Authentication:
+
+- Protected routes accept `Authorization: Bearer <token>`.
+- The auth middleware also accepts `?token=...`, mainly for WebSockets/browser usage.
+- `/api/health` and `/oauth/callback` are public.
+- `/setup/google` is auth-protected.
+- Static frontend files from `frontend/dist` are served as the fallback service.
+
+Current API surface:
+
+| Route | Method | Notes |
 |---|---|---|
-| `/api/chat` | POST | Sync chat. Body: `{"message": "...", "conversation_id": "..."}` |
-| `/api/chat/stream` | GET | WebSocket upgrade. Send JSON frames, receive streaming responses |
-| `/api/conversations` | GET | List all conversations |
-| `/api/conversations/{id}/messages` | GET | Get messages for a conversation |
+| `/api/chat` | `POST` | non-streaming chat |
+| `/api/chat/stream` | `GET` | WebSocket streaming chat |
+| `/api/conversations` | `GET` | list conversations |
+| `/api/conversations/{id}/messages` | `GET` | optional `?limit=` |
+| `/api/graph` | `GET` | returns graph nodes/edges, optional `?limit=` |
+| `/api/onboarding` | `GET` | integration onboarding status |
+| `/api/config/accounts` | `GET`, `POST` | list/add integration accounts |
+| `/api/config/accounts/{id}` | `DELETE` | delete integration account |
+| `/setup/google` | `GET` | start Google OAuth |
+| `/oauth/callback` | `GET` | complete Google OAuth |
+| `/api/health` | `GET` | DB health |
 
-WebSocket messages use the same `ChatRequest` schema. Responses are JSON with `{"type": "message", ...}` or `{"type": "tool_result", ...}`.
+Errors are already returned as structured JSON from [`crates/jossie-server/src/errors.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-server/src/errors.rs).
 
-## What's Implemented vs Stubbed
+## Config Reality
 
-| Crate | Status | Notes |
+The committed config file is [`config.sample.toml`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/config.sample.toml). The binary reads `config.toml` from the current working directory.
+
+Current top-level config sections in [`crates/jossie-core/src/config.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-core/src/config.rs):
+
+- `[server]`
+- `[llm]`
+- `[database]`
+- `[telegram]`
+- `[email]`
+- `[google]`
+- `[http]`
+
+Important mismatch in current source:
+
+- [`config.sample.toml`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/config.sample.toml) still documents `server.public_base_url`.
+- [`src/main.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/src/main.rs) and the Google onboarding flow still reference `config.server.public_base_url`.
+- [`crates/jossie-core/src/config.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-core/src/config.rs) does not currently define that field on `ServerConfig`.
+
+That mismatch is real and currently breaks `cargo check` for the root binary.
+
+Environment overrides implemented in [`src/main.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/src/main.rs):
+
+- `JOSSIE_SERVER_AUTH_TOKEN`
+- `JOSSIE_SERVER_PUBLIC_BASE_URL`
+- `JOSSIE_LLM_API_KEY`
+- `JOSSIE_LLM_SYSTEM_PROMPT`
+- `JOSSIE_LLM_MAX_CONTEXT_MESSAGES`
+- `JOSSIE_LLM_EVENT_MAX_CONTEXT_MESSAGES`
+- `JOSSIE_TELEGRAM_BOT_TOKEN`
+- `JOSSIE_EMAIL_USERNAME`
+- `JOSSIE_EMAIL_PASSWORD`
+- `JOSSIE_EMAIL_IMAP_HOST`
+- `JOSSIE_EMAIL_SMTP_HOST`
+- `JOSSIE_GOOGLE_CLIENT_ID`
+- `JOSSIE_GOOGLE_CLIENT_SECRET`
+- `JOSSIE_GOOGLE_REFRESH_TOKEN`
+
+Other runtime knobs worth knowing:
+
+- `JOSSIE_LOG_JSON=1` switches tracing output to JSON.
+- `llm.kg_model` can use a cheaper second model for graph extraction/self-reflection.
+- `server.cors_origins` and `server.max_request_body_bytes` are active.
+
+## Integration Status
+
+| Integration | Status | Notes |
 |---|---|---|
-| jossie-core | Complete | Types, traits, config, registry |
-| jossie-llm | Complete | Streaming + non-streaming |
-| jossie-db | Complete | CRUD + FTS5 memory |
-| jossie-server | Complete | HTTP, WS, auth, agent loop |
-| jossie-integration-memory | Complete | `memory_save`, `memory_search` |
-| jossie-integration-email | **Stub** | Tool defs exist, `execute()` returns "not yet implemented" |
-| jossie-integration-google | **Stub** | Tool defs exist, `execute()` returns "not yet implemented" |
-| jossie-telegram | **Stub** | Just a struct with `is_configured()` |
+| Memory | Implemented | FTS-backed long-term memory |
+| Graph | Implemented | node/edge storage + exploration/search tools |
+| Email | Implemented | generic IMAP/SMTP accounts; onboarding checks for configured/default accounts |
+| Google | Implemented | OAuth flow, account storage, Gmail/Drive/Calendar tools, polling for Gmail/calendar events |
+| Browser | Implemented | headless page reading and search; useful for JS-heavy pages |
+| HTTP | Implemented | outbound requests with host/IP validation and optional allow-list |
+| Scheduler | Implemented | scheduled agent runs + queued user notifications |
+| Telegram | Implemented | teloxide bot, chat linking, message splitting, background task trigger path |
 
-## What to Work On Next
+## Testing And Build
 
-Roughly in priority order:
+The workspace is not test-free anymore.
 
-### 1. Tests
-There are zero tests. Start with:
-- Unit tests for `IntegrationRegistry` (register, dispatch, unknown tool)
-- Unit tests for `Database` (CRUD operations, memory FTS)
-- Integration test for the agent loop (mock LLM responses)
+At the time this guide was updated:
 
-### 2. Email Integration (`jossie-integration-email`)
-Implement the `execute()` method. Recommended crates:
-- `async-imap` for IMAP (search, read)
-- `lettre` for SMTP (send)
-- Add tools: `email_search`, `email_read`, `email_send`, `email_list_folders`
+- `cargo test --workspace -q` passes
+- `cargo check -q` fails in the root binary because `src/main.rs` references `server.public_base_url`, but `ServerConfig` does not define it
 
-### 3. Google Integration (`jossie-integration-google`)
-Implement OAuth2 token flow and API calls. Recommended crates:
-- `oauth2` for token management
-- `reqwest` for API calls (already a workspace dep)
-- Add tools: `gmail_search`, `gmail_read`, `gmail_send`, `drive_search`, `drive_read`
+There are unit tests across `jossie-core`, `jossie-db`, `jossie-llm`, `jossie-server`, `jossie-integration-memory`, `jossie-integration-email`, `jossie-integration-http`, and `src/event_loop.rs`.
 
-### 4. Telegram Bot (`jossie-telegram`)
-Wire up `teloxide` as a chat frontend:
-- Map Telegram `chat_id` to a `conversation_id`
-- Reuse the agent loop from `jossie-server`
-- Register and start the bot in `main.rs`
-
-### 5. Streaming in WebSocket Handler
-The WS handler currently uses non-streaming `complete()` in the agent loop. For the final assistant response, switch to `complete_stream()` and pipe `StreamEvent::Delta` frames to the WebSocket for real-time token streaming.
-
-### 6. System Prompt
-There's no system prompt injected into conversations. Add a configurable system prompt (in `config.toml` or per-conversation) prepended as a `Role::System` message.
-
-### 7. Error Handling Improvements
-- Add an iteration limit to the agent loop to prevent infinite tool-calling loops
-- Return structured error JSON from HTTP endpoints instead of bare 500s
-- Use `JossieError` more consistently (it exists but isn't used much)
-
-### 8. Web UI
-Serve a static web UI from axum. Consider a simple HTML/JS chat interface that connects via WebSocket.
-
-## Development Workflow
-
-### Committing Changes
-
-After making changes to the codebase, you MUST commit them using `git commit`. Ensure that:
-1. All relevant files are added (`git add`).
-2. The commit message is descriptive and follows project conventions (if any).
-3. Changes are committed incrementally where appropriate (e.g., separate commits for different features or bug fixes).
-
-## Build & Run
+Useful commands:
 
 ```sh
-cargo build                    # compile workspace
-cargo check                    # type-check only (faster)
-cargo test                     # run tests (none exist yet)
-cargo run                      # start server (needs config.toml with valid settings)
+cargo check
+cargo test --workspace
+cargo run
+cd frontend && npm ci && npm run build
 ```
 
-The server reads `config.toml` from the current working directory. Set `RUST_LOG=debug` for verbose logging.
+If you want the served web UI to work, build `frontend/dist` first.
 
 ## Conventions
 
-- Edition 2024, resolver 3
-- All shared deps are declared in `[workspace.dependencies]` and referenced with `{ workspace = true }`
-- `async-trait` for async trait methods
-- `anyhow::Result` for fallible functions, `thiserror` for typed errors
-- UUIDs as `uuid::Uuid`, timestamps as `chrono::DateTime<Utc>`
-- `tracing` for structured logging (not `log`)
-- `serde` derive for all API-facing types
+- Rust edition `2024`, resolver `3`
+- Shared dependencies live in `[workspace.dependencies]`
+- `tracing` is used for logs
+- `anyhow::Result` is common across integration and service boundaries
+- `serde` derives are used for API-facing and stored types
+- `async-trait` is used for integration traits
+
+## Working Rules For Agents
+
+- Explore source before trusting older docs. `README.md`, `TODO.md`, and `WEB_API.md` still contain stale claims.
+- Prefer updating the real behavior or updating the docs, but do not preserve known-false descriptions.
+- After making changes, commit them with `git commit`.
+- If a task affects the browser UI, remember the Rust server serves built assets from `frontend/dist`, not raw Vite sources.
