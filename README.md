@@ -220,33 +220,32 @@ You can override any config value with environment variables:
 ## 🔌 Available Integrations
 
 ### Memory (`jossie-integration-memory`)
-- **Tools**: `memory_save`, `memory_search`
+- **Tools**: `memory_save`, `memory_search`, `memory_list_keys`, `memory_list_all`
 - **Description**: Full-text search (FTS5) memory system
 - **Storage**: SQLite `memory` table
 - **Usage**: Jossie automatically saves important details and searches memory when needed
 
 ### Knowledge Graph (`jossie-integration-graph`)
-- **Tools**: `graph_upsert_node`, `graph_add_relation`, `graph_search`
+- **Tools**: `graph_upsert_node`, `graph_add_relation`, `graph_search`, `graph_list_by_type`, `graph_explore_connections`
 - **Description**: Entity-relationship knowledge graph
 - **Storage**: SQLite `graph_nodes` and `graph_edges` tables
 - **Auto-extraction**: Jossie automatically extracts entities and relationships after each conversation turn
-- **Visualization**: Visit `/graph` to see the knowledge graph
+- **Visualization**: The frontend fetches graph data from `GET /api/graph`
 
 ### Email (`jossie-integration-email`)
-- **Tools**: `email_search`, `email_read`, `email_send`, `email_list_folders`
+- **Tools**: `email_list_accounts`, `email_search`, `email_read`, `email_send`, `email_list_folders`
 - **Description**: IMAP/SMTP email integration
 - **Supported**: Multiple email accounts
-- **Auto-notifications**: Jossie is automatically notified of new emails
 
 ### Google (`jossie-integration-google`)
-- **Tools**: `gmail_search`, `gmail_read`, `gmail_send`, `calendar_list`, `calendar_create`, `calendar_update`, `drive_search`, `drive_read`
+- **Tools**: `google_list_accounts`, `gmail_search`, `gmail_read`, `gmail_send`, `drive_search`, `drive_read`, `drive_list_files`, `calendar_list_calendars`, `calendar_list_events`, `calendar_create_event`
 - **Description**: Gmail, Google Calendar, and Google Drive
 - **OAuth**: Setup via `/setup/google` endpoint
 - **Multi-account**: Supports multiple Google accounts
 - **Auto-notifications**: Jossie monitors Gmail and Calendar events
 
 ### Browser (`jossie-integration-browser`)
-- **Tools**: `browser_read_page`
+- **Tools**: `browser_read_page`, `browser_search`
 - **Description**: Headless Chrome-based web browsing
 - **Features**: Extracts content from any website, even JavaScript-heavy sites
 - **Format**: Returns markdown-formatted content
@@ -259,7 +258,7 @@ You can override any config value with environment variables:
 - **Domain restrictions**: Configurable via `allowed_domains`
 
 ### Scheduler (`jossie-integration-scheduler`)
-- **Tools**: `schedule_task`, `schedule_recurring_task`, `send_message`
+- **Tools**: `schedule_task`, `schedule_recurring_task`, `cancel_scheduled_task`, `list_scheduled_tasks`, `send_user_message`
 - **Description**: Schedule Jossie to run autonomous tasks
 - **One-time tasks**: Run at a specific time (ISO 8601 format)
 - **Recurring tasks**: Run at intervals (in seconds)
@@ -275,10 +274,12 @@ See [WEB_API.md](WEB_API.md) for full HTTP and WebSocket API documentation.
 - `POST /api/chat` - Send a message (blocking)
 - `GET /api/conversations` - List all conversations
 - `GET /api/conversations/{id}/messages` - Get conversation history
+- `GET /api/graph` - Get knowledge graph nodes and edges
 - `GET /api/onboarding` - Check integration status
 - `GET /api/config/accounts` - List configured accounts
 - `POST /api/config/accounts` - Add new account
 - `DELETE /api/config/accounts/{id}` - Remove account
+- `GET /api/health` - Public health check
 
 #### WebSocket
 - `ws://localhost:3000/api/chat/stream?token=YOUR_TOKEN`

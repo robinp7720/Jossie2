@@ -26,6 +26,7 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub auth_token: String,
+    // Public external base URL used for OAuth callback generation.
     #[serde(default)]
     pub public_base_url: Option<String>,
     #[serde(default)]

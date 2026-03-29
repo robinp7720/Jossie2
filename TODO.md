@@ -1,241 +1,43 @@
 # Jossie2 — TODO
 
-Items are grouped by area. Each item includes enough context to implement without reading the full codebase first. Check off items as they're completed.
+Current backlog only. Completed historical work has been removed so this file reflects the repository as it exists now.
 
----
+## High Priority
 
-## Tests
+- [ ] Add HTTP endpoint integration tests in `crates/jossie-server`
+  Cover auth middleware, `POST /api/chat`, `GET /api/conversations`, `GET /api/conversations/{id}/messages`, and the onboarding/accounts endpoints.
 
-There are currently zero tests anywhere in the workspace.
+- [ ] Add an agent-loop integration test with a mock LLM
+  The loop now includes tool execution, context-window trimming, self-reflection, and streaming paths. It needs explicit end-to-end coverage.
 
-- [ ] **jossie-core: IntegrationRegistry unit tests**
-  File: `crates/jossie-core/src/integration.rs`
-  - Test `register()` + `all_tool_definitions()` returns correct tools
-  - Test `execute()` dispatches to the right integration
-  - Test `execute()` with unknown tool name returns `is_error: true` result
-  - Create a mock `Integration` impl for testing
+- [ ] Decouple the background event loop from Telegram startup
+  `src/main.rs` currently starts `src/event_loop.rs` only when Telegram is configured, even though scheduled tasks and integration polling are not inherently Telegram-specific.
 
-- [ ] **jossie-core: Role round-trip tests**
-  File: `crates/jossie-core/src/types.rs`
-  - Test `Role::as_str()` and `FromStr` round-trip for all variants
-  - Test serde serialization matches `rename_all = "lowercase"`
+- [ ] Define delivery behavior for proactive notifications when Telegram is not configured
+  Right now integration events and OOB notifications are routed through Telegram-linked conversations. Decide whether web-only users should get in-app delivery, persisted inbox-style notifications, or some other channel.
 
-- [ ] **jossie-db: Database CRUD tests**
-  File: `crates/jossie-db/src/lib.rs`
-  - Use an in-memory SQLite (`sqlite::memory:`) for tests
-  - Test `create_conversation` + `get_conversation` + `list_conversations`
-  - Test `save_message` + `get_messages` ordering
-  - Test `memory_save` + `memory_search` FTS matching
-  - Test `memory_save` overwrites existing key
+## Testing
 
-- [ ] **jossie-llm: Request building tests**
-  File: `crates/jossie-llm/src/lib.rs`
-  - `build_messages()` and `build_tools()` are private. Either make them `pub(crate)` or test via a mock HTTP server.
-  - Test that empty tool list produces `tools: None` in the request
-  - Test that `Role::Tool` messages always include `content` (even if empty)
+- [ ] Expand `jossie-db` tests to cover integration accounts, integration events, scheduled tasks, and graph queries
 
-- [ ] **jossie-server: HTTP endpoint tests**
-  File: `crates/jossie-server/src/lib.rs`
-  - Test auth middleware rejects missing/wrong Bearer token (returns 401)
-  - Test auth middleware accepts correct token
-  - Test `GET /api/conversations` returns empty list then populated list
-  - Test `POST /api/chat` end-to-end with a mock LLM (requires refactoring `LlmClient` behind a trait or using a local HTTP mock server like `wiremock`)
+- [ ] Add tests for Google OAuth callback and public base URL normalization in realistic handler-level flows
 
-- [ ] **jossie-integration-memory: Tool execution tests**
-  File: `crates/jossie-integration-memory/src/lib.rs`
-  - Test `execute("memory_save", ...)` then `execute("memory_search", ...)` returns saved content
-  - Test unknown tool name returns error
+- [ ] Add frontend smoke checks or a lightweight build/test step so the served `frontend/dist` contract is covered in CI
 
----
+## Docs
 
-## System Prompt
+- [ ] Keep `README.md`, `WEB_API.md`, and `AGENTS.md` aligned when integrations, routes, or startup behavior change
 
-There is no system prompt. Conversations start with the user's first message only.
+- [ ] Document the frontend build requirement more prominently
+  The Rust server serves `frontend/dist`, so a fresh checkout without a frontend build will not have a working UI.
 
-- [x] **Add configurable system prompt**
-  - Add `system_prompt: String` field to `LlmConfig` in `crates/jossie-core/src/config.rs`
-  - Add a default value in `config.toml` (e.g. "You are Jossie, a helpful assistant.")
-  - In `jossie-server/src/lib.rs`, in both `run_agent_loop()` and `handle_ws()`, prepend a `Role::System` message to the messages list before calling `llm.complete()`. Do NOT save it to the DB — inject it at call time.
+## Product / Architecture
 
----
+- [ ] Decide whether conversation summaries are active or dead code
+  The database schema includes `conversation_summaries`, but it is not obvious from the current top-level flow whether summarization is fully wired into normal operation.
 
-## Agent Loop Hardening
+- [ ] Review browser-search strategy
+  `jossie-integration-browser` relies on web scraping/search behavior that may be brittle against bot blocking. Decide whether to keep this path, harden it, or replace it.
 
-- [x] **Add iteration limit to agent loop**
-  Location: `crates/jossie-server/src/lib.rs`, functions `run_agent_loop()` and `handle_ws()`
-  Both contain `loop { ... }` with no bound. Add a configurable max (e.g. 10) and return an error or a "max iterations reached" message when exceeded.
-
-- [x] **Structured error responses from HTTP endpoints**
-  Currently `chat_handler`, `list_conversations`, `get_messages` return bare `StatusCode::INTERNAL_SERVER_ERROR`. Replace with `Json<ErrorResponse>` containing `{"error": "..."}`. Use a custom `IntoResponse` impl or axum error handling pattern.
-
----
-
-## Email Integration
-
-Crate: `crates/jossie-integration-email/`
-Current state: `Integration` trait is implemented.
-
-- [x] **Add `async-imap` and `lettre` dependencies**
-  Add to `crates/jossie-integration-email/Cargo.toml`:
-  ```toml
-  async-imap = "0.10"
-  async-native-tls = "0.5"
-  lettre = { version = "0.11", features = ["tokio1-native-tls", "builder"] }
-  ```
-
-- [x] **Implement IMAP connection management**
-  In `crates/jossie-integration-email/src/lib.rs`:
-  - Store full `EmailConfig` fields (host, port, username, password)
-  - Create an async method to connect to IMAP, login, and return a session
-  - Connections should be created per-call (simplest) or pooled (optimization)
-
-- [x] **Implement `email_search` tool**
-  - Connect to IMAP, SELECT INBOX (or specified folder)
-  - Run IMAP SEARCH command with the query
-  - Return list of matching message summaries (subject, from, date, UID)
-  - Limit results (e.g. 20)
-
-- [x] **Implement `email_read` tool**
-  - Add tool definition with parameter `uid: string`
-  - Fetch full message by UID, parse headers + body
-  - Return formatted text (from, to, subject, date, body)
-
-- [x] **Implement `email_send` tool**
-  - Use `lettre` to build and send message via SMTP
-  - Parameters: `to`, `subject`, `body` (already defined in tool schema)
-  - Return confirmation or error
-
-- [x] **Implement `email_list_folders` tool**
-  - Add tool definition (no parameters)
-  - List all IMAP mailboxes/folders
-  - Return as JSON array
-
----
-
-## Google Integration
-
-Crate: `crates/jossie-integration-google/`
-Current state: `Integration` trait is implemented.
-
-- [x] **Add OAuth2 dependencies**
-  Add to `crates/jossie-integration-google/Cargo.toml`:
-  ```toml
-  oauth2 = "5"
-  ```
-  `reqwest` is already a workspace dep. (Note: Implemented using manual `reqwest` calls for token refresh instead of `oauth2` crate).
-
-- [x] **Implement OAuth2 token management**
-  - Add `refresh_token: String` and `token_url: String` fields to `GoogleConfig` in `crates/jossie-core/src/config.rs`
-  - Implement token refresh flow: use `oauth2` crate to exchange refresh token for access token
-  - Cache access token, refresh when expired
-  - Store token state in the `GoogleIntegration` struct (behind a `tokio::sync::RwLock`)
-
-- [x] **Implement `gmail_search` tool**
-  - Call Gmail API: `GET https://gmail.googleapis.com/gmail/v1/users/me/messages?q={query}`
-  - Return list of message IDs + snippet
-
-- [x] **Implement `gmail_read` tool**
-  - Add tool definition with parameter `message_id: string`
-  - Call Gmail API: `GET https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}?format=full`
-  - Parse and return headers + decoded body
-
-- [x] **Implement `gmail_send` tool**
-  - Add tool definition with parameters `to`, `subject`, `body`
-  - Build RFC 2822 message, base64url encode
-  - Call Gmail API: `POST https://gmail.googleapis.com/gmail/v1/users/me/messages/send`
-
-- [x] **Implement `drive_search` tool**
-  - Call Drive API: `GET https://www.googleapis.com/drive/v3/files?q={query}`
-  - Return file names, IDs, mimeTypes
-
-- [x] **Implement `drive_read` tool**
-  - Add tool definition with parameter `file_id: string`
-  - Call Drive API to export/download file content
-  - For Google Docs, export as plain text; for other files, return metadata
-
----
-
-## Telegram Bot
-
-Crate: `crates/jossie-telegram/`
-Current state: Empty struct with `is_configured()` only.
-
-- [x] **Add `teloxide` dependency**
-  Add to `crates/jossie-telegram/Cargo.toml`:
-  ```toml
-  teloxide = { version = "0.13", features = ["macros"] }
-  ```
-  Also add `jossie-server` or extract the agent loop into a shared location.
-
-- [x] **Implement bot message handler**
-  - On incoming text message, map Telegram `chat_id` (i64) to a `conversation_id` (Uuid)
-  - Maintain a persistent mapping (add a `telegram_chats` table to the DB schema, or use an in-memory HashMap)
-  - Create conversation if first message from this chat_id
-  - Run the agent loop (reuse `run_agent_loop` from jossie-server, or extract it into a shared crate)
-  - Send the assistant's response back as a Telegram message
-
-- [x] **Wire bot startup into main.rs**
-  - If `config.telegram.bot_token` is non-empty, spawn the bot as a background tokio task
-  - The bot needs access to the same `Database`, `LlmClient`, and `IntegrationRegistry`
-
-- [x] **Handle long responses**
-  Telegram messages have a 4096 character limit. Split long responses into multiple messages.
-
----
-
-## WebSocket Streaming
-
-Current state: The WebSocket handler in `jossie-server/src/lib.rs` (`handle_ws()`) uses non-streaming `llm.complete()`. It works but doesn't stream tokens.
-
-- [x] **Stream final assistant response via WebSocket**
-  In `handle_ws()`, when the agent loop reaches the final response (no tool calls):
-  - Use `llm.complete_stream()` instead of `complete()`
-  - Spawn a task that reads from the `mpsc::Receiver<StreamEvent>`
-  - For each `StreamEvent::Delta(text)`, send a WebSocket frame: `{"type": "delta", "content": "..."}`
-  - On `StreamEvent::Done`, send `{"type": "done"}` and save the accumulated content to DB
-  - On `StreamEvent::ToolCalls(...)`, continue the agent loop as before
-
----
-
-## Web UI
-
-There is no frontend. The server only exposes API endpoints.
-
-- [x] **Create minimal chat UI**
-  - Add a static file serving route in `jossie-server` (e.g. `GET /` serves `static/index.html`)
-  - Build a single-page HTML/JS chat interface:
-    - Text input + send button
-    - Message list showing user and assistant messages
-    - Connect via WebSocket to `/api/chat/stream`
-    - Display streaming deltas as they arrive
-    - Show tool call activity (optional)
-  - Store static files in `crates/jossie-server/static/` and include via `include_str!` or `tower-http::services::ServeDir`
-
----
-
-## Configuration & Deployment
-
-- [x] **Support env var overrides for secrets**
-  `config.toml` contains `api_key`, `auth_token`, `password` etc. in plain text. Support environment variable overrides (e.g. `JOSSIE_LLM_API_KEY`) so secrets don't need to be in the file. Either use a crate like `config` or manually check env vars in `main.rs` after loading the TOML.
-
-- [x] **Add `.env` file support**
-  Add `dotenvy` to workspace deps. Call `dotenvy::dotenv().ok()` at the top of `main()`.
-
-- [x] **Dockerfile**
-  Multi-stage build: compile with `rust:latest`, run with `debian:bookworm-slim`. Copy binary + config.toml.
-
----
-
-## Code Quality
-
-- [ ] **Suppress or fix the one compiler warning**
-  In `crates/jossie-llm/src/lib.rs:219`, the assignment `accumulated_tool_calls = Vec::new()` after sending tool calls is dead code because the function returns on the next line. Remove the reassignment.
-
-- [ ] **Use `JossieError` consistently**
-  `crates/jossie-core/src/error.rs` defines `JossieError` but nothing uses it — everything uses `anyhow::Result`. Decide whether to adopt `JossieError` at crate boundaries (recommended for `jossie-server` HTTP responses) or remove it.
-
-- [ ] **Extract agent loop into shared code**
-  `run_agent_loop()` lives in `jossie-server` but `jossie-telegram` will need the same logic. Extract it into `jossie-core` or a new `jossie-agent` crate that depends on core, llm, and db.
-
-- [ ] **Deduplicate migration SQL**
-  The schema exists in two places: `crates/jossie-db/migrations.sql` (used at runtime) and `migrations/001_init.sql` (unused). Delete the `migrations/` directory or switch to sqlx's migration system.
+- [ ] Review HTTP integration policy defaults
+  Confirm whether the current combination of `allowed_domains` and SSRF-style IP/host validation matches the intended production threat model.

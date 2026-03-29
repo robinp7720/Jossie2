@@ -166,14 +166,6 @@ Current top-level config sections in [`crates/jossie-core/src/config.rs`](/home/
 - `[google]`
 - `[http]`
 
-Important mismatch in current source:
-
-- [`config.sample.toml`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/config.sample.toml) still documents `server.public_base_url`.
-- [`src/main.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/src/main.rs) and the Google onboarding flow still reference `config.server.public_base_url`.
-- [`crates/jossie-core/src/config.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-core/src/config.rs) does not currently define that field on `ServerConfig`.
-
-That mismatch is real and currently breaks `cargo check` for the root binary.
-
 Environment overrides implemented in [`src/main.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/src/main.rs):
 
 - `JOSSIE_SERVER_AUTH_TOKEN`
@@ -217,7 +209,7 @@ The workspace is not test-free anymore.
 At the time this guide was updated:
 
 - `cargo test --workspace -q` passes
-- `cargo check -q` fails in the root binary because `src/main.rs` references `server.public_base_url`, but `ServerConfig` does not define it
+- `cargo check -q` passes
 
 There are unit tests across `jossie-core`, `jossie-db`, `jossie-llm`, `jossie-server`, `jossie-integration-memory`, `jossie-integration-email`, `jossie-integration-http`, and `src/event_loop.rs`.
 
