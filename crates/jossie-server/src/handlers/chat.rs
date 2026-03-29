@@ -1,9 +1,10 @@
-use crate::agent::{AgentStreamEvent, run_agent_loop, run_agent_loop_streaming};
+use crate::agent::{run_agent_loop, run_agent_loop_streaming};
 use crate::errors::AppError;
+use crate::events::persist_message;
 use crate::state::AppState;
 use axum::{
     Json,
-    extract::{State, WebSocketUpgrade, ws},
+    extract::{Query, State, WebSocketUpgrade, ws},
     response::IntoResponse,
 };
 use jossie_core::types::{Message, Role};
@@ -34,7 +35,7 @@ pub async fn chat_handler(
     };
 
     let user_msg = Message::new(conv_id, Role::User, req.message);
-    state.db.save_message(&user_msg).await?;
+    persist_message(&state, &user_msg).await?;
 
     let response = run_agent_loop(&state, conv_id).await?;
 
@@ -49,6 +50,19 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(state, socket))
+}
+
+#[derive(Deserialize)]
+pub struct EventsWsQuery {
+    pub conversation_id: Option<Uuid>,
+}
+
+pub async fn events_ws_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<EventsWsQuery>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_events_ws(state, socket, query.conversation_id))
 }
 
 async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
@@ -82,7 +96,7 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
         tracing::info!("Processing message for conversation {}", conv_id);
 
         let user_msg = Message::new(conv_id, Role::User, req.message);
-        if state.db.save_message(&user_msg).await.is_err() {
+        if persist_message(&state, &user_msg).await.is_err() {
             continue;
         }
 
@@ -93,23 +107,55 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
         });
 
         while let Some(event) = event_rx.recv().await {
-            let ws_msg = match event {
-                AgentStreamEvent::Delta(delta) => {
-                    serde_json::json!({"type": "delta", "content": delta})
-                }
-                AgentStreamEvent::ToolResult { tool, result } => {
-                    serde_json::json!({"type": "tool_result", "tool": tool, "result": result})
-                }
-                AgentStreamEvent::Done { conversation_id } => {
-                    serde_json::json!({"type": "done", "conversation_id": conversation_id})
-                }
-                AgentStreamEvent::Error(e) => {
-                    serde_json::json!({"type": "error", "error": e})
-                }
+            let ws_msg = match serde_json::to_value(event) {
+                Ok(v) => v,
+                Err(e) => serde_json::json!({"type": "error", "error": e.to_string()}),
             };
             let _ = socket
                 .send(ws::Message::Text(ws_msg.to_string().into()))
                 .await;
+        }
+    }
+}
+
+async fn handle_events_ws(
+    state: Arc<AppState>,
+    mut socket: ws::WebSocket,
+    conversation_filter: Option<Uuid>,
+) {
+    let mut rx = state.subscribe_events();
+
+    loop {
+        tokio::select! {
+            event = rx.recv() => {
+                let Ok(event) = event else {
+                    continue;
+                };
+                if let Some(filter) = conversation_filter {
+                    if event.conversation_id() != filter {
+                        continue;
+                    }
+                }
+
+                let payload = match serde_json::to_string(&event) {
+                    Ok(payload) => payload,
+                    Err(e) => {
+                        tracing::warn!("Failed to serialize server event: {e}");
+                        continue;
+                    }
+                };
+
+                if socket.send(ws::Message::Text(payload.into())).await.is_err() {
+                    break;
+                }
+            }
+            maybe_msg = futures::StreamExt::next(&mut socket) => {
+                match maybe_msg {
+                    Some(Ok(ws::Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
         }
     }
 }

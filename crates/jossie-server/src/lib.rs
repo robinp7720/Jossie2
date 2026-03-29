@@ -1,10 +1,12 @@
 pub mod agent;
 pub mod errors;
+pub mod events;
 pub mod handlers;
 pub mod middleware;
 pub mod state;
 
 pub use agent::{prepend_system_prompt, run_agent_loop};
+pub use events::ServerEvent;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
@@ -40,6 +42,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Chat
         .route("/api/chat", post(handlers::chat::chat_handler))
         .route("/api/chat/stream", get(handlers::chat::ws_handler))
+        .route("/api/events", get(handlers::chat::events_ws_handler))
         // Conversations
         .route(
             "/api/conversations",
@@ -48,6 +51,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/api/conversations/{id}/messages",
             get(handlers::conversations::get_messages),
+        )
+        .route(
+            "/api/conversations/{id}/cancel",
+            post(handlers::conversations::cancel_conversation_run),
         )
         .route("/api/graph", get(handlers::graph::graph_handler))
         // Config / Onboarding

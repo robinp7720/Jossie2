@@ -106,6 +106,15 @@ export const deleteAccount = (config: ApiConfig, accountId: string) =>
     method: 'DELETE',
   })
 
+export const cancelConversation = (config: ApiConfig, conversationId: string) =>
+  request<{ conversation_id: string; status: string }>(
+    config,
+    `/api/conversations/${conversationId}/cancel`,
+    {
+      method: 'POST',
+    },
+  )
+
 export const buildWebSocketUrl = (config: ApiConfig, path: string) => {
   const base = stripTrailingSlash(config.baseUrl)
   const wsBase = base.startsWith('https://')

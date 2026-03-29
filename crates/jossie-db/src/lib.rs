@@ -9,6 +9,20 @@ pub struct Database {
 }
 
 impl Database {
+    fn conversation_title_from_content(content: &str) -> Option<String> {
+        let single_line = content.split_whitespace().collect::<Vec<_>>().join(" ");
+        let trimmed = single_line.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let mut title = trimmed.chars().take(72).collect::<String>();
+        if trimmed.len() > 72 {
+            title.push_str("...");
+        }
+        Some(title)
+    }
+
     pub async fn new(url: &str) -> anyhow::Result<Self> {
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
@@ -112,6 +126,30 @@ impl Database {
             .bind(&created)
             .execute(&self.pool)
             .await?;
+
+        sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
+            .bind(&created)
+            .bind(&conv_str)
+            .execute(&self.pool)
+            .await?;
+
+        if msg.role == Role::User && msg.name.is_none() {
+            if let Some(title) = Self::conversation_title_from_content(&msg.content) {
+                sqlx::query(
+                    "UPDATE conversations
+                     SET title = CASE
+                         WHEN title IS NULL OR trim(title) = '' THEN ?
+                         ELSE title
+                     END
+                     WHERE id = ?",
+                )
+                .bind(title)
+                .bind(&conv_str)
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+
         Ok(())
     }
 

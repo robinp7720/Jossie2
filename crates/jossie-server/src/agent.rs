@@ -1,3 +1,4 @@
+use crate::events::{ServerEvent, persist_message, preview_text};
 use crate::state::AppState;
 use jossie_core::types::{Message, Role};
 use jossie_db::{IntegrationEvent, MemoryKeyInfo};
@@ -5,6 +6,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 // --- Goal Tracking (#4) ---
@@ -178,12 +180,106 @@ async fn claim_conversation(state: &AppState, conv_id: Uuid) -> anyhow::Result<(
     if !active.insert(conv_id) {
         anyhow::bail!("Conversation {} is already being processed", conv_id);
     }
+    drop(active);
+    state.clear_cancel(conv_id).await;
     Ok(())
 }
 
 async fn release_conversation(state: &AppState, conv_id: Uuid) {
     let mut active = state.active_conversations.write().await;
     active.remove(&conv_id);
+    drop(active);
+    state.clear_cancel(conv_id).await;
+}
+
+fn build_tools_for_options(
+    state: &AppState,
+    options: &AgentRunOptions,
+) -> Vec<jossie_core::ToolDefinition> {
+    let mut tools = state.registry.all_tool_definitions();
+    if !options.allow_schedule_management {
+        tools.retain(|tool| tool.name != "schedule_task" && tool.name != "schedule_recurring_task");
+    }
+    if !options.allow_oob_messages {
+        tools.retain(|tool| tool.name != "send_user_message");
+    }
+    tools
+}
+
+async fn prepare_run_context(
+    state: &AppState,
+    conv_id: Uuid,
+    options: &AgentRunOptions,
+) -> anyhow::Result<(Vec<jossie_core::ToolDefinition>, Vec<Message>, String, GoalTracker, usize)> {
+    let tools = build_tools_for_options(state, options);
+
+    let mut messages = state
+        .db
+        .get_messages(conv_id, Some(state.max_context_messages))
+        .await?;
+
+    let last_user_msg = messages
+        .last()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+
+    sanitize_context_window(&mut messages);
+    maybe_summarize_context(state, conv_id, &mut messages).await;
+    prepend_system_prompt(state, &mut messages, Some(&last_user_msg)).await;
+    if options.scheduled_execution {
+        messages.insert(1, Message::transient(
+            Role::System,
+            "Scheduled execution mode: this turn was triggered by an existing schedule. Execute the task now and do not create new schedules unless the user explicitly asks in this same turn.".to_string(),
+        ).with_name("scheduled_execution_mode".to_string()));
+    }
+
+    Ok((
+        tools,
+        messages,
+        last_user_msg.clone(),
+        GoalTracker::new(&last_user_msg),
+        if state.enable_self_reflection { 1 } else { 0 },
+    ))
+}
+
+fn inject_goal_tracking_message(messages: &mut Vec<Message>, goal_tracker: &GoalTracker) {
+    messages.retain(|m| {
+        !(m.role == Role::System
+            && m.name.as_deref() == Some("goal_tracker")
+            && m.tool_call_id.is_none())
+    });
+    let tracking_msg = Message::transient(Role::System, goal_tracker.build_tracking_message())
+        .with_name("goal_tracker".to_string());
+    messages.insert(1, tracking_msg);
+}
+
+async fn emit_stream_event(
+    event_tx: Option<&tokio::sync::mpsc::Sender<ServerEvent>>,
+    event: ServerEvent,
+) {
+    if let Some(tx) = event_tx {
+        let _ = tx.send(event).await;
+    }
+}
+
+async fn ensure_run_not_cancelled(
+    state: &AppState,
+    conv_id: Uuid,
+    run_id: &str,
+    event_tx: Option<&tokio::sync::mpsc::Sender<ServerEvent>>,
+) -> anyhow::Result<()> {
+    if state.is_cancel_requested(conv_id).await {
+        emit_stream_event(
+            event_tx,
+            ServerEvent::RunCancelled {
+                conversation_id: conv_id,
+                run_id: run_id.to_string(),
+            },
+        )
+        .await;
+        anyhow::bail!("Conversation {} run cancelled", conv_id);
+    }
+    Ok(())
 }
 
 fn prepare_tool_calls_for_execution(
@@ -237,60 +333,17 @@ async fn run_agent_loop_inner(
     conv_id: Uuid,
     options: &AgentRunOptions,
 ) -> anyhow::Result<String> {
-    let mut tools = state.registry.all_tool_definitions();
-    if !options.allow_schedule_management {
-        tools.retain(|tool| tool.name != "schedule_task" && tool.name != "schedule_recurring_task");
-    }
-    if !options.allow_oob_messages {
-        tools.retain(|tool| tool.name != "send_user_message");
-    }
-
-    // Fetch only the relevant context window from DB
-    let mut messages = state
-        .db
-        .get_messages(conv_id, Some(state.max_context_messages))
-        .await?;
-
-    // Capture user message for extraction later
-    let last_user_msg = messages
-        .last()
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
-
-    sanitize_context_window(&mut messages);
-
-    // Summarize older context if it exceeds the threshold
-    maybe_summarize_context(state, conv_id, &mut messages).await;
-
-    prepend_system_prompt(state, &mut messages, Some(&last_user_msg)).await;
-    if options.scheduled_execution {
-        messages.insert(1, Message::transient(
-            Role::System,
-            "Scheduled execution mode: this turn was triggered by an existing schedule. Execute the task now and do not create new schedules unless the user explicitly asks in this same turn.".to_string(),
-        ).with_name("scheduled_execution_mode".to_string()));
-    }
-
-    let mut goal_tracker = GoalTracker::new(&last_user_msg);
-    let mut reflection_retries_remaining: usize = if state.enable_self_reflection { 1 } else { 0 };
+    let run_id = Uuid::new_v4().to_string();
+    let (tools, mut messages, last_user_msg, mut goal_tracker, mut reflection_retries_remaining) =
+        prepare_run_context(state, conv_id, options).await?;
 
     for _iteration in 0..state.max_agent_iterations {
-        // Inject goal tracking message after the first iteration
+        ensure_run_not_cancelled(state, conv_id, &run_id, None).await?;
         if _iteration > 0 {
-            // Remove previous goal tracking message if present
-            messages.retain(|m| {
-                !(m.role == Role::System
-                    && m.name.as_deref() == Some("goal_tracker")
-                    && m.tool_call_id.is_none())
-            });
-            // Insert goal tracking just after the system prompt
-            let tracking_msg =
-                Message::transient(Role::System, goal_tracker.build_tracking_message())
-                    .with_name("goal_tracker".to_string());
-            messages.insert(1, tracking_msg);
+            inject_goal_tracking_message(&mut messages, &goal_tracker);
         }
-        // --- DEBUG: Log Context Size ---
         let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
-        let est_tokens = total_chars / 4; // Rough estimate
+        let est_tokens = total_chars / 4;
         tracing::info!(
             "Agent Loop Iteration {}. Messages: {}. Total Chars: {}. Est Tokens: {}",
             _iteration,
@@ -312,12 +365,10 @@ async fn run_agent_loop_inner(
                 tracing::warn!("   Large Message: {} chars - {}", size, info);
             }
         }
-        // -------------------------------
 
         let (content, tool_calls) = state.llm.complete(&messages, &tools).await?;
 
         if tool_calls.is_empty() {
-            // Self-reflection: evaluate response quality before returning
             if reflection_retries_remaining > 0 {
                 if let Some(feedback) = self_reflect(state, &last_user_msg, &content).await {
                     reflection_retries_remaining -= 1;
@@ -336,9 +387,8 @@ async fn run_agent_loop_inner(
             }
 
             let msg = Message::new(conv_id, Role::Assistant, content.clone());
-            state.db.save_message(&msg).await?;
+            persist_message(state, &msg).await?;
 
-            // Trigger background extraction
             let db = state.db.clone();
             let kg_llm = state.kg_llm.clone();
             let assistant_reply = content.clone();
@@ -355,12 +405,11 @@ async fn run_agent_loop_inner(
         let tc_json = serde_json::to_value(&tool_calls)?;
         let assistant_msg =
             Message::new(conv_id, Role::Assistant, content.clone()).with_tool_calls(tc_json);
-        state.db.save_message(&assistant_msg).await?;
+        persist_message(state, &assistant_msg).await?;
         messages.push(assistant_msg);
 
         let prepared_calls = prepare_tool_calls_for_execution(&tool_calls, conv_id);
 
-        // Execute all tools concurrently
         let mut join_set = tokio::task::JoinSet::new();
         for (idx, call) in prepared_calls.into_iter().enumerate() {
             let registry = state.registry.clone();
@@ -375,10 +424,10 @@ async fn run_agent_loop_inner(
             });
         }
 
-        // Collect results preserving original order
         let mut results: Vec<(usize, jossie_core::ToolCall, jossie_core::ToolResult)> =
             Vec::with_capacity(tool_calls.len());
         while let Some(res) = join_set.join_next().await {
+            ensure_run_not_cancelled(state, conv_id, &run_id, None).await?;
             match res {
                 Ok(tuple) => results.push(tuple),
                 Err(e) => tracing::error!("Tool task panicked: {e}"),
@@ -395,7 +444,7 @@ async fn run_agent_loop_inner(
             let tool_msg = Message::new(conv_id, Role::Tool, result.content)
                 .with_tool_call_id(call.id.clone())
                 .with_name(call.name.clone());
-            state.db.save_message(&tool_msg).await?;
+            persist_message(state, &tool_msg).await?;
             messages.push(tool_msg);
         }
     }
@@ -406,28 +455,21 @@ async fn run_agent_loop_inner(
     )
 }
 
-/// Events emitted by the streaming agent loop.
-#[derive(Debug, Clone)]
-pub enum AgentStreamEvent {
-    /// A text delta from the LLM response.
-    Delta(String),
-    /// A tool was executed and produced a result.
-    ToolResult { tool: String, result: String },
-    /// The agent loop completed for this conversation.
-    Done { conversation_id: Uuid },
-    /// An error occurred.
-    Error(String),
-}
-
 /// Run the agent loop with streaming, sending events to the caller via an mpsc channel.
 /// This is the streaming counterpart of `run_agent_loop`.
 pub async fn run_agent_loop_streaming(
     state: &AppState,
     conv_id: Uuid,
-    event_tx: tokio::sync::mpsc::Sender<AgentStreamEvent>,
+    event_tx: tokio::sync::mpsc::Sender<ServerEvent>,
 ) {
     if let Err(e) = claim_conversation(state, conv_id).await {
-        let _ = event_tx.send(AgentStreamEvent::Error(e.to_string())).await;
+        let _ = event_tx
+            .send(ServerEvent::Error {
+                conversation_id: conv_id,
+                run_id: None,
+                error: e.to_string(),
+            })
+            .await;
         return;
     }
 
@@ -438,35 +480,62 @@ pub async fn run_agent_loop_streaming(
 async fn run_agent_loop_streaming_inner(
     state: &AppState,
     conv_id: Uuid,
-    event_tx: tokio::sync::mpsc::Sender<AgentStreamEvent>,
+    event_tx: tokio::sync::mpsc::Sender<ServerEvent>,
 ) {
-    let tools = state.registry.all_tool_definitions();
-    let mut messages = match state
-        .db
-        .get_messages(conv_id, Some(state.max_context_messages))
-        .await
-    {
-        Ok(m) => m,
-        Err(e) => {
-            let _ = event_tx.send(AgentStreamEvent::Error(e.to_string())).await;
-            return;
-        }
-    };
+    let run_id = Uuid::new_v4().to_string();
+    let options = AgentRunOptions::default();
+    let (tools, mut messages, last_user_msg, mut goal_tracker, mut reflection_retries_remaining) =
+        match prepare_run_context(state, conv_id, &options).await {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                let _ = event_tx
+                    .send(ServerEvent::Error {
+                        conversation_id: conv_id,
+                        run_id: Some(run_id.clone()),
+                        error: e.to_string(),
+                    })
+                    .await;
+                return;
+            }
+        };
 
-    let last_user_msg = messages
-        .last()
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
-
-    prepend_system_prompt(state, &mut messages, Some(&last_user_msg)).await;
+    emit_stream_event(
+        Some(&event_tx),
+        ServerEvent::RunStarted {
+            conversation_id: conv_id,
+            run_id: run_id.clone(),
+            scheduled: false,
+        },
+    )
+    .await;
 
     for iteration in 0..state.max_agent_iterations {
-        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(100);
+        if ensure_run_not_cancelled(state, conv_id, &run_id, Some(&event_tx))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        if iteration > 0 {
+            inject_goal_tracking_message(&mut messages, &goal_tracker);
+        }
+
+        emit_stream_event(
+            Some(&event_tx),
+            ServerEvent::AssistantThinking {
+                conversation_id: conv_id,
+                run_id: run_id.clone(),
+                iteration,
+            },
+        )
+        .await;
+
+        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(200);
         let llm = state.llm.clone();
         let messages_clone = messages.clone();
         let tools_clone = tools.clone();
 
-        tokio::spawn(async move {
+        let stream_task = tokio::spawn(async move {
             if let Err(e) = llm
                 .complete_stream(&messages_clone, &tools_clone, stream_tx)
                 .await
@@ -478,23 +547,58 @@ async fn run_agent_loop_streaming_inner(
         let mut full_content = String::new();
         let mut tool_calls = Vec::new();
         let mut stream_failed = false;
+        let mut done_received = false;
 
-        while let Some(event) = stream_rx.recv().await {
-            match event {
-                jossie_llm::StreamEvent::Delta(delta) => {
-                    full_content.push_str(&delta);
-                    let _ = event_tx.send(AgentStreamEvent::Delta(delta)).await;
+        while !done_received {
+            tokio::select! {
+                maybe_event = stream_rx.recv() => {
+                    match maybe_event {
+                        Some(jossie_llm::StreamEvent::Delta(delta)) => {
+                            full_content.push_str(&delta);
+                            emit_stream_event(
+                                Some(&event_tx),
+                                ServerEvent::AssistantDelta {
+                                    conversation_id: conv_id,
+                                    run_id: run_id.clone(),
+                                    content: delta,
+                                },
+                            ).await;
+                        }
+                        Some(jossie_llm::StreamEvent::ToolCalls(calls)) => {
+                            tool_calls = calls;
+                            done_received = true;
+                        }
+                        Some(jossie_llm::StreamEvent::Done) => {
+                            done_received = true;
+                        }
+                        Some(jossie_llm::StreamEvent::Error(e)) => {
+                            stream_failed = true;
+                            done_received = true;
+                            emit_stream_event(
+                                Some(&event_tx),
+                                ServerEvent::Error {
+                                    conversation_id: conv_id,
+                                    run_id: Some(run_id.clone()),
+                                    error: e,
+                                },
+                            ).await;
+                        }
+                        None => {
+                            done_received = true;
+                        }
+                    }
                 }
-                jossie_llm::StreamEvent::ToolCalls(calls) => {
-                    tool_calls = calls;
-                }
-                jossie_llm::StreamEvent::Done => {}
-                jossie_llm::StreamEvent::Error(e) => {
-                    stream_failed = true;
-                    let _ = event_tx.send(AgentStreamEvent::Error(e)).await;
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if state.is_cancel_requested(conv_id).await {
+                        stream_task.abort();
+                        let _ = ensure_run_not_cancelled(state, conv_id, &run_id, Some(&event_tx)).await;
+                        return;
+                    }
                 }
             }
         }
+
+        let _ = stream_task.await;
 
         if stream_failed {
             return;
@@ -502,11 +606,15 @@ async fn run_agent_loop_streaming_inner(
 
         if !tool_calls.is_empty() {
             if iteration + 1 >= state.max_agent_iterations {
-                let _ = event_tx
-                    .send(AgentStreamEvent::Error(
-                        "Max agent iterations reached".to_string(),
-                    ))
-                    .await;
+                emit_stream_event(
+                    Some(&event_tx),
+                    ServerEvent::Error {
+                        conversation_id: conv_id,
+                        run_id: Some(run_id.clone()),
+                        error: "Max agent iterations reached".to_string(),
+                    },
+                )
+                .await;
                 return;
             }
 
@@ -515,14 +623,32 @@ async fn run_agent_loop_streaming_inner(
                     .with_tool_calls(tc_json),
                 Err(_) => Message::new(conv_id, Role::Assistant, full_content.clone()),
             };
-            let _ = state.db.save_message(&assistant_msg).await;
+            let _ = persist_message(state, &assistant_msg).await;
             messages.push(assistant_msg);
 
             let prepared_calls = prepare_tool_calls_for_execution(&tool_calls, conv_id);
 
             let mut join_set = tokio::task::JoinSet::new();
             for (idx, call) in prepared_calls.into_iter().enumerate() {
+                emit_stream_event(
+                    Some(&event_tx),
+                    ServerEvent::ToolCalled {
+                        conversation_id: conv_id,
+                        run_id: run_id.clone(),
+                        call_id: call.id.clone(),
+                        tool: call.name.clone(),
+                        arguments_preview: preview_text(&call.arguments, 160),
+                    },
+                )
+                .await;
                 let registry = state.registry.clone();
+                let started_event = ServerEvent::ToolStarted {
+                    conversation_id: conv_id,
+                    run_id: run_id.clone(),
+                    call_id: call.id.clone(),
+                    tool: call.name.clone(),
+                };
+                emit_stream_event(Some(&event_tx), started_event).await;
                 join_set.spawn(async move {
                     let result = registry.execute(&call).await;
                     (idx, call, result)
@@ -532,6 +658,12 @@ async fn run_agent_loop_streaming_inner(
             let mut results: Vec<(usize, jossie_core::ToolCall, jossie_core::ToolResult)> =
                 Vec::with_capacity(tool_calls.len());
             while let Some(res) = join_set.join_next().await {
+                if state.is_cancel_requested(conv_id).await {
+                    join_set.abort_all();
+                    let _ =
+                        ensure_run_not_cancelled(state, conv_id, &run_id, Some(&event_tx)).await;
+                    return;
+                }
                 match res {
                     Ok(tuple) => results.push(tuple),
                     Err(e) => tracing::error!("Tool task panicked: {e}"),
@@ -540,47 +672,95 @@ async fn run_agent_loop_streaming_inner(
             results.sort_by_key(|(idx, _, _)| *idx);
 
             for (_, call, result) in results {
-                let _ = event_tx
-                    .send(AgentStreamEvent::ToolResult {
+                emit_stream_event(
+                    Some(&event_tx),
+                    ServerEvent::ToolFinished {
+                        conversation_id: conv_id,
+                        run_id: run_id.clone(),
+                        call_id: call.id.clone(),
                         tool: call.name.clone(),
-                        result: result.content.clone(),
-                    })
-                    .await;
+                        result_preview: preview_text(&result.content, 220),
+                        is_error: result.is_error,
+                    },
+                )
+                .await;
                 let tool_msg = Message::new(conv_id, Role::Tool, result.content)
                     .with_tool_call_id(call.id.clone())
                     .with_name(call.name.clone());
-                let _ = state.db.save_message(&tool_msg).await;
+                let _ = persist_message(state, &tool_msg).await;
                 messages.push(tool_msg);
             }
+            goal_tracker.record_tool_calls(&tool_calls);
             continue;
         }
 
-        // Final response — save and trigger extraction
+        if reflection_retries_remaining > 0 {
+            if let Some(feedback) = self_reflect(state, &last_user_msg, &full_content).await {
+                reflection_retries_remaining -= 1;
+                emit_stream_event(
+                    Some(&event_tx),
+                    ServerEvent::ReflectionRetry {
+                        conversation_id: conv_id,
+                        run_id: run_id.clone(),
+                        feedback: feedback.clone(),
+                    },
+                )
+                .await;
+                emit_stream_event(
+                    Some(&event_tx),
+                    ServerEvent::AssistantReset {
+                        conversation_id: conv_id,
+                        run_id: run_id.clone(),
+                        reason: "reflection_retry".to_string(),
+                    },
+                )
+                .await;
+                messages.push(Message::transient(Role::Assistant, full_content));
+                messages.push(Message::transient(
+                    Role::System,
+                    format!(
+                        "[SELF-REFLECTION FEEDBACK: Your response needs improvement. {}. Please revise your response.]",
+                        feedback
+                    ),
+                ));
+                continue;
+            }
+        }
+
         let assistant_msg = Message::new(conv_id, Role::Assistant, full_content);
-        let _ = state.db.save_message(&assistant_msg).await;
+        let assistant_reply = assistant_msg.content.clone();
+        let user_for_extraction = last_user_msg.clone();
+        let _ = persist_message(state, &assistant_msg).await;
 
         let db = state.db.clone();
         let kg_llm = state.kg_llm.clone();
-        let assistant_reply = assistant_msg.content.clone();
-        let user_for_extraction = last_user_msg.clone();
         tokio::spawn(async move {
             spawn_knowledge_extraction(db, kg_llm, user_for_extraction, assistant_reply).await;
         });
 
-        let _ = event_tx
-            .send(AgentStreamEvent::Done {
+        emit_stream_event(
+            Some(&event_tx),
+            ServerEvent::RunCompleted {
                 conversation_id: conv_id,
-            })
-            .await;
+                run_id: run_id.clone(),
+            },
+        )
+        .await;
         return;
     }
 
-    let _ = event_tx
-        .send(AgentStreamEvent::Error(format!(
-            "Agent loop exceeded maximum of {} iterations",
-            state.max_agent_iterations
-        )))
-        .await;
+    emit_stream_event(
+        Some(&event_tx),
+        ServerEvent::Error {
+            conversation_id: conv_id,
+            run_id: Some(run_id),
+            error: format!(
+                "Agent loop exceeded maximum of {} iterations",
+                state.max_agent_iterations
+            ),
+        },
+    )
+    .await;
 }
 
 /// Self-reflection: evaluate response quality using kg_llm.

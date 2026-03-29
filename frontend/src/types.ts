@@ -1,8 +1,14 @@
 export type Conversation = {
   id: string
-  title: string
+  title: string | null
   created_at: string
   updated_at: string
+}
+
+export type ToolCall = {
+  id: string
+  name: string
+  arguments: string
 }
 
 export type Message = {
@@ -10,6 +16,9 @@ export type Message = {
   role: 'user' | 'assistant' | 'tool' | 'system'
   content: string
   created_at: string
+  name?: string | null
+  tool_call_id?: string | null
+  tool_calls?: ToolCall[] | null
 }
 
 export type OnboardingField = {

@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, State},
 };
 use jossie_core::types::Message;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -26,4 +26,21 @@ pub async fn get_messages(
     Query(params): Query<GetMessagesParams>,
 ) -> Result<Json<Vec<Message>>, AppError> {
     Ok(Json(state.db.get_messages(id, params.limit).await?))
+}
+
+#[derive(Serialize)]
+pub struct CancelRunResponse {
+    pub conversation_id: Uuid,
+    pub status: &'static str,
+}
+
+pub async fn cancel_conversation_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<CancelRunResponse>, AppError> {
+    state.request_cancel(id).await;
+    Ok(Json(CancelRunResponse {
+        conversation_id: id,
+        status: "cancel_requested",
+    }))
 }

@@ -2,6 +2,7 @@ use chrono::Utc;
 use jossie_core::types::{Message, Role};
 use jossie_db::IntegrationEvent;
 use jossie_server::AppState;
+use jossie_server::events::{ServerEvent, persist_message};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -38,10 +39,6 @@ pub async fn start_event_loop(state: Arc<AppState>) -> anyhow::Result<()> {
 }
 
 async fn process_pending_events(state: &Arc<AppState>) -> anyhow::Result<()> {
-    if state.telegram_token.trim().is_empty() {
-        return Ok(());
-    }
-
     let Some(chat) = state.db.get_latest_telegram_chat().await? else {
         return Ok(());
     };
@@ -173,9 +170,11 @@ async fn process_event_inner(
         return Ok(());
     };
 
-    tracing::info!("Sending message: {}", message);
-    jossie_telegram::send_message(&state.telegram_token, chat.chat_id, &message).await?;
-    tracing::info!("Message sent: {}", message);
+    if !state.telegram_token.trim().is_empty() {
+        tracing::info!("Sending message: {}", message);
+        jossie_telegram::send_message(&state.telegram_token, chat.chat_id, &message).await?;
+        tracing::info!("Message sent: {}", message);
+    }
 
     let assistant_msg = Message {
         id: Uuid::new_v4(),
@@ -187,7 +186,12 @@ async fn process_event_inner(
         name: Some("integration_event_notification".to_string()),
         created_at: Utc::now(),
     };
-    state.db.save_message(&assistant_msg).await?;
+    persist_message(state, &assistant_msg).await?;
+    state.publish_event(ServerEvent::BackgroundNotification {
+        conversation_id: chat.conversation_id,
+        source: "integration_event".to_string(),
+        message: assistant_msg.content.clone(),
+    });
     state.db.mark_integration_event_processed(&event.id).await?;
     Ok(())
 }
@@ -309,9 +313,11 @@ async fn process_email_event_batch_inner(
         return Ok(());
     };
 
-    tracing::info!("Sending batched email message: {}", message);
-    jossie_telegram::send_message(&state.telegram_token, chat.chat_id, &message).await?;
-    tracing::info!("Batched email message sent: {}", message);
+    if !state.telegram_token.trim().is_empty() {
+        tracing::info!("Sending batched email message: {}", message);
+        jossie_telegram::send_message(&state.telegram_token, chat.chat_id, &message).await?;
+        tracing::info!("Batched email message sent: {}", message);
+    }
 
     let assistant_msg = Message {
         id: Uuid::new_v4(),
@@ -323,7 +329,12 @@ async fn process_email_event_batch_inner(
         name: Some("integration_event_notification".to_string()),
         created_at: Utc::now(),
     };
-    state.db.save_message(&assistant_msg).await?;
+    persist_message(state, &assistant_msg).await?;
+    state.publish_event(ServerEvent::BackgroundNotification {
+        conversation_id: chat.conversation_id,
+        source: "email_batch".to_string(),
+        message: assistant_msg.content.clone(),
+    });
     mark_events_processed(state, events).await?;
 
     Ok(())
@@ -385,9 +396,11 @@ async fn process_calendar_event_batch_inner(
         return Ok(());
     };
 
-    tracing::info!("Sending batched calendar message: {}", message);
-    jossie_telegram::send_message(&state.telegram_token, chat.chat_id, &message).await?;
-    tracing::info!("Batched calendar message sent: {}", message);
+    if !state.telegram_token.trim().is_empty() {
+        tracing::info!("Sending batched calendar message: {}", message);
+        jossie_telegram::send_message(&state.telegram_token, chat.chat_id, &message).await?;
+        tracing::info!("Batched calendar message sent: {}", message);
+    }
 
     let assistant_msg = Message {
         id: Uuid::new_v4(),
@@ -399,7 +412,12 @@ async fn process_calendar_event_batch_inner(
         name: Some("integration_event_notification".to_string()),
         created_at: Utc::now(),
     };
-    state.db.save_message(&assistant_msg).await?;
+    persist_message(state, &assistant_msg).await?;
+    state.publish_event(ServerEvent::BackgroundNotification {
+        conversation_id: chat.conversation_id,
+        source: "calendar_batch".to_string(),
+        message: assistant_msg.content.clone(),
+    });
     mark_events_processed(state, events).await?;
 
     Ok(())
@@ -823,7 +841,7 @@ async fn execute_scheduled_task(
                 name: Some("scheduled_task".to_string()),
                 created_at: Utc::now(),
             };
-            state.db.save_message(&user_msg).await?;
+            persist_message(state, &user_msg).await?;
 
             // Run the agent loop
             let response = match jossie_server::agent::run_agent_loop_with_options(
@@ -898,10 +916,6 @@ async fn execute_scheduled_task(
 }
 
 async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
-    if state.telegram_token.trim().is_empty() {
-        return Ok(());
-    }
-
     let messages = state.db.list_pending_oob_messages(20).await?;
     let mut chat_cache: HashMap<Uuid, Option<i64>> = HashMap::new();
 
@@ -922,26 +936,47 @@ async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
             resolved
         };
 
-        if let Some(chat_id) = chat_id {
-            match jossie_telegram::send_message(&state.telegram_token, chat_id, &msg.content).await
-            {
-                Ok(_) => {
-                    state.db.mark_oob_message_sent(&msg.id).await?;
-                    tracing::info!("OOB message {} sent successfully", msg.id);
+        if !state.telegram_token.trim().is_empty() {
+            if let Some(chat_id) = chat_id {
+                match jossie_telegram::send_message(&state.telegram_token, chat_id, &msg.content).await
+                {
+                    Ok(_) => {
+                        tracing::info!("OOB message {} sent successfully", msg.id);
+                    }
+                    Err(e) => {
+                        state
+                            .db
+                            .mark_oob_message_failed(&msg.id, &e.to_string())
+                            .await?;
+                        tracing::error!("Failed to send OOB message {}: {}", msg.id, e);
+                        continue;
+                    }
                 }
-                Err(e) => {
-                    state
-                        .db
-                        .mark_oob_message_failed(&msg.id, &e.to_string())
-                        .await?;
-                    tracing::error!("Failed to send OOB message {}: {}", msg.id, e);
-                }
+            } else {
+                let err = "No Telegram chat found for conversation";
+                state.db.mark_oob_message_failed(&msg.id, err).await?;
+                tracing::warn!("Cannot send OOB message {}: {}", msg.id, err);
+                continue;
             }
-        } else {
-            let err = "No Telegram chat found for conversation";
-            state.db.mark_oob_message_failed(&msg.id, err).await?;
-            tracing::warn!("Cannot send OOB message {}: {}", msg.id, err);
         }
+
+        let assistant_msg = Message {
+            id: Uuid::new_v4(),
+            conversation_id,
+            role: Role::Assistant,
+            content: msg.content.clone(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: Some("oob_message".to_string()),
+            created_at: Utc::now(),
+        };
+        persist_message(state, &assistant_msg).await?;
+        state.publish_event(ServerEvent::BackgroundNotification {
+            conversation_id,
+            source: "oob_message".to_string(),
+            message: assistant_msg.content.clone(),
+        });
+        state.db.mark_oob_message_sent(&msg.id).await?;
     }
 
     Ok(())

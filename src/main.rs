@@ -103,6 +103,8 @@ async fn main() -> Result<()> {
         registry.all_tool_definitions().len()
     );
 
+    let (event_tx, _) = tokio::sync::broadcast::channel(512);
+
     let state = Arc::new(AppState {
         db: db.clone(),
         llm,
@@ -119,7 +121,11 @@ async fn main() -> Result<()> {
         telegram_token: config.telegram.bot_token.clone(), // Changed from cfg.telegram_token
         enable_self_reflection: config.llm.enable_self_reflection,
         active_conversations: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        cancelled_conversations: Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashSet::new(),
+        )),
         pending_google_oauth: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        event_tx,
         cors_origins: config.server.cors_origins.clone(),
         max_request_body_bytes: config.server.max_request_body_bytes,
     });
@@ -138,16 +144,14 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Start event loop if Telegram is configured
-    // The event loop now handles integration events, scheduled tasks, and OOB messages
-    if !state.telegram_token.is_empty() {
-        let event_state = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = event_loop::start_event_loop(event_state).await {
-                tracing::error!("Event loop error: {e}");
-            }
-        });
-    }
+    // Start the event loop even without Telegram so scheduled tasks and web-visible
+    // background activity continue to run.
+    let event_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = event_loop::start_event_loop(event_state).await {
+            tracing::error!("Event loop error: {e}");
+        }
+    });
 
     let app = jossie_server::router(state);
     let addr = format!("{}:{}", config.server.host, config.server.port);
