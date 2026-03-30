@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
 
     let mut llm = LlmClient::new(&config.llm.api_url, &config.llm.api_key, &config.llm.model);
     llm.set_reasoning_effort(config.llm.reasoning_effort.clone());
+    llm.set_enable_web_search(config.llm.enable_web_search);
 
     // Initialize KG LLM client - use cheaper model if configured, otherwise use primary model
     let kg_llm = if let Some(kg_model) = &config.llm.kg_model {
@@ -205,6 +206,11 @@ fn override_config_from_env(config: &mut AppConfig) {
     if let Ok(val) = env::var("JOSSIE_LLM_SYSTEM_PROMPT") {
         config.llm.system_prompt = val;
     }
+    if let Ok(val) = env::var("JOSSIE_LLM_ENABLE_WEB_SEARCH") {
+        if let Some(parsed) = parse_env_bool(&val) {
+            config.llm.enable_web_search = parsed;
+        }
+    }
     if let Ok(val) = env::var("JOSSIE_LLM_MAX_CONTEXT_MESSAGES") {
         if let Ok(parsed) = val.parse::<usize>() {
             config.llm.max_context_messages = parsed;
@@ -242,5 +248,13 @@ fn override_config_from_env(config: &mut AppConfig) {
     }
     if let Ok(val) = env::var("JOSSIE_GOOGLE_REFRESH_TOKEN") {
         config.google.refresh_token = val;
+    }
+}
+
+fn parse_env_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
     }
 }

@@ -46,6 +46,8 @@ pub struct LlmConfig {
     pub model: String,
     #[serde(default)]
     pub kg_model: Option<String>,
+    #[serde(default)]
+    pub enable_web_search: bool,
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
     #[serde(default = "default_max_iterations")]

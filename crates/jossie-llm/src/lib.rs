@@ -13,6 +13,7 @@ pub struct LlmClient {
     api_key: String,
     model: String,
     reasoning_effort: Option<String>,
+    enable_web_search: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,8 +68,15 @@ struct ResponseOutputText {
     text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ResponseTool {
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+enum ResponseTool {
+    Function(ResponseFunctionTool),
+    Hosted(ResponseHostedTool),
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResponseFunctionTool {
     #[serde(rename = "type")]
     item_type: String,
     name: String,
@@ -76,6 +84,12 @@ struct ResponseTool {
     parameters: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     strict: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResponseHostedTool {
+    #[serde(rename = "type")]
+    item_type: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -166,11 +180,16 @@ impl LlmClient {
             api_key: api_key.to_string(),
             model: model.to_string(),
             reasoning_effort: None,
+            enable_web_search: false,
         }
     }
 
     pub fn set_reasoning_effort(&mut self, effort: Option<String>) {
         self.reasoning_effort = effort;
+    }
+
+    pub fn set_enable_web_search(&mut self, enabled: bool) {
+        self.enable_web_search = enabled;
     }
 
     fn build_input(messages: &[Message]) -> Vec<ResponseInputItem> {
@@ -232,22 +251,27 @@ impl LlmClient {
         items
     }
 
-    fn build_tools(tools: &[ToolDefinition]) -> Option<Vec<ResponseTool>> {
-        if tools.is_empty() {
-            return None;
-        }
-
-        let built = tools
+    fn build_tools(&self, tools: &[ToolDefinition]) -> Option<Vec<ResponseTool>> {
+        let mut built: Vec<ResponseTool> = tools
             .iter()
-            .map(|tool| ResponseTool {
-                item_type: "function".to_string(),
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                parameters: tool.parameters.clone(),
-                strict: None,
+            .map(|tool| {
+                ResponseTool::Function(ResponseFunctionTool {
+                    item_type: "function".to_string(),
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    parameters: tool.parameters.clone(),
+                    strict: None,
+                })
             })
             .collect();
-        Some(built)
+
+        if self.enable_web_search {
+            built.push(ResponseTool::Hosted(ResponseHostedTool {
+                item_type: "web_search".to_string(),
+            }));
+        }
+
+        if built.is_empty() { None } else { Some(built) }
     }
 
     fn build_request(
@@ -256,11 +280,13 @@ impl LlmClient {
         tools: &[ToolDefinition],
         stream: bool,
     ) -> ResponsesRequest {
+        let built_tools = self.build_tools(tools);
+
         ResponsesRequest {
             model: self.model.clone(),
             input: Self::build_input(messages),
-            tools: Self::build_tools(tools),
-            tool_choice: if tools.is_empty() {
+            tools: built_tools.clone(),
+            tool_choice: if built_tools.is_none() {
                 None
             } else {
                 Some(Value::String("auto".to_string()))
@@ -593,6 +619,44 @@ mod tests {
         assert_eq!(json[3]["call_id"], "call_123");
         assert_eq!(json[4]["type"], "function_call_output");
         assert_eq!(json[4]["call_id"], "call_123");
+    }
+
+    #[test]
+    fn build_request_adds_web_search_tool_when_enabled() {
+        let mut client = LlmClient::new("https://api.openai.com/v1", "test-key", "gpt-4.1");
+        client.set_enable_web_search(true);
+
+        let request = client.build_request(&[make_message(Role::User, "Latest news?")], &[], false);
+        let json = serde_json::to_value(request).unwrap();
+
+        assert_eq!(json["tool_choice"], "auto");
+        assert_eq!(json["tools"][0]["type"], "web_search");
+    }
+
+    #[test]
+    fn build_request_preserves_function_tools_when_web_search_enabled() {
+        let mut client = LlmClient::new("https://api.openai.com/v1", "test-key", "gpt-4.1");
+        client.set_enable_web_search(true);
+
+        let tools = vec![ToolDefinition {
+            name: "lookup".to_string(),
+            description: "Looks something up".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        }];
+
+        let request = client.build_request(&[make_message(Role::User, "Find it")], &tools, false);
+        let json = serde_json::to_value(request).unwrap();
+
+        assert_eq!(json["tools"][0]["type"], "function");
+        assert_eq!(json["tools"][0]["name"], "lookup");
+        assert_eq!(json["tools"][1]["type"], "web_search");
     }
 
     #[test]

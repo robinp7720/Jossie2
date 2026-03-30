@@ -53,6 +53,10 @@ model = "gpt-4"
 # If not specified, uses the primary model
 # kg_model = "gpt-4o-mini"
 
+# Optional: Enable OpenAI's native web search tool for the main chat model.
+# Leave this off for non-OpenAI-compatible backends that only support function tools.
+enable_web_search = false
+
 # System prompt that defines Jossie's personality and behavior
 # This is a comprehensive prompt - feel free to customize!
 system_prompt = """You are Jossie.
