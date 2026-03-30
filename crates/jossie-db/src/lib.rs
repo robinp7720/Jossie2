@@ -1,7 +1,7 @@
 use chrono::Utc;
 use jossie_core::types::{Conversation, Message, Role};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 pub struct Database {
@@ -206,20 +206,42 @@ impl Database {
     }
 
     pub async fn memory_search(&self, query: &str) -> anyhow::Result<Vec<MemoryEntry>> {
-        let rows = sqlx::query_as::<_, MemoryRow>(
-            "SELECT key, content, tags FROM memory WHERE memory MATCH ? ORDER BY rank LIMIT 10",
-        )
-        .bind(query)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| MemoryEntry {
-                key: r.key,
-                content: r.content,
-                tags: r.tags,
-            })
-            .collect())
+        const LIMIT: usize = 10;
+        const FETCH_PER_STRATEGY: usize = 12;
+
+        let mut results = Vec::new();
+        let mut seen_keys = HashSet::new();
+
+        for match_query in build_memory_search_queries(query) {
+            let rows = match self
+                .memory_search_match(&match_query, FETCH_PER_STRATEGY)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(err) => {
+                    tracing::warn!(
+                        "Memory search strategy failed for query {:?}: {err}",
+                        match_query
+                    );
+                    continue;
+                }
+            };
+
+            for row in rows {
+                if seen_keys.insert(row.key.clone()) {
+                    results.push(MemoryEntry {
+                        key: row.key,
+                        content: row.content,
+                        tags: row.tags,
+                    });
+                    if results.len() >= LIMIT {
+                        return Ok(results);
+                    }
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     pub async fn get_memory(&self, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
@@ -281,6 +303,25 @@ impl Database {
                 updated_at: r.updated_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
             })
             .collect())
+    }
+
+    async fn memory_search_match(
+        &self,
+        match_query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemoryRow>> {
+        let rows = sqlx::query_as::<_, MemoryRow>(
+            "SELECT key, content, tags
+             FROM memory
+             WHERE memory MATCH ?
+             ORDER BY bm25(memory, 8.0, 1.0, 3.0), rowid DESC
+             LIMIT ?",
+        )
+        .bind(match_query)
+        .bind(limit.max(1).min(100) as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     // Telegram
@@ -1224,6 +1265,71 @@ struct ConversationRow {
     updated_at: String,
 }
 
+fn build_memory_search_queries(query: &str) -> Vec<String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut queries = Vec::new();
+    let mut seen = HashSet::new();
+
+    if seen.insert(trimmed.to_string()) {
+        queries.push(trimmed.to_string());
+    }
+
+    let terms = extract_memory_search_terms(trimmed);
+    if terms.is_empty() {
+        return queries;
+    }
+
+    let key_query = terms
+        .iter()
+        .map(|term| format!("key:{term}*"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    if !key_query.is_empty() && seen.insert(key_query.clone()) {
+        queries.push(key_query);
+    }
+
+    let tag_query = terms
+        .iter()
+        .map(|term| format!("tags:{term}*"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    if !tag_query.is_empty() && seen.insert(tag_query.clone()) {
+        queries.push(tag_query);
+    }
+
+    let prefix_or_query = terms
+        .iter()
+        .map(|term| format!("{term}*"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    if !prefix_or_query.is_empty() && seen.insert(prefix_or_query.clone()) {
+        queries.push(prefix_or_query);
+    }
+
+    queries
+}
+
+fn extract_memory_search_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut seen = HashSet::new();
+
+    for token in query.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')) {
+        if token.len() < 2 {
+            continue;
+        }
+        let lowered = token.to_ascii_lowercase();
+        if seen.insert(lowered.clone()) {
+            terms.push(lowered);
+        }
+    }
+
+    terms
+}
+
 impl From<ConversationRow> for Conversation {
     fn from(r: ConversationRow) -> Self {
         Conversation {
@@ -1523,6 +1629,59 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert!(all.iter().any(|e| e.key == "k1" && e.content == "c1"));
         assert!(all.iter().any(|e| e.key == "k2" && e.content == "c2"));
+    }
+
+    #[tokio::test]
+    async fn memory_search_falls_back_for_broad_keyword_queries() {
+        let db = test_db().await;
+        db.memory_save(
+            "calendar.next_appointment",
+            "Dentist appointment next Tuesday at 3pm",
+            "calendar appointment health",
+        )
+        .await
+        .unwrap();
+        db.memory_save(
+            "email.preferences",
+            "User prefers concise email summaries with deadlines called out first",
+            "email preferences work",
+        )
+        .await
+        .unwrap();
+
+        let results = db
+            .memory_search(
+                "actionable items deadlines upcoming appointments user calendar email preferences",
+            )
+            .await
+            .unwrap();
+
+        assert!(!results.is_empty());
+        assert!(
+            results
+                .iter()
+                .any(|entry| entry.key == "calendar.next_appointment")
+        );
+        assert!(results.iter().any(|entry| entry.key == "email.preferences"));
+    }
+
+    #[test]
+    fn memory_search_query_builder_adds_fallback_strategies() {
+        let queries = build_memory_search_queries(
+            "actionable items deadlines upcoming appointments user calendar email preferences",
+        );
+
+        assert_eq!(
+            queries[0],
+            "actionable items deadlines upcoming appointments user calendar email preferences"
+        );
+        assert!(queries.iter().any(|query| query.contains("key:calendar*")));
+        assert!(queries.iter().any(|query| query.contains("tags:email*")));
+        assert!(
+            queries
+                .iter()
+                .any(|query| query.contains("calendar* OR email*"))
+        );
     }
 
     #[tokio::test]

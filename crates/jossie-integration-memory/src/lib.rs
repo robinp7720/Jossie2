@@ -38,7 +38,7 @@ impl Integration for MemoryIntegration {
             },
             ToolDefinition {
                 name: "memory_search".to_string(),
-                description: "Search long-term memory using full-text search".to_string(),
+                description: "Search long-term memory using a few focused keywords. Prefer 2-6 specific terms, names, project titles, dates, or tags. If needed, run multiple narrower searches instead of one long laundry-list query.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
