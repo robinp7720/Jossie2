@@ -13,6 +13,8 @@ pub struct AppConfig {
     pub google: GoogleConfig,
     #[serde(default)]
     pub http: HttpConfig,
+    #[serde(default)]
+    pub tavily: TavilyConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -139,6 +141,12 @@ pub struct EmailConfig {
     pub username: String,
     #[serde(default)]
     pub password: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TavilyConfig {
+    #[serde(default)]
+    pub api_key: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

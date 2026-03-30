@@ -241,6 +241,16 @@ client_secret = ""
 # debug_gmail_payload = false
 
 # ----------------------------------------------------------------------------
+# TAVILY SEARCH INTEGRATION (Optional)
+# ----------------------------------------------------------------------------
+# Tavily provides structured web search results optimised for LLMs.
+# When configured, a tavily_search tool is available alongside browser_search.
+# Get your API key at https://app.tavily.com
+# [tavily]
+# api_key = "tvly-your-api-key-here"
+# Override with env: JOSSIE_TAVILY_API_KEY
+
+# ----------------------------------------------------------------------------
 # HTTP INTEGRATION CONFIGURATION (Optional)
 # ----------------------------------------------------------------------------
 [http]
@@ -273,6 +283,7 @@ allowed_domains = ["*"]
 #    - JOSSIE_TELEGRAM_BOT_TOKEN
 #    - JOSSIE_EMAIL_USERNAME, JOSSIE_EMAIL_PASSWORD
 #    - JOSSIE_GOOGLE_CLIENT_ID, JOSSIE_GOOGLE_CLIENT_SECRET
+#    - JOSSIE_TAVILY_API_KEY
 #
 # 4. TIMEZONE:
 #    - The system prompt mentions UTC+01:00 (CET) - update this for your timezone
