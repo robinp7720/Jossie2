@@ -95,7 +95,7 @@ impl BrowserIntegration {
         .await
         .map_err(|e| anyhow::anyhow!("Join error: {}", e))??;
 
-        let markdown = html2text::from_read(content.as_bytes(), 80);
+        let markdown = jossie_core::text::html_to_text(&content);
 
         if is_bot_blocked(&markdown) {
             return Ok(
@@ -184,7 +184,7 @@ impl BrowserIntegration {
                         body.len()
                     );
                 } else {
-                    let markdown = html2text::from_read(body.as_bytes(), 80);
+                    let markdown = jossie_core::text::html_to_text(&body);
 
                     if is_bot_blocked(&markdown) {
                         tracing::info!("Direct GET was bot-blocked, falling back to browser");
@@ -235,7 +235,7 @@ impl BrowserIntegration {
         }
 
         let body = resp.text().await?;
-        let markdown = html2text::from_read(body.as_bytes(), 80);
+        let markdown = jossie_core::text::html_to_text(&body);
 
         if is_bot_blocked(&markdown) {
             return Ok(
