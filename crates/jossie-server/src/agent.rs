@@ -1648,79 +1648,68 @@ fn is_entity_token(token: &str, stopwords: &HashSet<&str>) -> bool {
 }
 
 fn sanitize_context_window(messages: &mut Vec<Message>) {
-    loop {
-        // If the first message is a Tool output, it's orphaned because we lost the Assistant call.
-        // Drain all leading Tool messages until we hit a non-Tool message.
-        let mut split_idx = 0;
-        for (i, msg) in messages.iter().enumerate() {
-            if msg.role == Role::Tool {
-                split_idx = i + 1;
-            } else {
-                break;
-            }
-        }
+    let mut sanitized = Vec::with_capacity(messages.len());
+    let mut idx = 0usize;
 
-        if split_idx > 0 {
-            tracing::warn!(
-                "Sanitizing context window: removing {} orphaned tool messages",
-                split_idx
-            );
-            messages.drain(0..split_idx);
+    while idx < messages.len() {
+        let message = &messages[idx];
+
+        if message.role == Role::Tool {
+            tracing::warn!("Sanitizing context window: removing orphaned tool message");
+            idx += 1;
             continue;
         }
 
-        let Some(first) = messages.first() else {
-            return;
-        };
+        if message.role == Role::Assistant {
+            if let Some(tool_calls_value) = &message.tool_calls {
+                let mut block_end = idx + 1;
+                let mut matched_call_ids = std::collections::HashSet::new();
+                while block_end < messages.len() && messages[block_end].role == Role::Tool {
+                    if let Some(call_id) = &messages[block_end].tool_call_id {
+                        matched_call_ids.insert(call_id.clone());
+                    }
+                    block_end += 1;
+                }
 
-        if first.role != Role::Assistant {
-            return;
+                let expected_call_ids: Vec<String> = match serde_json::from_value::<
+                    Vec<jossie_core::ToolCall>,
+                >(
+                    tool_calls_value.clone()
+                ) {
+                    Ok(calls) => calls.into_iter().map(|call| call.id).collect(),
+                    Err(err) => {
+                        tracing::warn!(
+                            "Sanitizing context window: removing assistant tool-call block with invalid tool_calls payload: {err}"
+                        );
+                        Vec::new()
+                    }
+                };
+
+                let has_all_outputs = !expected_call_ids.is_empty()
+                    && expected_call_ids
+                        .iter()
+                        .all(|call_id| matched_call_ids.contains(call_id));
+
+                if has_all_outputs {
+                    sanitized.extend(messages[idx..block_end].iter().cloned());
+                } else {
+                    tracing::warn!(
+                        "Sanitizing context window: removing assistant tool-call block with {} trailing tool message(s)",
+                        block_end.saturating_sub(idx + 1)
+                    );
+                }
+
+                idx = block_end;
+                continue;
+            }
         }
 
-        let Some(tool_calls_value) = &first.tool_calls else {
-            return;
-        };
+        sanitized.push(message.clone());
+        idx += 1;
+    }
 
-        let expected_call_ids: Vec<String> = match serde_json::from_value::<
-            Vec<jossie_core::ToolCall>,
-        >(tool_calls_value.clone())
-        {
-            Ok(calls) => calls.into_iter().map(|call| call.id).collect(),
-            Err(err) => {
-                tracing::warn!(
-                    "Sanitizing context window: removing leading assistant tool-call message with invalid tool_calls payload: {err}"
-                );
-                Vec::new()
-            }
-        };
-
-        let mut matched_call_ids = std::collections::HashSet::new();
-        let mut trailing_tool_count = 0usize;
-        for msg in messages.iter().skip(1) {
-            if msg.role != Role::Tool {
-                break;
-            }
-            trailing_tool_count += 1;
-            if let Some(call_id) = &msg.tool_call_id {
-                matched_call_ids.insert(call_id.clone());
-            }
-        }
-
-        let has_all_outputs = !expected_call_ids.is_empty()
-            && expected_call_ids
-                .iter()
-                .all(|call_id| matched_call_ids.contains(call_id));
-
-        if has_all_outputs {
-            return;
-        }
-
-        let drain_count = 1 + trailing_tool_count;
-        tracing::warn!(
-            "Sanitizing context window: removing leading assistant tool-call block with {} trailing tool message(s)",
-            trailing_tool_count
-        );
-        messages.drain(0..drain_count);
+    if sanitized.len() != messages.len() {
+        *messages = sanitized;
     }
 }
 
@@ -1797,6 +1786,24 @@ mod tests {
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, Role::Assistant);
         assert_eq!(msgs[1].role, Role::Tool);
+    }
+
+    #[test]
+    fn test_sanitize_removes_trailing_assistant_tool_call_block() {
+        let conv_id = Uuid::new_v4();
+        let user = Message::new(conv_id, Role::User, "hello".to_string());
+        let assistant = Message::new(conv_id, Role::Assistant, String::new()).with_tool_calls(
+            serde_json::json!([{
+                "id": "call_123",
+                "name": "lookup",
+                "arguments": "{}"
+            }]),
+        );
+
+        let mut msgs = vec![user, assistant];
+        sanitize_context_window(&mut msgs);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::User);
     }
 
     #[test]
