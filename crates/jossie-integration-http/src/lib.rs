@@ -30,8 +30,13 @@ fn is_public_ipv4(addr: Ipv4Addr) -> bool {
         && !addr.is_unspecified()
         && !addr.is_multicast()
         && octets[0] != 0
+        && octets[0] != 127
+        && !(octets[0] == 10 && octets[1] == 0) // Already covered by is_private, but being explicit
+        && !(octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31)) // Already covered by is_private
+        && !(octets[0] == 192 && octets[1] == 168) // Already covered by is_private
         && !(octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000)
         && !(octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
+        && !(octets[0] >= 224) // Multicast/Reserved
     // Shared address space 100.64.0.0/10 and benchmarking 198.18.0.0/15.
 }
 
@@ -42,8 +47,9 @@ fn is_public_ipv6(addr: Ipv6Addr) -> bool {
         && !addr.is_multicast()
         && !addr.is_unique_local()
         && !addr.is_unicast_link_local()
-        && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
-        && !(segments[0] & 0xffc0 == 0xfe80)
+        && !(segments[0] == 0x2001 && segments[1] == 0x0db8) // Documentation
+        && !(segments[0] & 0xffc0 == 0xfe80) // Link-local (redundant but explicit)
+        && !(segments[0] & 0xfe00 == 0xfc00) // Unique local (redundant but explicit)
 }
 
 fn is_public_ip(addr: IpAddr) -> bool {

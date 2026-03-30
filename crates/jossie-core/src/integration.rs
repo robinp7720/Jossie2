@@ -53,11 +53,11 @@ pub fn validate_tool_result(tool_name: &str, content: &str) -> (ResultQuality, O
     }
 
     // Check for truncation markers
-    if trimmed.contains("[Output truncated") {
+    if trimmed.contains("[NOTICE: Output truncated") {
         return (
             ResultQuality::Partial,
             Some(format!(
-                "[HINT: {tool_name} output was truncated. The full data may contain additional relevant information. Consider narrowing your query.]"
+                "[HINT: {tool_name} output was truncated. If the information you need is missing, consider a more narrow query.]"
             )),
         );
     }
@@ -245,7 +245,8 @@ impl IntegrationRegistry {
                         );
                         final_content.truncate(MAX_OUTPUT_SIZE);
                         final_content.push_str(&format!(
-                            "\n... [Output truncated. Original size: {} chars]",
+                            "\n\n[NOTICE: Output truncated to {} characters for efficiency. Original size: {} chars. If essential information is missing, please try a more specific query.]",
+                            MAX_OUTPUT_SIZE,
                             original_len
                         ));
                     }
@@ -466,7 +467,7 @@ mod tests {
     fn test_validate_truncated() {
         let (q, _) = validate_tool_result(
             "test",
-            "data...\n[Output truncated. Original size: 200000 chars]",
+            "data...\n[NOTICE: Output truncated to 100000 characters for efficiency. Original size: 200000 chars. If essential information is missing, please try a more specific query.]",
         );
         assert_eq!(q, ResultQuality::Partial);
     }
@@ -560,7 +561,7 @@ mod tests {
         let result = reg.execute(&call).await;
         assert!(result.content.contains("Original size: 150000 chars"));
         // Content includes truncation marker + validation hint for partial results
-        assert!(result.content.contains("[Output truncated"));
+        assert!(result.content.contains("[NOTICE: Output truncated"));
         assert!(result.content.contains("[HINT:"));
     }
 }

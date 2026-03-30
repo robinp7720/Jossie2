@@ -1271,43 +1271,20 @@ fn build_memory_search_queries(query: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    let mut queries = Vec::new();
-    let mut seen = HashSet::new();
-
-    if seen.insert(trimmed.to_string()) {
-        queries.push(trimmed.to_string());
-    }
+    let mut queries = vec![trimmed.to_string()];
 
     let terms = extract_memory_search_terms(trimmed);
     if terms.is_empty() {
         return queries;
     }
 
-    let key_query = terms
-        .iter()
-        .map(|term| format!("key:{term}*"))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    if !key_query.is_empty() && seen.insert(key_query.clone()) {
-        queries.push(key_query);
-    }
-
-    let tag_query = terms
-        .iter()
-        .map(|term| format!("tags:{term}*"))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    if !tag_query.is_empty() && seen.insert(tag_query.clone()) {
-        queries.push(tag_query);
-    }
-
-    let prefix_or_query = terms
-        .iter()
-        .map(|term| format!("{term}*"))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    if !prefix_or_query.is_empty() && seen.insert(prefix_or_query.clone()) {
-        queries.push(prefix_or_query);
+    for prefix in ["key:", "tags:", ""] {
+        let q = terms
+            .iter()
+            .map(|term| format!("{prefix}{term}*"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        queries.push(q);
     }
 
     queries

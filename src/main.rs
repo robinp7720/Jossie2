@@ -111,15 +111,15 @@ async fn main() -> Result<()> {
         llm,
         kg_llm,
         registry: Arc::new(registry),
-        auth_token: config.server.auth_token.clone(), // Changed from cfg.auth_token
+        auth_token: config.server.auth_token.clone(),
         public_base_url: config.server.public_base_url.clone(),
-        system_prompt: config.llm.system_prompt.clone(), // Changed from cfg.system_prompt
-        max_agent_iterations: config.llm.max_agent_iterations, // Changed from cfg.max_agent_iterations
-        max_context_messages: config.llm.max_context_messages, // Changed from cfg.max_context_messages
+        system_prompt: config.llm.system_prompt.clone(),
+        max_agent_iterations: config.llm.max_agent_iterations,
+        max_context_messages: config.llm.max_context_messages,
         event_max_context_messages: config.llm.event_max_context_messages,
-        google_config: config.google.clone(), // Changed from cfg.google
+        google_config: config.google.clone(),
         google_integration,
-        telegram_token: config.telegram.bot_token.clone(), // Changed from cfg.telegram_token
+        telegram_token: config.telegram.bot_token.clone(),
         enable_self_reflection: config.llm.enable_self_reflection,
         active_conversations: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         cancelled_conversations: Arc::new(tokio::sync::RwLock::new(

@@ -612,10 +612,15 @@ async fn run_agent_loop_streaming_inner(
                     ServerEvent::Error {
                         conversation_id: conv_id,
                         run_id: Some(run_id.clone()),
-                        error: "Max agent iterations reached".to_string(),
+                        error: "Max agent iterations reached. The agent loop has been stopped to prevent infinite recursion. Please check the results or try a different request.".to_string(),
                     },
                 )
                 .await;
+
+                // Optionally send a final user message explaining the situation
+                let error_msg = Message::new(conv_id, Role::Assistant, "I've reached my maximum iteration limit while processing your request. It's possible I'm stuck in a loop or the task is too complex. You might want to try rephrasing or breaking down the task.".to_string());
+                let _ = persist_message(state, &error_msg).await;
+
                 return;
             }
 

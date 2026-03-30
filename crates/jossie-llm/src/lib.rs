@@ -78,7 +78,7 @@ enum ResponseTool {
 #[derive(Debug, Clone, Serialize)]
 struct ResponseFunctionTool {
     #[serde(rename = "type")]
-    item_type: String,
+    item_type: &'static str,
     name: String,
     description: String,
     parameters: serde_json::Value,
@@ -89,7 +89,7 @@ struct ResponseFunctionTool {
 #[derive(Debug, Clone, Serialize)]
 struct ResponseHostedTool {
     #[serde(rename = "type")]
-    item_type: String,
+    item_type: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -256,7 +256,7 @@ impl LlmClient {
             .iter()
             .map(|tool| {
                 ResponseTool::Function(ResponseFunctionTool {
-                    item_type: "function".to_string(),
+                    item_type: "function",
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     parameters: tool.parameters.clone(),
@@ -267,7 +267,7 @@ impl LlmClient {
 
         if self.enable_web_search {
             built.push(ResponseTool::Hosted(ResponseHostedTool {
-                item_type: "web_search".to_string(),
+                item_type: "web_search",
             }));
         }
 
@@ -281,15 +281,16 @@ impl LlmClient {
         stream: bool,
     ) -> ResponsesRequest {
         let built_tools = self.build_tools(tools);
+        let has_tools = built_tools.is_some();
 
         ResponsesRequest {
             model: self.model.clone(),
             input: Self::build_input(messages),
-            tools: built_tools.clone(),
-            tool_choice: if built_tools.is_none() {
-                None
-            } else {
+            tools: built_tools,
+            tool_choice: if has_tools {
                 Some(Value::String("auto".to_string()))
+            } else {
+                None
             },
             stream,
             reasoning: self
