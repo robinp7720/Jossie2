@@ -225,6 +225,7 @@ async fn prepare_run_context(
 
     sanitize_context_window(&mut messages);
     maybe_summarize_context(state, conv_id, &mut messages).await;
+    sanitize_context_window(&mut messages);
     prepend_system_prompt(state, &mut messages, Some(&last_user_msg)).await;
     if options.scheduled_execution {
         messages.insert(1, Message::transient(
@@ -839,7 +840,8 @@ async fn maybe_summarize_context(state: &AppState, conv_id: Uuid, messages: &mut
         if unsummarized <= KEEP_RECENT_MESSAGES as i64 + 5 {
             // Inject existing summary and keep only recent messages
             let keep_from = messages.len().saturating_sub(KEEP_RECENT_MESSAGES);
-            let recent = messages.split_off(keep_from);
+            let mut recent = messages.split_off(keep_from);
+            sanitize_context_window(&mut recent);
             messages.clear();
             messages.push(Message::transient(
                 Role::System,
@@ -892,7 +894,8 @@ Conversation:
                 .save_conversation_summary(conv_id, &summary, messages_count, last_id.as_deref())
                 .await;
 
-            let recent = messages.split_off(keep_from);
+            let mut recent = messages.split_off(keep_from);
+            sanitize_context_window(&mut recent);
             messages.clear();
             messages.push(Message::transient(
                 Role::System,
