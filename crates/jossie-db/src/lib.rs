@@ -110,6 +110,8 @@ impl Database {
 
     // Messages
     pub async fn save_message(&self, msg: &Message) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+
         let id_str = msg.id.to_string();
         let conv_str = msg.conversation_id.to_string();
         let role_str = msg.role.to_string();
@@ -124,13 +126,13 @@ impl Database {
             .bind(&msg.tool_call_id)
             .bind(&msg.name)
             .bind(&created)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
 
         sqlx::query("UPDATE conversations SET updated_at = ? WHERE id = ?")
             .bind(&created)
             .bind(&conv_str)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
 
         if msg.role == Role::User && msg.name.is_none() {
@@ -145,11 +147,12 @@ impl Database {
                 )
                 .bind(title)
                 .bind(&conv_str)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             }
         }
 
+        tx.commit().await?;
         Ok(())
     }
 
