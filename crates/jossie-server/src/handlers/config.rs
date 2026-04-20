@@ -95,7 +95,10 @@ pub async fn add_account(
 ) -> Result<Json<String>, AppError> {
     // Basic validation
     if req.integration != "google" && req.integration != "email" {
-        return Err(anyhow::anyhow!("Unsupported integration type: {}", req.integration).into());
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "Unsupported integration type: {}",
+            req.integration
+        )));
     }
 
     // For email, we could validate fields here, but for now just pass through

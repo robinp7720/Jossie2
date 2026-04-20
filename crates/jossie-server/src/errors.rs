@@ -11,20 +11,44 @@ pub struct ErrorBody {
 }
 
 #[derive(Debug)]
-pub struct AppError(pub anyhow::Error);
+pub struct AppError {
+    status: StatusCode,
+    error: anyhow::Error,
+}
+
+impl AppError {
+    pub fn new(status: StatusCode, error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            status,
+            error: error.into(),
+        }
+    }
+
+    pub fn bad_request(error: impl Into<anyhow::Error>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, error)
+    }
+
+    pub fn not_found(error: impl Into<anyhow::Error>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, error)
+    }
+}
 
 impl From<anyhow::Error> for AppError {
     fn from(e: anyhow::Error) -> Self {
-        AppError(e)
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, e)
     }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        tracing::error!("{:#}", self.0);
+        if self.status.is_server_error() {
+            tracing::error!("{:#}", self.error);
+        } else {
+            tracing::warn!("{}: {}", self.status, self.error);
+        }
         let body = ErrorBody {
-            error: self.0.to_string(),
+            error: self.error.to_string(),
         };
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+        (self.status, Json(body)).into_response()
     }
 }

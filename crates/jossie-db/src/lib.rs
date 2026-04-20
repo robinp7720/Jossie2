@@ -1,7 +1,8 @@
 use chrono::Utc;
 use jossie_core::types::{Conversation, Message, Role};
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use uuid::Uuid;
 
 pub struct Database {
@@ -24,9 +25,10 @@ impl Database {
     }
 
     pub async fn new(url: &str) -> anyhow::Result<Self> {
+        let options = SqliteConnectOptions::from_str(url)?.foreign_keys(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
-            .connect(url)
+            .connect_with(options)
             .await?;
         Ok(Self { pool })
     }
@@ -106,6 +108,15 @@ impl Database {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn get_latest_conversation_id(&self) -> anyhow::Result<Option<Uuid>> {
+        let row = sqlx::query_as::<_, ConversationIdRow>(
+            "SELECT id FROM conversations ORDER BY updated_at DESC LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|r| r.id.parse().ok()))
     }
 
     // Messages
@@ -1407,6 +1418,11 @@ struct ConversationRow {
     updated_at: String,
 }
 
+#[derive(sqlx::FromRow)]
+struct ConversationIdRow {
+    id: String,
+}
+
 fn build_memory_search_queries(query: &str) -> Vec<String> {
     let trimmed = query.trim();
     if trimmed.is_empty() {
@@ -1672,6 +1688,7 @@ mod tests {
             conversation_id: conv.id,
             role: Role::User,
             content: "Hello".to_string(),
+            attachments: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -1684,6 +1701,7 @@ mod tests {
             conversation_id: conv.id,
             role: Role::Assistant,
             content: "Hi there".to_string(),
+            attachments: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -1697,6 +1715,28 @@ mod tests {
         assert_eq!(messages[1].content, "Hi there");
         assert_eq!(messages[0].role, Role::User);
         assert_eq!(messages[1].role, Role::Assistant);
+    }
+
+    #[tokio::test]
+    async fn save_message_rejects_unknown_conversation() {
+        let db = test_db().await;
+        let msg = Message {
+            id: Uuid::new_v4(),
+            conversation_id: Uuid::new_v4(),
+            role: Role::User,
+            content: "Hello".to_string(),
+            attachments: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            created_at: Utc::now(),
+        };
+
+        let err = db.save_message(&msg).await.unwrap_err().to_string();
+        assert!(
+            err.contains("FOREIGN KEY constraint failed"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

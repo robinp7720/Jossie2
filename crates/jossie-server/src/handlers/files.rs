@@ -33,7 +33,9 @@ pub async fn upload_file(
     }
 
     if data.is_empty() {
-        return Err(anyhow::anyhow!("No file data provided").into());
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "No file data provided"
+        )));
     }
 
     let uploads_dir = "uploads";

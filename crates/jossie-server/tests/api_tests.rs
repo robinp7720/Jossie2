@@ -123,3 +123,34 @@ async fn test_auth_middleware_query_token() {
 
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_chat_rejects_unknown_conversation_id() {
+    let app = setup_app().await;
+    let missing_id = uuid::Uuid::new_v4();
+    let payload = serde_json::json!({
+        "message": "hello",
+        "conversation_id": missing_id,
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/chat")
+                .header("Authorization", "Bearer test-token")
+                .header("Content-Type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "Conversation not found");
+}

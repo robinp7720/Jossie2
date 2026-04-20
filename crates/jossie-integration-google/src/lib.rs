@@ -269,7 +269,7 @@ impl GoogleIntegration {
             }
         }
 
-        let Some(chat) = db.get_latest_telegram_chat().await? else {
+        let Some(conversation_id) = db.get_latest_conversation_id().await? else {
             return Ok(());
         };
 
@@ -277,7 +277,7 @@ impl GoogleIntegration {
             "Google account '{}' needs reconnect: refresh token was expired/revoked. Please reconnect it in settings.",
             acc.name
         );
-        db.queue_oob_message(chat.conversation_id, &message, "high")
+        db.queue_oob_message(conversation_id, &message, "high")
             .await?;
         db.set_integration_setting(
             GOOGLE_INTEGRATION,

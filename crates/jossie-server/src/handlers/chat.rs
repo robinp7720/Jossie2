@@ -27,14 +27,33 @@ pub struct ChatResponse {
     message: String,
 }
 
+async fn conversation_exists(state: &Arc<AppState>, conversation_id: Uuid) -> anyhow::Result<bool> {
+    Ok(state.db.get_conversation(conversation_id).await?.is_some())
+}
+
+async fn get_or_create_conversation_id(
+    state: &Arc<AppState>,
+    conversation_id: Option<Uuid>,
+) -> Result<Uuid, AppError> {
+    match conversation_id {
+        Some(id) => {
+            if conversation_exists(state, id).await? {
+                Ok(id)
+            } else {
+                Err(AppError::not_found(anyhow::anyhow!(
+                    "Conversation not found"
+                )))
+            }
+        }
+        None => Ok(state.db.create_conversation(None).await?.id),
+    }
+}
+
 pub async fn chat_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, AppError> {
-    let conv_id = match req.conversation_id {
-        Some(id) => id,
-        None => state.db.create_conversation(None).await?.id,
-    };
+    let conv_id = get_or_create_conversation_id(&state, req.conversation_id).await?;
 
     let mut user_msg = Message::new(conv_id, Role::User, req.message);
     if let Some(ref fids) = req.file_ids {
@@ -115,11 +134,41 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
         };
 
         let conv_id = match req.conversation_id {
-            Some(id) => id,
+            Some(id) => match conversation_exists(&state, id).await {
+                Ok(true) => id,
+                Ok(false) => {
+                    let error = serde_json::json!({
+                        "type": "error",
+                        "error": "Conversation not found",
+                    });
+                    let _ = socket
+                        .send(ws::Message::Text(error.to_string().into()))
+                        .await;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load conversation {}: {}", id, e);
+                    let error = serde_json::json!({
+                        "type": "error",
+                        "error": "Failed to load conversation",
+                    });
+                    let _ = socket
+                        .send(ws::Message::Text(error.to_string().into()))
+                        .await;
+                    continue;
+                }
+            },
             None => match state.db.create_conversation(None).await {
                 Ok(c) => c.id,
                 Err(e) => {
                     tracing::error!("Failed to create conversation: {}", e);
+                    let error = serde_json::json!({
+                        "type": "error",
+                        "error": "Failed to create conversation",
+                    });
+                    let _ = socket
+                        .send(ws::Message::Text(error.to_string().into()))
+                        .await;
                     continue;
                 }
             },
