@@ -374,6 +374,32 @@ docker build -t jossie2 .
 docker run -p 3000:3000 -v $(pwd)/config.toml:/app/config.toml jossie2
 ```
 
+## ⚙️ systemd Deployment
+
+A sample unit is available at [`contrib/systemd/jossie2.service`](contrib/systemd/jossie2.service).
+
+It assumes a source checkout deployed at `/opt/jossie`, with:
+
+- `config.toml` at `/opt/jossie/config.toml`
+- the release binary at `/opt/jossie/target/release/jossie2`
+- built frontend assets at `/opt/jossie/frontend/dist`
+
+Basic install flow:
+
+```bash
+cp contrib/systemd/jossie2.service /etc/systemd/system/jossie2.service
+mkdir -p /etc/jossie
+$EDITOR /etc/systemd/system/jossie2.service
+$EDITOR /etc/jossie/jossie.env
+systemctl daemon-reload
+systemctl enable --now jossie2
+```
+
+Notes:
+
+- Build the frontend first if you want the bundled web UI to work: `cd frontend && npm ci && npm run build`
+- The sample unit intentionally avoids aggressive sandboxing because the browser integration uses headless Chrome
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please:

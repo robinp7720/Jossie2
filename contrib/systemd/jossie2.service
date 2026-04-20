@@ -1,0 +1,34 @@
+# Sample systemd unit for running Jossie2 from a source checkout.
+# Adjust paths, user/group, and the optional environment file to match
+# your install layout.
+#
+# Jossie2 currently expects:
+# - config.toml in WorkingDirectory
+# - frontend/dist built under WorkingDirectory/frontend/dist for the web UI
+# - any relative SQLite path to resolve from WorkingDirectory
+
+[Unit]
+Description=Jossie2 service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jossie
+Group=jossie
+WorkingDirectory=/opt/jossie
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/jossie/jossie.env
+ExecStartPre=/usr/bin/test -f ./config.toml
+ExecStart=/usr/bin/env ./target/release/jossie2
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+SyslogIdentifier=jossie2
+
+# If you enable the browser integration, install Chromium/Chrome on the host.
+# Avoid aggressive systemd sandboxing unless you have verified it works with
+# headless_chrome in your environment.
+
+[Install]
+WantedBy=multi-user.target
