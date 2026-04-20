@@ -1,6 +1,8 @@
+use chrono::Utc;
 use jossie_core::config::EmailConfig;
 use jossie_core::integration::{Integration, OnboardingField, OnboardingStatus, ToolDefinition};
 use jossie_db::Database;
+use jossie_db::IntegrationAccount;
 use mailparse::{DispositionType, MailHeaderMap, ParsedMail};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -12,6 +14,33 @@ type ImapSession = async_imap::Session<
 const DEFAULT_FOLDER: &str = "INBOX";
 const MAX_EMAIL_BODY_CHARS: usize = 60_000;
 const MAX_FALLBACK_PREVIEW_CHARS: usize = 4_000;
+const EMAIL_INTEGRATION: &str = "email";
+const MAX_POLL_FETCH_UIDS: usize = 100;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MailboxPollAction {
+    SeedCursor { last_seen_uid: u32 },
+    PollFrom { start_uid: u32 },
+    NoChange,
+}
+
+#[derive(Debug, Clone)]
+struct PollAccount {
+    id: String,
+    email: String,
+    config: EmailConfig,
+}
+
+#[derive(Debug, Clone)]
+struct ImapEventSummary {
+    uid: u32,
+    message_unique_id: String,
+    header_message_id: Option<String>,
+    from: String,
+    to: Vec<String>,
+    subject: String,
+    date: String,
+}
 
 pub struct EmailIntegration {
     default_config: Option<EmailConfig>,
@@ -33,6 +62,314 @@ impl EmailIntegration {
 
     pub fn set_db(&mut self, db: Arc<Database>) {
         self.db = Some(db);
+    }
+
+    fn last_seen_uid_key(account_id: &str) -> String {
+        format!("imap_last_seen_uid:{account_id}")
+    }
+
+    fn uid_validity_key(account_id: &str) -> String {
+        format!("imap_uid_validity:{account_id}")
+    }
+
+    async fn store_mailbox_cursor(
+        db: &Arc<Database>,
+        account_id: &str,
+        last_seen_uid: u32,
+        uid_validity: Option<u32>,
+    ) -> anyhow::Result<()> {
+        db.set_integration_setting(
+            EMAIL_INTEGRATION,
+            &Self::last_seen_uid_key(account_id),
+            &last_seen_uid.to_string(),
+        )
+        .await?;
+
+        if let Some(uid_validity) = uid_validity {
+            db.set_integration_setting(
+                EMAIL_INTEGRATION,
+                &Self::uid_validity_key(account_id),
+                &uid_validity.to_string(),
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn load_mailbox_cursor(
+        db: &Arc<Database>,
+        account_id: &str,
+    ) -> anyhow::Result<(Option<u32>, Option<u32>)> {
+        let last_seen_uid = db
+            .get_integration_setting(EMAIL_INTEGRATION, &Self::last_seen_uid_key(account_id))
+            .await?
+            .and_then(|value| value.parse::<u32>().ok());
+        let uid_validity = db
+            .get_integration_setting(EMAIL_INTEGRATION, &Self::uid_validity_key(account_id))
+            .await?
+            .and_then(|value| value.parse::<u32>().ok());
+        Ok((last_seen_uid, uid_validity))
+    }
+
+    fn build_message_unique_id(uid_validity: Option<u32>, uid: u32) -> String {
+        match uid_validity {
+            Some(uid_validity) => format!("imap:{uid_validity}:{uid}"),
+            None => format!("imap:{uid}"),
+        }
+    }
+
+    fn plan_mailbox_poll(
+        stored_last_seen_uid: Option<u32>,
+        stored_uid_validity: Option<u32>,
+        mailbox_uid_next: Option<u32>,
+        mailbox_uid_validity: Option<u32>,
+    ) -> MailboxPollAction {
+        let current_last_uid = mailbox_uid_next.unwrap_or(1).saturating_sub(1);
+
+        if stored_last_seen_uid.is_none() {
+            return MailboxPollAction::SeedCursor {
+                last_seen_uid: current_last_uid,
+            };
+        }
+
+        if let (Some(stored_uid_validity), Some(mailbox_uid_validity)) =
+            (stored_uid_validity, mailbox_uid_validity)
+        {
+            if stored_uid_validity != mailbox_uid_validity {
+                return MailboxPollAction::SeedCursor {
+                    last_seen_uid: current_last_uid,
+                };
+            }
+        }
+
+        let last_seen_uid = stored_last_seen_uid.unwrap_or_default();
+        if let Some(mailbox_uid_next) = mailbox_uid_next {
+            if mailbox_uid_next <= last_seen_uid.saturating_add(1) {
+                return MailboxPollAction::NoChange;
+            }
+        }
+
+        MailboxPollAction::PollFrom {
+            start_uid: last_seen_uid.saturating_add(1),
+        }
+    }
+
+    async fn list_poll_accounts(&self) -> anyhow::Result<Vec<PollAccount>> {
+        let mut accounts = Vec::new();
+
+        if let Some(config) = &self.default_config {
+            accounts.push(PollAccount {
+                id: "default".to_string(),
+                email: config.username.clone(),
+                config: config.clone(),
+            });
+        }
+
+        if let Some(db) = &self.db {
+            for account in db.list_integration_accounts(EMAIL_INTEGRATION).await? {
+                if let Ok(config) = serde_json::from_str::<EmailConfig>(&account.data) {
+                    if !config.imap_host.trim().is_empty() {
+                        accounts.push(Self::poll_account_from_db(account, config));
+                    }
+                }
+            }
+        }
+
+        Ok(accounts)
+    }
+
+    fn poll_account_from_db(account: IntegrationAccount, config: EmailConfig) -> PollAccount {
+        PollAccount {
+            id: account.id,
+            email: config.username.clone(),
+            config,
+        }
+    }
+
+    async fn current_mailbox_state(
+        &self,
+        config: &EmailConfig,
+    ) -> anyhow::Result<(Option<u32>, Option<u32>)> {
+        let mut session = Self::imap_connect(config).await?;
+        let mailbox = session
+            .status(DEFAULT_FOLDER, "(UIDNEXT UIDVALIDITY)")
+            .await?;
+        session.logout().await.ok();
+        Ok((mailbox.uid_next, mailbox.uid_validity))
+    }
+
+    async fn seed_mailbox_cursor(
+        &self,
+        config: &EmailConfig,
+        fallback_last_seen_uid: u32,
+    ) -> anyhow::Result<(u32, Option<u32>)> {
+        let mut session = Self::imap_connect(config).await?;
+        let mailbox = session.select(DEFAULT_FOLDER).await?;
+        let last_seen_uid = match mailbox.uid_next {
+            Some(uid_next) => uid_next.saturating_sub(1),
+            None => {
+                let mut uids: Vec<u32> = session.uid_search("ALL").await?.into_iter().collect();
+                uids.sort_unstable();
+                uids.last().copied().unwrap_or(fallback_last_seen_uid)
+            }
+        };
+        let uid_validity = mailbox.uid_validity;
+        session.logout().await.ok();
+        Ok((last_seen_uid, uid_validity))
+    }
+
+    async fn fetch_new_message_summaries(
+        &self,
+        config: &EmailConfig,
+        start_uid: u32,
+    ) -> anyhow::Result<(Vec<ImapEventSummary>, Option<u32>)> {
+        let mut session = Self::imap_connect(config).await?;
+        let mailbox = session.select(DEFAULT_FOLDER).await?;
+        let uid_validity = mailbox.uid_validity;
+
+        let query = format!("UID {start_uid}:*");
+        let mut uids: Vec<u32> = session.uid_search(&query).await?.into_iter().collect();
+        uids.retain(|uid| *uid >= start_uid);
+        uids.sort_unstable();
+
+        if uids.is_empty() {
+            session.logout().await.ok();
+            return Ok((Vec::new(), uid_validity));
+        }
+
+        if uids.len() > MAX_POLL_FETCH_UIDS {
+            uids.truncate(MAX_POLL_FETCH_UIDS);
+        }
+
+        let uid_set = uids
+            .iter()
+            .map(|uid| uid.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let fetch_stream = session.uid_fetch(&uid_set, "RFC822.HEADER").await?;
+        let fetched: Vec<_> = {
+            use futures::TryStreamExt;
+            fetch_stream.try_collect().await?
+        };
+
+        let mut summaries = Vec::new();
+        for uid in uids {
+            let Some(message) = fetched.iter().find(|message| message.uid == Some(uid)) else {
+                continue;
+            };
+
+            let header = message
+                .header()
+                .or_else(|| message.body())
+                .unwrap_or_default();
+            let parsed = parse_header_summary(header);
+            let message_unique_id = Self::build_message_unique_id(uid_validity, uid);
+            summaries.push(ImapEventSummary {
+                uid,
+                message_unique_id,
+                header_message_id: parsed.message_id,
+                from: parsed.from,
+                to: parsed.to,
+                subject: parsed.subject,
+                date: parsed.date,
+            });
+        }
+
+        session.logout().await.ok();
+        Ok((summaries, uid_validity))
+    }
+
+    async fn emit_new_email_events(
+        &self,
+        db: &Arc<Database>,
+        account: &PollAccount,
+        messages: &[ImapEventSummary],
+    ) -> anyhow::Result<()> {
+        for message in messages {
+            let payload = serde_json::json!({
+                "uid": message.uid,
+                "message_id": &message.header_message_id,
+                "message_unique_id": &message.message_unique_id,
+                "from": &message.from,
+                "to": &message.to,
+                "subject": &message.subject,
+                "date": &message.date,
+                "received_at": Utc::now().to_rfc3339(),
+                "folder": DEFAULT_FOLDER,
+                "event_semantics": "new_message_arrival",
+                "account_id": &account.id,
+                "account_email": &account.email,
+            });
+            db.insert_integration_event(
+                EMAIL_INTEGRATION,
+                &account.id,
+                "new_email",
+                &message.message_unique_id,
+                &payload,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn poll_account(&self, db: &Arc<Database>, account: &PollAccount) -> anyhow::Result<()> {
+        let (mailbox_uid_next, mailbox_uid_validity) =
+            self.current_mailbox_state(&account.config).await?;
+        let (stored_last_seen_uid, stored_uid_validity) =
+            Self::load_mailbox_cursor(db, &account.id).await?;
+
+        match Self::plan_mailbox_poll(
+            stored_last_seen_uid,
+            stored_uid_validity,
+            mailbox_uid_next,
+            mailbox_uid_validity,
+        ) {
+            MailboxPollAction::NoChange => {}
+            MailboxPollAction::SeedCursor { last_seen_uid } => {
+                let (seeded_last_seen_uid, seeded_uid_validity) = self
+                    .seed_mailbox_cursor(&account.config, last_seen_uid)
+                    .await?;
+                Self::store_mailbox_cursor(
+                    db,
+                    &account.id,
+                    seeded_last_seen_uid,
+                    seeded_uid_validity.or(mailbox_uid_validity),
+                )
+                .await?;
+            }
+            MailboxPollAction::PollFrom { start_uid } => {
+                let (messages, fetched_uid_validity) = self
+                    .fetch_new_message_summaries(&account.config, start_uid)
+                    .await?;
+
+                if let Some(max_uid) = messages.iter().map(|message| message.uid).max() {
+                    self.emit_new_email_events(db, account, &messages).await?;
+                    Self::store_mailbox_cursor(
+                        db,
+                        &account.id,
+                        max_uid,
+                        fetched_uid_validity.or(mailbox_uid_validity),
+                    )
+                    .await?;
+                } else {
+                    let last_seen_uid = mailbox_uid_next
+                        .unwrap_or(start_uid)
+                        .saturating_sub(1)
+                        .max(start_uid.saturating_sub(1));
+                    Self::store_mailbox_cursor(
+                        db,
+                        &account.id,
+                        last_seen_uid,
+                        fetched_uid_validity.or(mailbox_uid_validity),
+                    )
+                    .await?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn get_account_config(&self, account_id: Option<&str>) -> anyhow::Result<EmailConfig> {
@@ -420,6 +757,20 @@ impl Integration for EmailIntegration {
             ]
         })
     }
+
+    async fn poll(&self) -> anyhow::Result<()> {
+        let Some(db) = &self.db else {
+            return Ok(());
+        };
+
+        for account in self.list_poll_accounts().await? {
+            if let Err(error) = self.poll_account(db, &account).await {
+                tracing::warn!("IMAP poll failed for account {}: {}", account.id, error);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn escape_imap_query_value(value: &str) -> String {
@@ -435,6 +786,42 @@ fn extract_header_fields(header_bytes: &[u8]) -> (String, String, String) {
         ),
         Err(_) => (String::new(), String::new(), String::new()),
     }
+}
+
+struct HeaderSummary {
+    message_id: Option<String>,
+    from: String,
+    to: Vec<String>,
+    subject: String,
+    date: String,
+}
+
+fn parse_header_summary(header_bytes: &[u8]) -> HeaderSummary {
+    match mailparse::parse_headers(header_bytes) {
+        Ok((headers, _)) => HeaderSummary {
+            message_id: headers.get_first_value("Message-ID"),
+            from: headers.get_first_value("From").unwrap_or_default(),
+            to: parse_recipient_list(&headers.get_first_value("To").unwrap_or_default()),
+            subject: headers.get_first_value("Subject").unwrap_or_default(),
+            date: headers.get_first_value("Date").unwrap_or_default(),
+        },
+        Err(_) => HeaderSummary {
+            message_id: None,
+            from: String::new(),
+            to: Vec::new(),
+            subject: String::new(),
+            date: String::new(),
+        },
+    }
+}
+
+fn parse_recipient_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_string())
+        .collect()
 }
 
 fn truncate_with_notice(text: String, max_chars: usize) -> String {
@@ -560,5 +947,65 @@ mod tests {
         assert_eq!(from, "sender@example.com");
         assert_eq!(subject, "Subject line");
         assert_eq!(date, "Tue, 10 Feb 2026 09:00:00 +0000");
+    }
+
+    #[test]
+    fn mailbox_poll_seeds_cursor_for_first_sync() {
+        let action = EmailIntegration::plan_mailbox_poll(None, None, Some(42), Some(7));
+        assert_eq!(action, MailboxPollAction::SeedCursor { last_seen_uid: 41 });
+    }
+
+    #[test]
+    fn mailbox_poll_reseeds_when_uid_validity_changes() {
+        let action = EmailIntegration::plan_mailbox_poll(Some(10), Some(7), Some(15), Some(8));
+        assert_eq!(action, MailboxPollAction::SeedCursor { last_seen_uid: 14 });
+    }
+
+    #[test]
+    fn mailbox_poll_detects_no_change_from_uid_next() {
+        let action = EmailIntegration::plan_mailbox_poll(Some(10), Some(7), Some(11), Some(7));
+        assert_eq!(action, MailboxPollAction::NoChange);
+    }
+
+    #[test]
+    fn mailbox_poll_fetches_from_next_uid() {
+        let action = EmailIntegration::plan_mailbox_poll(Some(10), Some(7), Some(14), Some(7));
+        assert_eq!(action, MailboxPollAction::PollFrom { start_uid: 11 });
+    }
+
+    #[test]
+    fn parse_header_summary_extracts_message_id_and_recipients() {
+        let raw = concat!(
+            "Message-ID: <abc@example.com>\r\n",
+            "From: sender@example.com\r\n",
+            "To: one@example.com, Two Person <two@example.com>\r\n",
+            "Subject: Subject line\r\n",
+            "Date: Tue, 10 Feb 2026 09:00:00 +0000\r\n",
+            "\r\n"
+        );
+
+        let summary = parse_header_summary(raw.as_bytes());
+        assert_eq!(summary.message_id.as_deref(), Some("<abc@example.com>"));
+        assert_eq!(summary.from, "sender@example.com");
+        assert_eq!(
+            summary.to,
+            vec![
+                "one@example.com".to_string(),
+                "Two Person <two@example.com>".to_string()
+            ]
+        );
+        assert_eq!(summary.subject, "Subject line");
+    }
+
+    #[test]
+    fn build_message_unique_id_prefers_uid_validity() {
+        assert_eq!(
+            EmailIntegration::build_message_unique_id(Some(7), 42),
+            "imap:7:42"
+        );
+        assert_eq!(
+            EmailIntegration::build_message_unique_id(None, 42),
+            "imap:42"
+        );
     }
 }
