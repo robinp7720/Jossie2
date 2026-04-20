@@ -4,6 +4,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
+use std::fmt;
 
 #[derive(Serialize)]
 pub struct ErrorBody {
@@ -36,6 +37,12 @@ impl AppError {
 impl From<anyhow::Error> for AppError {
     fn from(e: anyhow::Error) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, e)
+    }
+}
+
+impl fmt::Display for AppError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.error)
     }
 }
 

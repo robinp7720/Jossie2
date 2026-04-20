@@ -95,7 +95,7 @@ pub async fn oauth_callback_handler(
 
     let base_url = match resolve_public_base_url(&state, &headers) {
         Ok(base_url) => base_url,
-        Err(e) => return Html(format!("<h1>Configuration Error</h1><p>{}</p>", e.0)),
+        Err(e) => return Html(format!("<h1>Configuration Error</h1><p>{}</p>", e)),
     };
     let redirect_uri = format!("{base_url}/oauth/callback");
 
