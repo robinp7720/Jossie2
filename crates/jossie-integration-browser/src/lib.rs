@@ -1,8 +1,8 @@
 use headless_chrome::{Browser, LaunchOptions};
 use jossie_core::integration::{Integration, ToolDefinition};
+use scraper::{ElementRef, Html, Selector};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
-
 use url::Url;
 
 /// Patterns that indicate a page blocked us (bot detection, CAPTCHA, etc.)
@@ -13,11 +13,209 @@ const BOT_BLOCK_PATTERNS: &[&str] = &[
     "are not a robot",
     "blocked your ip",
     "access denied",
+    "bots use duckduckgo too",
+    "confirm this search was made by a human",
+    "select all squares containing",
+    "anomaly-modal",
+    "challenge-form",
 ];
+
+const SEARCH_RESULT_LIMIT: usize = 5;
 
 fn is_bot_blocked(content: &str) -> bool {
     let lower = content.to_lowercase();
     BOT_BLOCK_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn selector(css: &str) -> Selector {
+    Selector::parse(css).expect("valid CSS selector")
+}
+
+fn extract_element_text(element: ElementRef<'_>) -> String {
+    collapse_whitespace(&element.text().collect::<Vec<_>>().join(" "))
+}
+
+fn decode_duckduckgo_redirect(raw_href: &str) -> String {
+    let candidate = if raw_href.starts_with("//") {
+        format!("https:{raw_href}")
+    } else {
+        raw_href.to_string()
+    };
+
+    if let Ok(url) = Url::parse(&candidate) {
+        if url.domain() == Some("duckduckgo.com") && url.path() == "/l/" {
+            if let Some(target) = url
+                .query_pairs()
+                .find_map(|(key, value)| (key == "uddg").then_some(value.into_owned()))
+            {
+                return target;
+            }
+        }
+    }
+
+    candidate
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchResult {
+    title: String,
+    url: String,
+    snippet: String,
+}
+
+impl SearchResult {
+    fn new(title: String, url: String, snippet: String) -> Option<Self> {
+        let title = collapse_whitespace(&title);
+        let url = collapse_whitespace(&url);
+        let snippet = collapse_whitespace(&snippet);
+
+        if title.is_empty() || url.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            title,
+            url,
+            snippet,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SearchProvider {
+    DuckDuckGoLite,
+    BraveHtml,
+    DuckDuckGoInstantAnswer,
+}
+
+impl SearchProvider {
+    fn label(self) -> &'static str {
+        match self {
+            Self::DuckDuckGoLite => "DuckDuckGo Lite",
+            Self::BraveHtml => "Brave Search",
+            Self::DuckDuckGoInstantAnswer => "DuckDuckGo Instant Answer",
+        }
+    }
+}
+
+fn parse_duckduckgo_lite_results(html: &str) -> Vec<SearchResult> {
+    let document = Html::parse_document(html);
+    let link_selector = selector("a.result-link");
+    let snippet_selector = selector("td.result-snippet");
+    let snippets = document
+        .select(&snippet_selector)
+        .map(extract_element_text)
+        .collect::<Vec<_>>();
+
+    document
+        .select(&link_selector)
+        .enumerate()
+        .filter_map(|(index, link)| {
+            let title = extract_element_text(link);
+            let url = link.value().attr("href").map(decode_duckduckgo_redirect)?;
+            let snippet = snippets.get(index).cloned().unwrap_or_default();
+            SearchResult::new(title, url, snippet)
+        })
+        .collect()
+}
+
+fn parse_brave_results(html: &str) -> Vec<SearchResult> {
+    let document = Html::parse_document(html);
+    let snippet_selector = selector("div.snippet[data-type='web']");
+    let link_selector = selector("a[href]");
+    let title_selector = selector("div.title, a.title");
+    let body_selector = selector("div.generic-snippet div.content, div.description");
+
+    document
+        .select(&snippet_selector)
+        .filter_map(|snippet| {
+            let link = snippet.select(&link_selector).next()?;
+            let url = link.value().attr("href")?.to_string();
+            let title = snippet
+                .select(&title_selector)
+                .next()
+                .map(extract_element_text)
+                .unwrap_or_default();
+            let summary = snippet
+                .select(&body_selector)
+                .next()
+                .map(extract_element_text)
+                .unwrap_or_default();
+
+            SearchResult::new(title, url, summary)
+        })
+        .collect()
+}
+
+fn format_search_results(
+    query: &str,
+    provider: SearchProvider,
+    results: &[SearchResult],
+) -> String {
+    let mut out = vec![
+        "### Search Results".to_string(),
+        format!("Provider: {}", provider.label()),
+        format!("Query: {query}"),
+        String::new(),
+    ];
+
+    for (index, result) in results.iter().take(SEARCH_RESULT_LIMIT).enumerate() {
+        out.push(format!("{}. {}", index + 1, result.title));
+        out.push(format!("URL: {}", result.url));
+        if !result.snippet.is_empty() {
+            out.push(format!("Snippet: {}", result.snippet));
+        }
+        out.push(String::new());
+    }
+
+    out.join("\n").trim().to_string()
+}
+
+fn format_search_failures(query: &str, failures: &[String]) -> String {
+    let mut out = vec![
+        "### Search Failed".to_string(),
+        format!("Query: {query}"),
+        "Search providers did not return usable results.".to_string(),
+        String::new(),
+    ];
+
+    if !failures.is_empty() {
+        out.push("Attempts:".to_string());
+        for failure in failures {
+            out.push(format!("- {failure}"));
+        }
+    }
+
+    out.join("\n")
+}
+
+fn collect_instant_answer_topics(items: &[serde_json::Value], out: &mut Vec<SearchResult>) {
+    for item in items {
+        if let Some(topics) = item.get("Topics").and_then(|topics| topics.as_array()) {
+            collect_instant_answer_topics(topics, out);
+            continue;
+        }
+
+        let Some(text) = item.get("Text").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(url) = item.get("FirstURL").and_then(|value| value.as_str()) else {
+            continue;
+        };
+
+        let (title, snippet) = match text.split_once(" - ") {
+            Some((title, snippet)) => (title.to_string(), snippet.to_string()),
+            None => (text.to_string(), String::new()),
+        };
+
+        if let Some(result) = SearchResult::new(title, url.to_string(), snippet) {
+            out.push(result);
+        }
+    }
 }
 
 pub struct BrowserIntegration {
@@ -94,6 +292,14 @@ impl BrowserIntegration {
         })
         .await
         .map_err(|e| anyhow::anyhow!("Join error: {}", e))??;
+
+        if is_bot_blocked(&content) {
+            return Ok(
+                "### Page blocked\nThe site blocked this request (bot detection / CAPTCHA). \
+                 Try a different URL or approach."
+                    .into(),
+            );
+        }
 
         let markdown = jossie_core::text::html_to_text(&content);
 
@@ -173,26 +379,32 @@ impl BrowserIntegration {
                     ));
                 }
 
-                // It's HTML — check if it looks like it needs JS rendering.
-                // Heuristics: very short body, or contains noscript warnings.
-                let needs_js =
-                    body.len() < 1024 || (body.contains("<noscript>") && body.len() < 4096);
-
-                if needs_js {
-                    tracing::info!(
-                        "HTML response looks like it needs JS (len={}), falling back to browser",
-                        body.len()
-                    );
+                if is_bot_blocked(&body) {
+                    tracing::info!("Direct GET was bot-blocked, falling back to browser");
                 } else {
-                    let markdown = jossie_core::text::html_to_text(&body);
+                    // It's HTML — check if it looks like it needs JS rendering.
+                    // Heuristics: very short body, or contains noscript warnings.
+                    let needs_js =
+                        body.len() < 1024 || (body.contains("<noscript>") && body.len() < 4096);
 
-                    if is_bot_blocked(&markdown) {
-                        tracing::info!("Direct GET was bot-blocked, falling back to browser");
+                    if needs_js {
+                        tracing::info!(
+                            "HTML response looks like it needs JS (len={}), falling back to browser",
+                            body.len()
+                        );
                     } else {
-                        return Ok(format!(
-                            "### Content from {} (Direct Fetch)\n\n{}",
-                            domain, markdown
-                        ));
+                        let markdown = jossie_core::text::html_to_text(&body);
+
+                        if is_bot_blocked(&markdown) {
+                            tracing::info!(
+                                "Direct GET looked blocked after parsing, falling back to browser"
+                            );
+                        } else {
+                            return Ok(format!(
+                                "### Content from {} (Direct Fetch)\n\n{}",
+                                domain, markdown
+                            ));
+                        }
                     }
                 }
             }
@@ -211,41 +423,209 @@ impl BrowserIntegration {
         ))
     }
 
-    async fn browser_search(&self, query: &str) -> anyhow::Result<String> {
-        let url = format!(
-            "https://html.duckduckgo.com/html/?q={}",
-            urlencoding::encode(query)
-        );
-
-        tracing::info!("Searching DuckDuckGo HTML for: {}", query);
-
+    async fn fetch_search_html(
+        &self,
+        provider: SearchProvider,
+        url: &str,
+    ) -> anyhow::Result<String> {
         let resp = self
             .client
-            .get(&url)
-            .header("Accept", "text/html")
+            .get(url)
+            .header("Accept", "text/html,application/xhtml+xml")
+            .header("Accept-Language", "en-US,en;q=0.9")
             .send()
             .await?;
 
         let status = resp.status();
+        let body = resp.text().await?;
+
         if !status.is_success() {
-            return Ok(format!(
-                "### Search Failed\nDuckDuckGo returned status {}. Try again later.",
-                status
-            ));
+            anyhow::bail!("{} returned status {}", provider.label(), status);
         }
 
-        let body = resp.text().await?;
-        let markdown = jossie_core::text::html_to_text(&body);
+        if is_bot_blocked(&body) || is_bot_blocked(&jossie_core::text::html_to_text(&body)) {
+            anyhow::bail!("{} returned a bot challenge", provider.label());
+        }
 
-        if is_bot_blocked(&markdown) {
-            return Ok(
-                "### Search blocked\nThe search engine blocked this request (bot detection). \
-                 Try a different query or wait."
-                    .into(),
+        Ok(body)
+    }
+
+    async fn search_duckduckgo_lite(&self, query: &str) -> anyhow::Result<Vec<SearchResult>> {
+        let url = format!(
+            "https://lite.duckduckgo.com/lite/?q={}",
+            urlencoding::encode(query)
+        );
+        tracing::info!("Searching DuckDuckGo Lite for: {}", query);
+
+        let body = self
+            .fetch_search_html(SearchProvider::DuckDuckGoLite, &url)
+            .await?;
+        let results = parse_duckduckgo_lite_results(&body);
+
+        if results.is_empty() {
+            anyhow::bail!("DuckDuckGo Lite returned no parseable results");
+        }
+
+        Ok(results)
+    }
+
+    async fn search_brave_html(&self, query: &str) -> anyhow::Result<Vec<SearchResult>> {
+        let url = format!(
+            "https://search.brave.com/search?q={}&source=web",
+            urlencoding::encode(query)
+        );
+        tracing::info!("Searching Brave for: {}", query);
+
+        let body = self
+            .fetch_search_html(SearchProvider::BraveHtml, &url)
+            .await?;
+        let results = parse_brave_results(&body);
+
+        if results.is_empty() {
+            anyhow::bail!("Brave returned no parseable results");
+        }
+
+        Ok(results)
+    }
+
+    async fn search_duckduckgo_instant_answer(
+        &self,
+        query: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let url = format!(
+            "https://api.duckduckgo.com/?q={}&format=json&no_redirect=1&no_html=1",
+            urlencoding::encode(query)
+        );
+        tracing::info!("Searching DuckDuckGo Instant Answer for: {}", query);
+
+        let resp = self
+            .client
+            .get(&url)
+            .header("Accept", "application/json")
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!(
+                "{} returned status {}",
+                SearchProvider::DuckDuckGoInstantAnswer.label(),
+                resp.status()
             );
         }
 
-        Ok(format!("### Search Results\n\n{}", markdown))
+        let payload = resp.json::<serde_json::Value>().await?;
+        let heading = payload
+            .get("Heading")
+            .and_then(|value| value.as_str())
+            .map(collapse_whitespace)
+            .unwrap_or_default();
+        let abstract_text = payload
+            .get("AbstractText")
+            .and_then(|value| value.as_str())
+            .map(collapse_whitespace)
+            .unwrap_or_default();
+        let abstract_url = payload
+            .get("AbstractURL")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        let mut related = payload
+            .get("Results")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        let text = item.get("Text").and_then(|value| value.as_str())?;
+                        let url = item.get("FirstURL").and_then(|value| value.as_str())?;
+                        SearchResult::new(text.to_string(), url.to_string(), String::new())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if let Some(topics) = payload
+            .get("RelatedTopics")
+            .and_then(|value| value.as_array())
+        {
+            collect_instant_answer_topics(topics, &mut related);
+        }
+
+        if heading.is_empty() && abstract_text.is_empty() && related.is_empty() {
+            return Ok(None);
+        }
+
+        let mut out = vec![
+            "### Search Results".to_string(),
+            format!(
+                "Provider: {}",
+                SearchProvider::DuckDuckGoInstantAnswer.label()
+            ),
+            format!("Query: {query}"),
+            String::new(),
+        ];
+
+        if !heading.is_empty() || !abstract_text.is_empty() {
+            let mut summary = heading;
+            if !abstract_text.is_empty() {
+                if !summary.is_empty() {
+                    summary.push_str(": ");
+                }
+                summary.push_str(&abstract_text);
+            }
+            out.push(format!("Summary: {summary}"));
+            if !abstract_url.is_empty() {
+                out.push(format!("Source: {abstract_url}"));
+            }
+            out.push(String::new());
+        }
+
+        for (index, result) in related.iter().take(SEARCH_RESULT_LIMIT).enumerate() {
+            out.push(format!("{}. {}", index + 1, result.title));
+            out.push(format!("URL: {}", result.url));
+            if !result.snippet.is_empty() {
+                out.push(format!("Snippet: {}", result.snippet));
+            }
+            out.push(String::new());
+        }
+
+        Ok(Some(out.join("\n").trim().to_string()))
+    }
+
+    async fn browser_search(&self, query: &str) -> anyhow::Result<String> {
+        let mut failures = Vec::new();
+
+        for provider in [SearchProvider::DuckDuckGoLite, SearchProvider::BraveHtml] {
+            let attempt = match provider {
+                SearchProvider::DuckDuckGoLite => self.search_duckduckgo_lite(query).await,
+                SearchProvider::BraveHtml => self.search_brave_html(query).await,
+                SearchProvider::DuckDuckGoInstantAnswer => unreachable!(),
+            };
+
+            match attempt {
+                Ok(results) => return Ok(format_search_results(query, provider, &results)),
+                Err(err) => {
+                    tracing::warn!("{} search failed: {}", provider.label(), err);
+                    failures.push(format!("{}: {}", provider.label(), err));
+                }
+            }
+        }
+
+        match self.search_duckduckgo_instant_answer(query).await {
+            Ok(Some(summary)) => return Ok(summary),
+            Ok(None) => failures.push(format!(
+                "{}: no summary or related topics returned",
+                SearchProvider::DuckDuckGoInstantAnswer.label()
+            )),
+            Err(err) => failures.push(format!(
+                "{}: {}",
+                SearchProvider::DuckDuckGoInstantAnswer.label(),
+                err
+            )),
+        }
+
+        Ok(format_search_failures(query, &failures))
     }
 }
 
@@ -280,7 +660,8 @@ impl Integration for BrowserIntegration {
             },
             ToolDefinition {
                 name: "browser_search".to_string(),
-                description: "Searches the web for a query using DuckDuckGo.".to_string(),
+                description: "Searches the web for a query using multiple search providers."
+                    .to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -315,5 +696,70 @@ impl Integration for BrowserIntegration {
             }
             _ => anyhow::bail!("Unknown tool: {}", tool_name),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_duckduckgo_challenge_pages() {
+        let challenge = "Unfortunately, bots use DuckDuckGo too. Please confirm this search was made by a human.";
+        assert!(is_bot_blocked(challenge));
+    }
+
+    #[test]
+    fn parses_duckduckgo_lite_results_and_decodes_redirects() {
+        let html = r#"
+            <html><body>
+              <table>
+                <tr>
+                  <td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Frust-lang.org%2F&amp;rut=abc" class='result-link'>Rust Programming Language</a></td>
+                </tr>
+                <tr><td class='result-snippet'>Rust is blazingly fast and memory-efficient.</td></tr>
+                <tr>
+                  <td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdoc.rust-lang.org%2Fbook%2F&amp;rut=def" class='result-link'>The Rust Programming Language</a></td>
+                </tr>
+                <tr><td class='result-snippet'>Read the book.</td></tr>
+              </table>
+            </body></html>
+        "#;
+
+        let results = parse_duckduckgo_lite_results(html);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Rust Programming Language");
+        assert_eq!(results[0].url, "https://rust-lang.org/");
+        assert_eq!(
+            results[0].snippet,
+            "Rust is blazingly fast and memory-efficient."
+        );
+    }
+
+    #[test]
+    fn parses_brave_results() {
+        let html = r#"
+            <html><body>
+              <div class="snippet" data-type="web">
+                <div class="result-content">
+                  <a href="https://rust-lang.org/" target="_self">
+                    <div class="title search-snippet-title" title="Rust Programming Language">Rust Programming Language</div>
+                  </a>
+                  <div class="generic-snippet">
+                    <div class="content">Rust is blazingly fast and memory-efficient.</div>
+                  </div>
+                </div>
+              </div>
+            </body></html>
+        "#;
+
+        let results = parse_brave_results(html);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Rust Programming Language");
+        assert_eq!(results[0].url, "https://rust-lang.org/");
+        assert_eq!(
+            results[0].snippet,
+            "Rust is blazingly fast and memory-efficient."
+        );
     }
 }

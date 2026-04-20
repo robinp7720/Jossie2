@@ -5,6 +5,7 @@ members = [
     "crates/jossie-db",
     "crates/jossie-server",
     "crates/jossie-telegram",
+    "crates/jossie-integration-browser",
     "crates/jossie-integration-email",
     "crates/jossie-integration-google",
     "crates/jossie-integration-graph",
@@ -56,6 +57,7 @@ regex = "1"
 subtle = "2"
 headless_chrome = { version = "1.0", features = ["fetch"] }
 html2text = "0.6"
+scraper = "0.23"
 
 [package]
 name = "jossie2"
