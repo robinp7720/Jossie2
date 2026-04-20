@@ -268,7 +268,7 @@ impl Integration for EmailIntegration {
             },
             ToolDefinition {
                 name: "email_search".to_string(),
-                description: "Search emails by query in subject or sender".to_string(),
+                description: "Search emails by query in subject or sender so you can triage likely relevant messages before reading full bodies.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -282,7 +282,7 @@ impl Integration for EmailIntegration {
             },
             ToolDefinition {
                 name: "email_read".to_string(),
-                description: "Read a specific email by UID".to_string(),
+                description: "Read the full content of a specific email by UID when triage indicates it is relevant, important, or actionable.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {

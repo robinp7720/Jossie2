@@ -42,6 +42,14 @@ impl std::str::FromStr for Role {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: Uuid,
+    pub name: String,
+    pub mime_type: Option<String>,
+    pub size: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: Uuid,
     pub conversation_id: Uuid,
@@ -53,6 +61,8 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<Attachment>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -67,6 +77,7 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            attachments: None,
             created_at: Utc::now(),
         }
     }
@@ -81,6 +92,7 @@ impl Message {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            attachments: None,
             created_at: Utc::now(),
         }
     }
@@ -100,6 +112,12 @@ impl Message {
     /// Set the name field.
     pub fn with_name(mut self, name: String) -> Self {
         self.name = Some(name);
+        self
+    }
+
+    /// Set the attachments field.
+    pub fn with_attachments(mut self, attachments: Vec<Attachment>) -> Self {
+        self.attachments = Some(attachments);
         self
     }
 }

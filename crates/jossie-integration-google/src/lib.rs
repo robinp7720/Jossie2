@@ -1696,7 +1696,7 @@ impl Integration for GoogleIntegration {
             },
             ToolDefinition {
                 name: "gmail_search".to_string(),
-                description: "Search Gmail messages with pagination support".to_string(),
+                description: "Search Gmail messages with pagination support. Use this to triage likely relevant messages before reading full bodies.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1711,7 +1711,7 @@ impl Integration for GoogleIntegration {
             },
             ToolDefinition {
                 name: "gmail_read".to_string(),
-                description: "Read a specific Gmail message by ID".to_string(),
+                description: "Read the full content of a specific Gmail message by ID when triage indicates it is relevant, important, or actionable.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1795,7 +1795,7 @@ impl Integration for GoogleIntegration {
             },
             ToolDefinition {
                 name: "calendar_list_events".to_string(),
-                description: "List upcoming Google Calendar events".to_string(),
+                description: "List upcoming Google Calendar events when calendar context is relevant for planning, verification, or action.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {

@@ -11,6 +11,13 @@ export type ToolCall = {
   arguments: string
 }
 
+export type FileAttachment = {
+  id: string
+  name: string
+  mime_type?: string
+  size: number
+}
+
 export type Message = {
   id: string
   role: 'user' | 'assistant' | 'tool' | 'system'
@@ -19,6 +26,7 @@ export type Message = {
   name?: string | null
   tool_call_id?: string | null
   tool_calls?: ToolCall[] | null
+  attachments?: FileAttachment[] | null
 }
 
 export type OnboardingField = {

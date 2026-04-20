@@ -8,9 +8,9 @@ members = [
     "crates/jossie-integration-email",
     "crates/jossie-integration-google",
     "crates/jossie-integration-graph",
-    "crates/jossie-integration-memory",
-    "crates/jossie-integration-browser",
     "crates/jossie-integration-http",
+    "crates/jossie-integration-memory",
+    "crates/jossie-integration-files",
     "crates/jossie-integration-scheduler",
 ]
 resolver = "3"
@@ -25,13 +25,14 @@ jossie-integration-email = { path = "crates/jossie-integration-email" }
 jossie-integration-google = { path = "crates/jossie-integration-google" }
 jossie-integration-graph = { path = "crates/jossie-integration-graph" }
 jossie-integration-memory = { path = "crates/jossie-integration-memory" }
+jossie-integration-files = { path = "crates/jossie-integration-files" }
 jossie-integration-scheduler = { path = "crates/jossie-integration-scheduler" }
 
 jossie-integration-browser = { path = "crates/jossie-integration-browser" }
 jossie-integration-http = { path = "crates/jossie-integration-http" }
 
 tokio = { version = "1", features = ["full"] }
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }
@@ -82,6 +83,7 @@ jossie-db = { workspace = true }
 jossie-llm = { workspace = true }
 jossie-server = { workspace = true }
 jossie-integration-memory = { workspace = true }
+jossie-integration-files = { path = "crates/jossie-integration-files" }
 jossie-integration-email = { workspace = true }
 jossie-integration-google = { workspace = true }
 jossie-integration-graph = { workspace = true }

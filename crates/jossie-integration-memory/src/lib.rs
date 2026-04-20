@@ -13,6 +13,41 @@ impl MemoryIntegration {
     }
 }
 
+fn sensitive_memory_reason(key: &str, content: &str, tags: &str) -> Option<&'static str> {
+    let haystack = format!(
+        "{}\n{}\n{}",
+        key.to_ascii_lowercase(),
+        content.to_ascii_lowercase(),
+        tags.to_ascii_lowercase()
+    );
+
+    [
+        ("password:", "password"),
+        ("password is", "password"),
+        ("passcode:", "passcode"),
+        ("passcode is", "passcode"),
+        ("login code", "login code"),
+        ("verification code", "verification code"),
+        ("one-time password", "one-time password"),
+        ("one time password", "one-time password"),
+        ("otp", "otp"),
+        ("2fa code", "2fa code"),
+        ("mfa code", "mfa code"),
+        ("recovery code", "recovery code"),
+        ("backup code", "backup code"),
+        ("access token", "access token"),
+        ("refresh token", "refresh token"),
+        ("api key", "api key"),
+        ("client secret", "client secret"),
+        ("secret key", "secret key"),
+        ("private key", "private key"),
+        ("session token", "session token"),
+        ("bearer ", "bearer token"),
+    ]
+    .into_iter()
+    .find_map(|(needle, label)| haystack.contains(needle).then_some(label))
+}
+
 #[async_trait::async_trait]
 impl Integration for MemoryIntegration {
     fn name(&self) -> &str {
@@ -23,14 +58,15 @@ impl Integration for MemoryIntegration {
         vec![
             ToolDefinition {
                 name: "memory_save".to_string(),
-                description: "Save information to long-term memory with a key and optional tags"
+                description: "Save durable context to long-term memory, such as preferences, relationships, ongoing projects, recurring needs, or other information likely to matter again. Do not use this for transient clutter or secrets unless there is a clear reason."
                     .to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "key": {"type": "string", "description": "Unique key for this memory"},
-                        "content": {"type": "string", "description": "Content to remember"},
-                        "tags": {"type": "string", "description": "Space-separated tags for categorization (use empty string for none)"}
+                        "content": {"type": "string", "description": "Durable content to remember"},
+                        "tags": {"type": "string", "description": "Space-separated tags for categorization (use empty string for none)"},
+                        "allow_sensitive": {"type": "boolean", "description": "Set true only when the user explicitly wants a sensitive secret retained and there is a clear durable reason. Defaults to false."}
                     },
                     "required": ["key", "content", "tags"],
                     "additionalProperties": false
@@ -80,8 +116,19 @@ impl Integration for MemoryIntegration {
                     content: String,
                     #[serde(default)]
                     tags: String,
+                    #[serde(default)]
+                    allow_sensitive: bool,
                 }
                 let args: Args = serde_json::from_str(arguments)?;
+                if !args.allow_sensitive {
+                    if let Some(reason) =
+                        sensitive_memory_reason(&args.key, &args.content, &args.tags)
+                    {
+                        anyhow::bail!(
+                            "Refusing to save likely sensitive secret ({reason}) to long-term memory without allow_sensitive=true"
+                        );
+                    }
+                }
                 self.db
                     .memory_save(&args.key, &args.content, &args.tags)
                     .await?;
@@ -159,6 +206,41 @@ mod tests {
             .await
             .unwrap();
         assert!(search_result.contains("important info"));
+    }
+
+    #[tokio::test]
+    async fn rejects_sensitive_memory_by_default() {
+        let mem = test_memory().await;
+
+        let result = mem
+            .execute(
+                "memory_save",
+                r#"{"key":"ops","content":"password: hunter2","tags":""}"#,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("allow_sensitive=true")
+        );
+    }
+
+    #[tokio::test]
+    async fn allows_sensitive_memory_with_explicit_override() {
+        let mem = test_memory().await;
+
+        let result = mem
+            .execute(
+                "memory_save",
+                r#"{"key":"ops","content":"password: hunter2","tags":"","allow_sensitive":true}"#,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.contains("Saved"));
     }
 
     #[tokio::test]

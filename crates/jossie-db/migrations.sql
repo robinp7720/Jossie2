@@ -139,3 +139,21 @@ CREATE TABLE IF NOT EXISTS conversation_summaries (
     last_message_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Files and Attachments
+CREATE TABLE IF NOT EXISTS files (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    mime_type TEXT,
+    size INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Link messages to files
+CREATE TABLE IF NOT EXISTS message_attachments (
+    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    PRIMARY KEY (message_id, file_id)
+);

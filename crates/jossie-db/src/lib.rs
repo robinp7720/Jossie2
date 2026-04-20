@@ -163,7 +163,7 @@ impl Database {
     ) -> anyhow::Result<Vec<Message>> {
         let conv_str = conversation_id.to_string();
 
-        if let Some(limit) = limit {
+        let rows = if let Some(limit) = limit {
             let limit_val = limit as i64;
             let mut rows = sqlx::query_as::<_, MessageRow>("SELECT id, conversation_id, role, content, tool_calls, tool_call_id, name, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?")
                 .bind(&conv_str)
@@ -172,14 +172,34 @@ impl Database {
                 .await?;
             // Reverse to get chronological order (oldest first)
             rows.reverse();
-            Ok(rows.into_iter().map(Into::into).collect())
+            rows
         } else {
-            let rows = sqlx::query_as::<_, MessageRow>("SELECT id, conversation_id, role, content, tool_calls, tool_call_id, name, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC")
+            sqlx::query_as::<_, MessageRow>("SELECT id, conversation_id, role, content, tool_calls, tool_call_id, name, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC")
                 .bind(&conv_str)
                 .fetch_all(&self.pool)
-                .await?;
-            Ok(rows.into_iter().map(Into::into).collect())
+                .await?
+        };
+
+        let mut messages = Vec::new();
+        for row in rows {
+            let mut msg: Message = row.into();
+            let attachments = self.get_message_attachments(msg.id).await?;
+            if !attachments.is_empty() {
+                msg.attachments = Some(
+                    attachments
+                        .into_iter()
+                        .map(|f| jossie_core::types::Attachment {
+                            id: f.id,
+                            name: f.name,
+                            mime_type: f.mime_type,
+                            size: f.size,
+                        })
+                        .collect(),
+                );
+            }
+            messages.push(msg);
         }
+        Ok(messages)
     }
 
     // Memory (FTS5)
@@ -1133,9 +1153,128 @@ impl Database {
         .await?;
         Ok(())
     }
+
+    // Files
+
+    pub async fn save_file_record(
+        &self,
+        id: &Uuid,
+        name: &str,
+        mime_type: Option<&str>,
+        size: i64,
+        path: &str,
+        conversation_id: Option<Uuid>,
+    ) -> anyhow::Result<()> {
+        let id_str = id.to_string();
+        let conv_str = conversation_id.map(|u| u.to_string());
+        sqlx::query(
+            "INSERT INTO files (id, name, mime_type, size, path, conversation_id) VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        .bind(&id_str)
+        .bind(name)
+        .bind(mime_type)
+        .bind(size)
+        .bind(path)
+        .bind(conv_str)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_file_record(&self, id: &Uuid) -> anyhow::Result<Option<FileRecord>> {
+        let id_str = id.to_string();
+        let row = sqlx::query_as::<_, FileRow>("SELECT * FROM files WHERE id = ?")
+            .bind(&id_str)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(Into::into))
+    }
+
+    pub async fn list_files_for_conversation(
+        &self,
+        conversation_id: Uuid,
+    ) -> anyhow::Result<Vec<FileRecord>> {
+        let conv_str = conversation_id.to_string();
+        let rows = sqlx::query_as::<_, FileRow>(
+            "SELECT * FROM files WHERE conversation_id = ? ORDER BY created_at DESC",
+        )
+        .bind(&conv_str)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn link_message_attachment(
+        &self,
+        message_id: Uuid,
+        file_id: Uuid,
+    ) -> anyhow::Result<()> {
+        let msg_str = message_id.to_string();
+        let file_str = file_id.to_string();
+        sqlx::query(
+            "INSERT OR IGNORE INTO message_attachments (message_id, file_id) VALUES (?, ?)",
+        )
+        .bind(&msg_str)
+        .bind(&file_str)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_message_attachments(
+        &self,
+        message_id: Uuid,
+    ) -> anyhow::Result<Vec<FileRecord>> {
+        let msg_str = message_id.to_string();
+        let rows = sqlx::query_as::<_, FileRow>(
+            "SELECT f.* FROM files f
+             JOIN message_attachments ma ON f.id = ma.file_id
+             WHERE ma.message_id = ?
+             ORDER BY f.created_at ASC",
+        )
+        .bind(&msg_str)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
 }
 
 // Row types for sqlx
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub mime_type: Option<String>,
+    pub size: i64,
+    pub path: String,
+    pub conversation_id: Option<Uuid>,
+    pub created_at: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct FileRow {
+    id: String,
+    name: String,
+    mime_type: Option<String>,
+    size: i64,
+    path: String,
+    conversation_id: Option<String>,
+    created_at: String,
+}
+
+impl From<FileRow> for FileRecord {
+    fn from(r: FileRow) -> Self {
+        FileRecord {
+            id: r.id.parse().unwrap_or_default(),
+            name: r.name,
+            mime_type: r.mime_type,
+            size: r.size,
+            path: r.path,
+            conversation_id: r.conversation_id.and_then(|s| s.parse().ok()),
+            created_at: r.created_at,
+        }
+    }
+}
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GraphNode {
     pub id: String,
@@ -1374,6 +1513,7 @@ impl From<MessageRow> for Message {
             }),
             tool_call_id: r.tool_call_id,
             name: r.name,
+            attachments: None, // Populated separately in get_messages
             created_at: r.created_at.parse().unwrap_or_else(|e| {
                 tracing::warn!("Failed to parse message created_at '{}': {e}", r.created_at);
                 chrono::DateTime::default()

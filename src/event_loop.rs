@@ -184,6 +184,7 @@ async fn process_event_inner(
         tool_calls: None,
         tool_call_id: None,
         name: Some("integration_event_notification".to_string()),
+        attachments: None,
         created_at: Utc::now(),
     };
     persist_message(state, &assistant_msg).await?;
@@ -327,6 +328,7 @@ async fn process_email_event_batch_inner(
         tool_calls: None,
         tool_call_id: None,
         name: Some("integration_event_notification".to_string()),
+        attachments: None,
         created_at: Utc::now(),
     };
     persist_message(state, &assistant_msg).await?;
@@ -410,6 +412,7 @@ async fn process_calendar_event_batch_inner(
         tool_calls: None,
         tool_call_id: None,
         name: Some("integration_event_notification".to_string()),
+        attachments: None,
         created_at: Utc::now(),
     };
     persist_message(state, &assistant_msg).await?;
@@ -839,6 +842,7 @@ async fn execute_scheduled_task(
                 tool_calls: None,
                 tool_call_id: None,
                 name: Some("scheduled_task".to_string()),
+                attachments: None,
                 created_at: Utc::now(),
             };
             persist_message(state, &user_msg).await?;
@@ -938,7 +942,8 @@ async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
 
         if !state.telegram_token.trim().is_empty() {
             if let Some(chat_id) = chat_id {
-                match jossie_telegram::send_message(&state.telegram_token, chat_id, &msg.content).await
+                match jossie_telegram::send_message(&state.telegram_token, chat_id, &msg.content)
+                    .await
                 {
                     Ok(_) => {
                         tracing::info!("OOB message {} sent successfully", msg.id);
@@ -965,6 +970,7 @@ async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
             conversation_id,
             role: Role::Assistant,
             content: msg.content.clone(),
+            attachments: None,
             tool_calls: None,
             tool_call_id: None,
             name: Some("oob_message".to_string()),

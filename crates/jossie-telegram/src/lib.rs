@@ -1,3 +1,5 @@
+use chrono::Utc;
+use jossie_core::types::Role;
 use jossie_server::AppState;
 use std::sync::Arc;
 use teloxide::prelude::*;
@@ -87,13 +89,15 @@ impl TelegramBot {
                 let user_msg = jossie_core::types::Message {
                     id: Uuid::new_v4(),
                     conversation_id: conv_id,
-                    role: jossie_core::types::Role::User,
+                    role: Role::User,
                     content: text.to_string(),
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
-                    created_at: chrono::Utc::now(),
+                    attachments: None,
+                    created_at: Utc::now(),
                 };
+
                 if let Err(e) = state.db.save_message(&user_msg).await {
                     return Err(respond(&e));
                 }

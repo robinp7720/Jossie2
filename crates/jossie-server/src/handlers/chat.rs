@@ -17,6 +17,8 @@ pub struct ChatRequest {
     message: String,
     #[serde(default)]
     conversation_id: Option<Uuid>,
+    #[serde(default)]
+    file_ids: Option<Vec<Uuid>>,
 }
 
 #[derive(Serialize)]
@@ -34,8 +36,38 @@ pub async fn chat_handler(
         None => state.db.create_conversation(None).await?.id,
     };
 
-    let user_msg = Message::new(conv_id, Role::User, req.message);
+    let mut user_msg = Message::new(conv_id, Role::User, req.message);
+    if let Some(ref fids) = req.file_ids {
+        let mut attachments = Vec::new();
+        for fid in fids {
+            if let Some(record) = state
+                .db
+                .get_file_record(fid)
+                .await
+                .map_err(anyhow::Error::from)?
+            {
+                attachments.push(jossie_core::types::Attachment {
+                    id: record.id,
+                    name: record.name,
+                    mime_type: record.mime_type,
+                    size: record.size,
+                });
+            }
+        }
+        user_msg = user_msg.with_attachments(attachments);
+    }
     persist_message(&state, &user_msg).await?;
+
+    // Link attachments in DB
+    if let Some(fids) = req.file_ids {
+        for fid in fids {
+            state
+                .db
+                .link_message_attachment(user_msg.id, fid)
+                .await
+                .map_err(anyhow::Error::from)?;
+        }
+    }
 
     let response = run_agent_loop(&state, conv_id).await?;
 
@@ -95,9 +127,30 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
 
         tracing::info!("Processing message for conversation {}", conv_id);
 
-        let user_msg = Message::new(conv_id, Role::User, req.message);
+        let mut user_msg = Message::new(conv_id, Role::User, req.message);
+        if let Some(ref fids) = req.file_ids {
+            let mut attachments = Vec::new();
+            for fid in fids {
+                if let Ok(Some(record)) = state.db.get_file_record(fid).await {
+                    attachments.push(jossie_core::types::Attachment {
+                        id: record.id,
+                        name: record.name,
+                        mime_type: record.mime_type,
+                        size: record.size,
+                    });
+                }
+            }
+            user_msg = user_msg.with_attachments(attachments);
+        }
         if persist_message(&state, &user_msg).await.is_err() {
             continue;
+        }
+
+        // Link attachments in DB
+        if let Some(fids) = req.file_ids {
+            for fid in fids {
+                let _ = state.db.link_message_attachment(user_msg.id, fid).await;
+            }
         }
 
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);

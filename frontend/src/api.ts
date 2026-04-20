@@ -12,12 +12,17 @@ const buildUrl = (config: ApiConfig, path: string) => {
   return `${base}${path}`
 }
 
-const buildHeaders = (config: ApiConfig) => {
+const buildHeaders = (config: ApiConfig, options: RequestInit = {}) => {
   const headers = new Headers()
   if (config.token) {
     headers.set('Authorization', `Bearer ${config.token}`)
   }
-  headers.set('Content-Type', 'application/json')
+
+  // If the body is NOT FormData, default to application/json
+  if (!(options.body instanceof FormData)) {
+    headers.set('Content-Type', 'application/json')
+  }
+
   return headers
 }
 
@@ -29,7 +34,7 @@ export const request = async <T>(
   const response = await fetch(buildUrl(config, path), {
     ...options,
     headers: {
-      ...Object.fromEntries(buildHeaders(config).entries()),
+      ...Object.fromEntries(buildHeaders(config, options).entries()),
       ...(options.headers ?? {}),
     },
   })
@@ -73,14 +78,26 @@ export const sendMessage = (
   config: ApiConfig,
   message: string,
   conversationId?: string | null,
+  fileIds?: string[],
 ) =>
   request<{ conversation_id: string; message: string }>(config, '/api/chat', {
     method: 'POST',
     body: JSON.stringify({
       message,
       ...(conversationId ? { conversation_id: conversationId } : {}),
+      ...(fileIds ? { file_ids: fileIds } : {}),
     }),
   })
+
+export const uploadFile = (config: ApiConfig, file: File) => {
+  const formData = new FormData()
+  formData.append('file', file)
+
+  return request<{ file_id: string; name: string }>(config, '/api/files', {
+    method: 'POST',
+    body: formData,
+  })
+}
 
 export const listOnboarding = (config: ApiConfig) =>
   request<OnboardingStatus[]>(config, '/api/onboarding')

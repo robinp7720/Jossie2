@@ -79,7 +79,11 @@ impl Default for AgentRunOptions {
     }
 }
 
-async fn build_system_prompt(state: &AppState, user_message: Option<&str>) -> String {
+async fn build_system_prompt(
+    state: &AppState,
+    conversation_id: Option<Uuid>,
+    user_message: Option<&str>,
+) -> String {
     let mut prompt = state.system_prompt.clone();
 
     // Add current time context
@@ -111,6 +115,17 @@ async fn build_system_prompt(state: &AppState, user_message: Option<&str>) -> St
     if let Ok(Some(entry)) = state.db.get_memory("user_profile").await {
         prompt.push_str("\n\n## User Description\n");
         prompt.push_str(&entry.content);
+    }
+
+    if let Some(conv_id) = conversation_id {
+        if let Ok(files) = state.db.list_files_for_conversation(conv_id).await {
+            if !files.is_empty() {
+                prompt.push_str("\n\n## Attached Files\nThe following files are shared in this conversation. Use `read_file` or `ingest_chat_export` to access them:\n");
+                for file in files {
+                    prompt.push_str(&format!("- `{}` (ID: {})\n", file.name, file.id));
+                }
+            }
+        }
     }
 
     match state.db.memory_list_keys().await {
@@ -161,10 +176,11 @@ fn format_memory_index(keys: &[MemoryKeyInfo]) -> String {
 
 pub async fn prepend_system_prompt(
     state: &AppState,
+    conversation_id: Option<Uuid>,
     messages: &mut Vec<Message>,
     user_message: Option<&str>,
 ) {
-    let content = build_system_prompt(state, user_message).await;
+    let content = build_system_prompt(state, conversation_id, user_message).await;
     if content.is_empty() {
         return;
     }
@@ -210,7 +226,13 @@ async fn prepare_run_context(
     state: &AppState,
     conv_id: Uuid,
     options: &AgentRunOptions,
-) -> anyhow::Result<(Vec<jossie_core::ToolDefinition>, Vec<Message>, String, GoalTracker, usize)> {
+) -> anyhow::Result<(
+    Vec<jossie_core::ToolDefinition>,
+    Vec<Message>,
+    String,
+    GoalTracker,
+    usize,
+)> {
     let tools = build_tools_for_options(state, options);
 
     let mut messages = state
@@ -226,7 +248,7 @@ async fn prepare_run_context(
     sanitize_context_window(&mut messages);
     maybe_summarize_context(state, conv_id, &mut messages).await;
     sanitize_context_window(&mut messages);
-    prepend_system_prompt(state, &mut messages, Some(&last_user_msg)).await;
+    prepend_system_prompt(state, Some(conv_id), &mut messages, Some(&last_user_msg)).await;
     if options.scheduled_execution {
         messages.insert(1, Message::transient(
             Role::System,
@@ -294,6 +316,7 @@ fn prepare_tool_calls_for_execution(
             if call.name.starts_with("schedule_")
                 || call.name == "send_user_message"
                 || call.name == "list_scheduled_tasks"
+                || call.name == "list_files"
             {
                 if let Ok(mut args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
                     if let Some(obj) = args.as_object_mut() {
@@ -1059,9 +1082,9 @@ async fn generate_event_message_inner(
     sanitize_context_window(&mut messages);
 
     let event_context = build_event_context_hint(event);
-    let mut prompt = build_system_prompt(state, Some(&event_context)).await;
+    let mut prompt = build_system_prompt(state, Some(conversation_id), Some(&event_context)).await;
     prompt.push_str(
-        "\n\n## Event Mode\nYou are receiving a new integration event.\nInterpret this event independently as a fresh arrival.\nDo NOT imply that you made a prior mistake, correction, or retraction unless the event payload explicitly says so.\nFor `gmail_new_message` and `new_email_batch`, frame updates as newly arrived emails, even when similar to prior ones.\nRespond with strict JSON only:\n{\"action\":\"notify\",\"message\":\"<short user-facing message>\"}\nor\n{\"action\":\"skip\",\"message\":\"\"}"
+        "\n\n## Event Mode\nYou are evaluating whether this integration event deserves an interruption.\nDefault to quiet triage.\nNotify only if the event is urgent, time-sensitive, actionable, clearly relevant to the user, or materially changes their plans.\nSkip low-signal items such as newsletters, receipts, marketing mail, routine confirmations, automated churn, or minor non-actionable calendar edits.\nFor email batches, notify only when the batch as a whole suggests something worth surfacing now.\nInterpret this event independently as a fresh arrival.\nDo NOT imply that you made a prior mistake, correction, or retraction unless the event payload explicitly says so.\nFor `gmail_new_message` and `new_email_batch`, frame updates as newly arrived emails, even when similar to prior ones.\nIf you notify, keep the message short, concrete, and explain why it matters now.\nRespond with strict JSON only:\n{\"action\":\"notify\",\"message\":\"<short user-facing message>\"}\nor\n{\"action\":\"skip\",\"message\":\"\"}"
     );
 
     messages.insert(0, Message::transient(Role::System, prompt));

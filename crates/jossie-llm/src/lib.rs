@@ -582,6 +582,7 @@ mod tests {
             conversation_id: Uuid::new_v4(),
             role,
             content: content.to_string(),
+            attachments: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,

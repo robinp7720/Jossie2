@@ -62,6 +62,9 @@ async fn main() -> Result<()> {
 
     let mut registry = IntegrationRegistry::new();
     registry.register(Arc::new(MemoryIntegration::new(db.clone())));
+    registry.register(Arc::new(jossie_integration_files::FilesIntegration::new(
+        db.clone(),
+    )));
 
     // Knowledge Graph
     registry.register(Arc::new(jossie_integration_graph::GraphIntegration::new(

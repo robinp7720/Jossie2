@@ -6,7 +6,6 @@ pub mod middleware;
 pub mod state;
 
 pub use agent::{prepend_system_prompt, run_agent_loop};
-pub use events::ServerEvent;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
@@ -14,6 +13,7 @@ use axum::{
     middleware as axum_middleware,
     routing::{delete, get, post},
 };
+pub use events::ServerEvent;
 pub use state::AppState;
 use std::sync::Arc;
 use tower::limit::ConcurrencyLimitLayer;
@@ -56,6 +56,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/conversations/{id}/cancel",
             post(handlers::conversations::cancel_conversation_run),
         )
+        // Files
+        .route("/api/files", post(handlers::files::upload_file))
         .route("/api/graph", get(handlers::graph::graph_handler))
         // Config / Onboarding
         .route(
