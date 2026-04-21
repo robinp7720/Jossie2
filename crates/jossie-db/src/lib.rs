@@ -1,12 +1,15 @@
+use anyhow::Context;
 use chrono::Utc;
 use jossie_core::types::{Conversation, Message, Role};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use uuid::Uuid;
 
 pub struct Database {
     pool: SqlitePool,
+    url: String,
 }
 
 impl Database {
@@ -30,10 +33,52 @@ impl Database {
             .max_connections(5)
             .connect_with(options)
             .await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            url: url.to_string(),
+        })
     }
 
     pub async fn migrate(&self) -> anyhow::Result<()> {
+        if self.attachment_schema_needs_repair().await? {
+            self.repair_attachment_schema_with_backup(
+                "Detected invalid attachment schema entry in sqlite_schema; attempting repair",
+            )
+            .await?;
+        }
+
+        if let Err(error) = self.run_migrations().await {
+            if self.is_repairable_attachment_schema_error(&error) {
+                self.repair_attachment_schema_with_backup(
+                    "Detected malformed attachment schema while migrating SQLite database; attempting repair",
+                )
+                .await?;
+                self.run_migrations().await?;
+                return Ok(());
+            }
+
+            tracing::error!("Migration failed: {error}");
+            return Err(error);
+        }
+
+        Ok(())
+    }
+
+    async fn repair_attachment_schema_with_backup(&self, message: &str) -> anyhow::Result<()> {
+        tracing::warn!("{message}");
+        let backup_path = self.backup_database_file().await?;
+        if let Some(path) = backup_path.as_ref() {
+            tracing::warn!(
+                "Created backup before SQLite attachment schema repair: {}",
+                path.display()
+            );
+        }
+        self.repair_attachment_schema().await?;
+        tracing::info!("SQLite attachment schema repaired successfully");
+        Ok(())
+    }
+
+    async fn run_migrations(&self) -> anyhow::Result<()> {
         // Split migrations into individual statements and run each one.
         // IF NOT EXISTS clauses handle idempotency; real errors are propagated.
         let sql = include_str!("../../jossie-db/migrations.sql");
@@ -51,11 +96,166 @@ impl Database {
                         &statement[..statement.len().min(80)]
                     );
                 } else {
-                    tracing::error!("Migration failed: {e}");
                     return Err(e.into());
                 }
             }
         }
+        Ok(())
+    }
+
+    fn is_repairable_attachment_schema_message(&self, message: &str) -> bool {
+        let message = message.to_lowercase();
+        if !message.contains("malformed database schema") {
+            return false;
+        }
+
+        message.contains("(files)")
+            || message.contains("(message_attachments)")
+            || message.contains("sqlite_autoindex_files_")
+            || message.contains("sqlite_autoindex_message_attachments_")
+    }
+
+    fn is_repairable_attachment_schema_error(&self, error: &anyhow::Error) -> bool {
+        self.is_repairable_attachment_schema_message(&error.to_string())
+    }
+
+    async fn attachment_schema_needs_repair(&self) -> anyhow::Result<bool> {
+        let rows = match sqlx::query_as::<_, SchemaEntryRow>(
+            "SELECT type AS entry_type, name, tbl_name, rootpage
+             FROM sqlite_schema
+             WHERE name IN ('files', 'message_attachments')
+                OR tbl_name IN ('files', 'message_attachments')",
+        )
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                if self.is_repairable_attachment_schema_message(&error.to_string()) {
+                    return Ok(true);
+                }
+                return Err(error.into());
+            }
+        };
+
+        let has_files_table = rows
+            .iter()
+            .any(|row| row.entry_type == "table" && row.name == "files");
+        let has_message_attachments_table = rows
+            .iter()
+            .any(|row| row.entry_type == "table" && row.name == "message_attachments");
+        let page_count = sqlx::query_scalar::<_, i64>("PRAGMA page_count")
+            .fetch_one(&self.pool)
+            .await?;
+
+        for row in &rows {
+            if matches!(row.entry_type.as_str(), "table" | "index")
+                && (row.rootpage <= 0 || row.rootpage > page_count)
+            {
+                return Ok(true);
+            }
+            if row.tbl_name == "files" && !has_files_table {
+                return Ok(true);
+            }
+            if row.tbl_name == "message_attachments" && !has_message_attachments_table {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn sqlite_file_path(&self) -> Option<PathBuf> {
+        let path = self.url.strip_prefix("sqlite:")?;
+        let path = path.split_once('?').map_or(path, |(path, _)| path);
+        if path == ":memory:" || path.is_empty() {
+            return None;
+        }
+
+        let normalized = if let Some(path) = path.strip_prefix("///") {
+            PathBuf::from(format!("/{path}"))
+        } else if let Some(path) = path.strip_prefix("//") {
+            PathBuf::from(path)
+        } else {
+            PathBuf::from(path)
+        };
+
+        if normalized.as_os_str().is_empty() {
+            return None;
+        }
+
+        Some(normalized)
+    }
+
+    async fn backup_database_file(&self) -> anyhow::Result<Option<PathBuf>> {
+        let Some(path) = self.sqlite_file_path() else {
+            return Ok(None);
+        };
+
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let backup_path = backup_path_for(&path);
+        copy_if_exists(&path, &backup_path).with_context(|| {
+            format!(
+                "Failed to create SQLite backup before schema repair: {} -> {}",
+                path.display(),
+                backup_path.display()
+            )
+        })?;
+
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = sidecar_path(&path, suffix);
+            let sidecar_backup = sidecar_path(&backup_path, suffix);
+            copy_if_exists(&sidecar, &sidecar_backup).with_context(|| {
+                format!(
+                    "Failed to copy SQLite sidecar file before schema repair: {} -> {}",
+                    sidecar.display(),
+                    sidecar_backup.display()
+                )
+            })?;
+        }
+
+        Ok(Some(backup_path))
+    }
+
+    async fn repair_attachment_schema(&self) -> anyhow::Result<()> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("PRAGMA writable_schema=ON")
+            .execute(&mut *conn)
+            .await
+            .context("Failed to enable writable_schema during SQLite repair")?;
+
+        let delete_result = sqlx::query(
+            "DELETE FROM sqlite_schema WHERE name IN ('files', 'message_attachments') OR tbl_name IN ('files', 'message_attachments')",
+        )
+        .execute(&mut *conn)
+        .await;
+
+        sqlx::query("PRAGMA writable_schema=OFF")
+            .execute(&mut *conn)
+            .await
+            .context("Failed to disable writable_schema after SQLite repair")?;
+
+        delete_result.context("Failed to remove malformed attachment schema entries")?;
+
+        sqlx::query("VACUUM")
+            .execute(&mut *conn)
+            .await
+            .context("Failed to VACUUM SQLite database after attachment schema repair")?;
+
+        let integrity_check = sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+            .fetch_all(&mut *conn)
+            .await
+            .context("Failed to run SQLite integrity_check after attachment schema repair")?;
+
+        anyhow::ensure!(
+            integrity_check.len() == 1 && integrity_check[0] == "ok",
+            "SQLite integrity_check failed after attachment schema repair: {}",
+            integrity_check.join("; ")
+        );
+
         Ok(())
     }
 
@@ -1250,6 +1450,33 @@ impl Database {
     }
 }
 
+fn backup_path_for(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("jossie.db");
+    let backup_name = format!(
+        "{file_name}.repair-backup-{}-{}",
+        Utc::now().format("%Y%m%dT%H%M%SZ"),
+        Uuid::new_v4()
+    );
+    path.with_file_name(backup_name)
+}
+
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
+}
+
+fn copy_if_exists(from: &Path, to: &Path) -> std::io::Result<()> {
+    if !from.exists() {
+        return Ok(());
+    }
+    std::fs::copy(from, to)?;
+    Ok(())
+}
+
 // Row types for sqlx
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileRecord {
@@ -1645,14 +1872,31 @@ struct SettingsRowAll {
     value: String,
 }
 
+#[derive(sqlx::FromRow)]
+struct SchemaEntryRow {
+    entry_type: String,
+    name: String,
+    tbl_name: String,
+    rootpage: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     async fn test_db() -> Database {
         let db = Database::new("sqlite::memory:").await.unwrap();
         db.migrate().await.unwrap();
         db
+    }
+
+    fn temp_db_path(test_name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("jossie-db-{test_name}-{}.sqlite", Uuid::new_v4()))
+    }
+
+    fn sqlite_url(path: &Path) -> String {
+        format!("sqlite:{}?mode=rwc", path.display())
     }
 
     #[tokio::test]
@@ -1715,6 +1959,82 @@ mod tests {
         assert_eq!(messages[1].content, "Hi there");
         assert_eq!(messages[0].role, Role::User);
         assert_eq!(messages[1].role, Role::Assistant);
+    }
+
+    #[tokio::test]
+    async fn migrate_repairs_malformed_files_schema() {
+        let db_path = temp_db_path("repair-files-rootpage");
+        let db_url = sqlite_url(&db_path);
+
+        let db = Database::new(&db_url).await.unwrap();
+        db.migrate().await.unwrap();
+
+        let mut conn = db.pool().acquire().await.unwrap();
+        sqlx::query("PRAGMA writable_schema=ON")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE sqlite_schema SET rootpage = 0 WHERE type = 'table' AND name = 'files'",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        sqlx::query("PRAGMA writable_schema=OFF")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        drop(conn);
+        drop(db);
+
+        let repaired = Database::new(&db_url).await.unwrap();
+        repaired.migrate().await.unwrap();
+
+        let conv = repaired.create_conversation(Some("Files")).await.unwrap();
+        let file_id = Uuid::new_v4();
+        repaired
+            .save_file_record(
+                &file_id,
+                "notes.txt",
+                Some("text/plain"),
+                12,
+                "/tmp/notes.txt",
+                Some(conv.id),
+            )
+            .await
+            .unwrap();
+
+        let files = repaired.list_files_for_conversation(conv.id).await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].id, file_id);
+
+        let backup_parent = db_path.parent().unwrap();
+        let original_name = db_path.file_name().unwrap().to_string_lossy();
+        let backups = fs::read_dir(backup_parent)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{original_name}.repair-backup-"))
+            })
+            .count();
+        assert_eq!(backups, 1);
+
+        drop(repaired);
+        for suffix in ["", "-wal", "-shm"] {
+            fs::remove_file(sidecar_path(&db_path, suffix)).ok();
+        }
+        for entry in fs::read_dir(backup_parent)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+        {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if file_name.starts_with(&format!("{original_name}.repair-backup-")) {
+                fs::remove_file(entry.path()).ok();
+            }
+        }
     }
 
     #[tokio::test]
