@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{OnceCell, RwLock};
+use tokio::sync::RwLock;
 use url::Url;
 use uuid::Uuid;
 
@@ -25,10 +25,19 @@ const BOT_BLOCK_PATTERNS: &[&str] = &[
 ];
 
 const SEARCH_RESULT_LIMIT: usize = 5;
+const BROWSER_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const TAB_DEFAULT_TIMEOUT: Duration = Duration::from_secs(45);
 
 fn is_bot_blocked(content: &str) -> bool {
     let lower = content.to_lowercase();
     BOT_BLOCK_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
+fn is_browser_connection_closed_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("underlying connection is closed")
+        || lower.contains("connection closed")
+        || lower.contains("unable to make method calls because underlying connection is closed")
 }
 
 fn collapse_whitespace(text: &str) -> String {
@@ -351,7 +360,7 @@ fn collect_instant_answer_topics(items: &[serde_json::Value], out: &mut Vec<Sear
 
 pub struct BrowserIntegration {
     client: reqwest::Client,
-    browser: Arc<OnceCell<Browser>>,
+    browser: Arc<RwLock<Option<Browser>>>,
     sessions: Arc<RwLock<HashMap<String, Arc<Tab>>>>,
 }
 
@@ -365,28 +374,102 @@ impl BrowserIntegration {
 
         Self {
             client,
-            browser: Arc::new(OnceCell::new()),
+            browser: Arc::new(RwLock::new(None)),
             sessions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    async fn shared_browser(&self) -> anyhow::Result<&Browser> {
-        self.browser
-            .get_or_try_init(|| async {
-                tracing::info!("Launching shared headless browser instance");
-                let options = LaunchOptions::default_builder()
-                    .headless(true)
-                    .build()
-                    .map_err(|e| anyhow::anyhow!("Failed to build launch options: {}", e))?;
+    async fn launch_browser() -> anyhow::Result<Browser> {
+        tracing::info!(
+            "Launching shared headless browser instance with idle timeout of {:?}",
+            BROWSER_IDLE_TIMEOUT
+        );
+        let options = LaunchOptions::default_builder()
+            .headless(true)
+            .idle_browser_timeout(BROWSER_IDLE_TIMEOUT)
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build launch options: {}", e))?;
 
-                let browser = tokio::task::spawn_blocking(move || Browser::new(options))
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Join error launching browser: {}", e))?
-                    .map_err(|e| anyhow::anyhow!("Failed to launch browser: {}", e))?;
-
-                Ok::<Browser, anyhow::Error>(browser)
-            })
+        tokio::task::spawn_blocking(move || Browser::new(options))
             .await
+            .map_err(|e| anyhow::anyhow!("Join error launching browser: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to launch browser: {}", e))
+    }
+
+    async fn shared_browser(&self) -> anyhow::Result<Browser> {
+        if let Some(browser) = self.browser.read().await.as_ref().cloned() {
+            return Ok(browser);
+        }
+
+        let browser = Self::launch_browser().await?;
+        let mut slot = self.browser.write().await;
+        if let Some(existing) = slot.as_ref().cloned() {
+            return Ok(existing);
+        }
+        *slot = Some(browser.clone());
+        Ok(browser)
+    }
+
+    async fn invalidate_browser_state(&self, reason: &str) {
+        tracing::warn!("Resetting shared browser state: {}", reason);
+        self.sessions.write().await.clear();
+        self.browser.write().await.take();
+    }
+
+    async fn open_browser_tab(&self) -> anyhow::Result<Arc<Tab>> {
+        for attempt in 0..=1 {
+            let browser = self.shared_browser().await?;
+            match browser.new_tab() {
+                Ok(tab) => {
+                    tab.set_default_timeout(TAB_DEFAULT_TIMEOUT);
+                    return Ok(tab);
+                }
+                Err(err)
+                    if attempt == 0 && is_browser_connection_closed_message(&err.to_string()) =>
+                {
+                    self.invalidate_browser_state(&format!(
+                        "shared browser connection closed while opening a tab: {}",
+                        err
+                    ))
+                    .await;
+                }
+                Err(err) => anyhow::bail!("Failed to open browser tab: {}", err),
+            }
+        }
+
+        anyhow::bail!("Failed to recover shared browser after connection closure")
+    }
+
+    async fn run_session_operation<F>(
+        &self,
+        session_id: &str,
+        action: &str,
+        operation: F,
+    ) -> anyhow::Result<BrowserPageSnapshot>
+    where
+        F: FnOnce(Arc<Tab>) -> anyhow::Result<BrowserPageSnapshot> + Send + 'static,
+    {
+        let tab = self.session_tab(session_id).await?;
+        let result = tokio::task::spawn_blocking(move || operation(tab))
+            .await
+            .map_err(|e| anyhow::anyhow!("Join error while trying to {action}: {}", e))?;
+
+        match result {
+            Ok(snapshot) => Ok(snapshot),
+            Err(err) if is_browser_connection_closed_message(&err.to_string()) => {
+                self.invalidate_browser_state(&format!(
+                    "browser session '{}' expired while trying to {}: {}",
+                    session_id, action, err
+                ))
+                .await;
+                anyhow::bail!(
+                    "Browser session '{}' expired because the underlying browser connection closed while trying to {}. Open a new browser session and try again.",
+                    session_id,
+                    action
+                );
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn snapshot_script() -> &'static str {
@@ -505,11 +588,15 @@ impl BrowserIntegration {
     where
         T: for<'de> Deserialize<'de>,
     {
+        let serialized_script = format!("JSON.stringify({script})");
         let value = tab
-            .evaluate(script, await_promise)?
+            .evaluate(&serialized_script, await_promise)?
             .value
             .ok_or_else(|| anyhow::anyhow!("Browser script did not return a JSON value"))?;
-        Ok(serde_json::from_value(value)?)
+        let json = value
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Browser script did not return a JSON string"))?;
+        Ok(serde_json::from_str(json)?)
     }
 
     fn capture_snapshot_sync(tab: &Tab) -> anyhow::Result<BrowserPageSnapshot> {
@@ -553,8 +640,9 @@ impl BrowserIntegration {
 
         if let Some(selector) = wait_for.as_deref() {
             tracing::info!("Waiting for selector in session: {}", selector);
-            tab.wait_for_element(selector)
-                .map_err(|e| anyhow::anyhow!("Failed waiting for selector '{}': {}", selector, e))?;
+            tab.wait_for_element(selector).map_err(|e| {
+                anyhow::anyhow!("Failed waiting for selector '{}': {}", selector, e)
+            })?;
         }
 
         Self::capture_snapshot_sync(&tab)
@@ -628,7 +716,10 @@ impl BrowserIntegration {
         Self::capture_snapshot_sync(&tab)
     }
 
-    fn run_click_sync(tab: Arc<Tab>, args: &BrowserClickArgs) -> anyhow::Result<BrowserPageSnapshot> {
+    fn run_click_sync(
+        tab: Arc<Tab>,
+        args: &BrowserClickArgs,
+    ) -> anyhow::Result<BrowserPageSnapshot> {
         let args_json = serde_json::to_string(args)?;
         let script = format!(
             r#"
@@ -758,29 +849,45 @@ impl BrowserIntegration {
         url: &str,
         wait_for: Option<&str>,
     ) -> anyhow::Result<String> {
-        let browser = self.shared_browser().await?;
-        let tab = browser
-            .new_tab()
-            .map_err(|e| anyhow::anyhow!("Failed to open browser tab: {}", e))?;
         let session_id = Uuid::new_v4().to_string();
-        let url = url.to_string();
-        let wait_for = wait_for.map(|value| value.to_string());
-        let session_tab = tab.clone();
-        let snapshot = tokio::task::spawn_blocking(move || {
-            Self::navigate_tab_sync(session_tab, url, wait_for)
-        })
+        for attempt in 0..=1 {
+            let tab = self.open_browser_tab().await?;
+            let url = url.to_string();
+            let wait_for = wait_for.map(|value| value.to_string());
+            let session_tab = tab.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                Self::navigate_tab_sync(session_tab, url, wait_for)
+            })
             .await
-            .map_err(|e| anyhow::anyhow!("Join error opening session: {}", e))??;
+            .map_err(|e| anyhow::anyhow!("Join error opening session: {}", e))?;
 
-        self.sessions.write().await.insert(session_id.clone(), tab);
-        Self::format_session_snapshot(&session_id, snapshot)
+            match result {
+                Ok(snapshot) => {
+                    self.sessions.write().await.insert(session_id.clone(), tab);
+                    return Self::format_session_snapshot(&session_id, snapshot);
+                }
+                Err(err)
+                    if attempt == 0 && is_browser_connection_closed_message(&err.to_string()) =>
+                {
+                    self.invalidate_browser_state(&format!(
+                        "shared browser connection closed while opening session '{}': {}",
+                        session_id, err
+                    ))
+                    .await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        anyhow::bail!("Failed to recover browser session startup after connection closure")
     }
 
     async fn browser_session_snapshot(&self, session_id: &str) -> anyhow::Result<String> {
-        let tab = self.session_tab(session_id).await?;
-        let snapshot = tokio::task::spawn_blocking(move || Self::capture_snapshot_sync(&tab))
-            .await
-            .map_err(|e| anyhow::anyhow!("Join error capturing snapshot: {}", e))??;
+        let snapshot = self
+            .run_session_operation(session_id, "capture the current page snapshot", |tab| {
+                Self::capture_snapshot_sync(&tab)
+            })
+            .await?;
         Self::format_session_snapshot(session_id, snapshot)
     }
 
@@ -790,33 +897,35 @@ impl BrowserIntegration {
         url: &str,
         wait_for: Option<&str>,
     ) -> anyhow::Result<String> {
-        let tab = self.session_tab(session_id).await?;
         let url = url.to_string();
         let wait_for = wait_for.map(|value| value.to_string());
-        let snapshot = tokio::task::spawn_blocking(move || Self::navigate_tab_sync(tab, url, wait_for))
-            .await
-            .map_err(|e| anyhow::anyhow!("Join error navigating session: {}", e))??;
+        let snapshot = self
+            .run_session_operation(session_id, "navigate the page", move |tab| {
+                Self::navigate_tab_sync(tab, url, wait_for)
+            })
+            .await?;
         Self::format_session_snapshot(session_id, snapshot)
     }
 
     async fn browser_fill_input(&self, args: &BrowserFillInputArgs) -> anyhow::Result<String> {
-        let tab = self.session_tab(&args.session_id).await?;
         let session_id = args.session_id.clone();
         let action_args = args.clone();
-        let snapshot =
-            tokio::task::spawn_blocking(move || Self::run_fill_input_sync(tab, &action_args))
-            .await
-            .map_err(|e| anyhow::anyhow!("Join error filling browser input: {}", e))??;
+        let snapshot = self
+            .run_session_operation(&session_id, "fill an input", move |tab| {
+                Self::run_fill_input_sync(tab, &action_args)
+            })
+            .await?;
         Self::format_session_snapshot(&session_id, snapshot)
     }
 
     async fn browser_click(&self, args: &BrowserClickArgs) -> anyhow::Result<String> {
-        let tab = self.session_tab(&args.session_id).await?;
         let session_id = args.session_id.clone();
         let action_args = args.clone();
-        let snapshot = tokio::task::spawn_blocking(move || Self::run_click_sync(tab, &action_args))
-            .await
-            .map_err(|e| anyhow::anyhow!("Join error clicking browser element: {}", e))??;
+        let snapshot = self
+            .run_session_operation(&session_id, "click an element", move |tab| {
+                Self::run_click_sync(tab, &action_args)
+            })
+            .await?;
         Self::format_session_snapshot(&session_id, snapshot)
     }
 
@@ -824,13 +933,13 @@ impl BrowserIntegration {
         &self,
         args: &BrowserSelectOptionArgs,
     ) -> anyhow::Result<String> {
-        let tab = self.session_tab(&args.session_id).await?;
         let session_id = args.session_id.clone();
         let action_args = args.clone();
-        let snapshot =
-            tokio::task::spawn_blocking(move || Self::run_select_option_sync(tab, &action_args))
-                .await
-                .map_err(|e| anyhow::anyhow!("Join error selecting browser option: {}", e))??;
+        let snapshot = self
+            .run_session_operation(&session_id, "select an option", move |tab| {
+                Self::run_select_option_sync(tab, &action_args)
+            })
+            .await?;
         Self::format_session_snapshot(&session_id, snapshot)
     }
 
@@ -854,39 +963,57 @@ impl BrowserIntegration {
         url_str: &str,
         selector: Option<&str>,
     ) -> anyhow::Result<String> {
-        let browser = self.shared_browser().await?;
+        let mut content = None;
+        for attempt in 0..=1 {
+            let url_owned = url_str.to_string();
+            let selector_owned = selector.map(|s| s.to_string());
+            let tab = self.open_browser_tab().await?;
 
-        let url_owned = url_str.to_string();
-        let selector_owned = selector.map(|s| s.to_string());
+            let result = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+                tracing::info!("Navigating browser tab to {}", url_owned);
+                tab.navigate_to(&url_owned)
+                    .map_err(|e| anyhow::anyhow!("Failed to navigate: {}", e))?;
 
-        // headless_chrome is sync — open a tab here, then run navigation on a blocking thread.
-        let tab = browser
-            .new_tab()
-            .map_err(|e| anyhow::anyhow!("Failed to open tab: {}", e))?;
+                tab.wait_until_navigated()
+                    .map_err(|e| anyhow::anyhow!("Failed to wait for navigation: {}", e))?;
 
-        let content = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-            tracing::info!("Navigating browser tab to {}", url_owned);
-            tab.navigate_to(&url_owned)
-                .map_err(|e| anyhow::anyhow!("Failed to navigate: {}", e))?;
-
-            tab.wait_until_navigated()
-                .map_err(|e| anyhow::anyhow!("Failed to wait for navigation: {}", e))?;
-
-            if let Some(sel) = &selector_owned {
-                tracing::info!("Waiting for selector: {}", sel);
-                if let Err(e) = tab.wait_for_element(sel) {
-                    tracing::warn!("Selector {} not found: {}", sel, e);
+                if let Some(sel) = &selector_owned {
+                    tracing::info!("Waiting for selector: {}", sel);
+                    if let Err(e) = tab.wait_for_element(sel) {
+                        tracing::warn!("Selector {} not found: {}", sel, e);
+                    }
                 }
+
+                let html = tab
+                    .get_content()
+                    .map_err(|e| anyhow::anyhow!("Failed to get content: {}", e))?;
+
+                Ok(html)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("Join error: {}", e))?;
+
+            match result {
+                Ok(html) => {
+                    content = Some(html);
+                    break;
+                }
+                Err(err)
+                    if attempt == 0 && is_browser_connection_closed_message(&err.to_string()) =>
+                {
+                    self.invalidate_browser_state(&format!(
+                        "shared browser connection closed while rendering '{}': {}",
+                        url_str, err
+                    ))
+                    .await;
+                }
+                Err(err) => return Err(err),
             }
+        }
 
-            let html = tab
-                .get_content()
-                .map_err(|e| anyhow::anyhow!("Failed to get content: {}", e))?;
-
-            Ok(html)
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("Join error: {}", e))??;
+        let content = content.ok_or_else(|| {
+            anyhow::anyhow!("Failed to recover browser renderer after connection closure")
+        })?;
 
         if is_bot_blocked(&content) {
             return Ok(
@@ -1447,9 +1574,7 @@ impl Integration for BrowserIntegration {
                     && args.name.is_none()
                     && args.label.is_none()
                 {
-                    anyhow::bail!(
-                        "browser_select_option requires selector, id, name, or label"
-                    );
+                    anyhow::bail!("browser_select_option requires selector, id, name, or label");
                 }
                 if args.text.is_none() && args.value.is_none() {
                     anyhow::bail!("browser_select_option requires text or value");
@@ -1479,6 +1604,19 @@ mod tests {
     fn detects_duckduckgo_challenge_pages() {
         let challenge = "Unfortunately, bots use DuckDuckGo too. Please confirm this search was made by a human.";
         assert!(is_bot_blocked(challenge));
+    }
+
+    #[test]
+    fn detects_closed_browser_connection_errors() {
+        assert!(is_browser_connection_closed_message(
+            "Unable to make method calls because underlying connection is closed"
+        ));
+        assert!(is_browser_connection_closed_message(
+            "Transport loop got a timeout while listening for messages; connection closed"
+        ));
+        assert!(!is_browser_connection_closed_message(
+            "Failed waiting for selector '#login': timeout"
+        ));
     }
 
     #[test]
