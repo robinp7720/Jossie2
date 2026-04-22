@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
-const POLL_INTERVAL_SECS: u64 = 120;
+const INTEGRATION_POLL_INTERVAL_SECS: u64 = 120;
+const BACKGROUND_WORK_INTERVAL_SECS: u64 = 5;
 const PENDING_LIMIT: usize = 20;
 const CALENDAR_BATCH_MAX_EVENTS: usize = 50;
 
@@ -18,14 +19,23 @@ struct BackgroundTarget {
 }
 
 pub async fn start_event_loop(state: Arc<AppState>) -> anyhow::Result<()> {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(POLL_INTERVAL_SECS));
-    loop {
-        tracing::info!("Event loop iteration");
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+        BACKGROUND_WORK_INTERVAL_SECS,
+    ));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let integration_poll_interval = std::time::Duration::from_secs(INTEGRATION_POLL_INTERVAL_SECS);
+    let mut next_integration_poll = tokio::time::Instant::now();
 
-        for integration in state.registry.get_integrations() {
-            if let Err(e) = integration.poll().await {
-                tracing::error!("Poll failed for integration {}: {}", integration.name(), e);
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= next_integration_poll {
+            tracing::info!("Event loop iteration");
+            for integration in state.registry.get_integrations() {
+                if let Err(e) = integration.poll().await {
+                    tracing::error!("Poll failed for integration {}: {}", integration.name(), e);
+                }
             }
+            next_integration_poll = now + integration_poll_interval;
         }
 
         if let Err(e) = process_pending_events(&state).await {

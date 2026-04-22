@@ -338,6 +338,10 @@ impl Integration for SchedulerIntegration {
                         "message": {
                             "type": "string",
                             "description": "The message content to send to the user"
+                        },
+                        "priority": {
+                            "type": "string",
+                            "description": "Optional delivery priority: one of `low`, `normal`, `high`, or `urgent`. Defaults to `normal`."
                         }
                     },
                     "required": ["message"],
