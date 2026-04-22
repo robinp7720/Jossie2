@@ -115,6 +115,13 @@ async fn main() -> Result<()> {
     );
 
     let (event_tx, _) = tokio::sync::broadcast::channel(512);
+    let max_agent_iterations = config.llm.max_agent_iterations.min(64);
+    if max_agent_iterations != config.llm.max_agent_iterations {
+        tracing::warn!(
+            "Configured llm.max_agent_iterations={} exceeds the hard cap of 64; clamping",
+            config.llm.max_agent_iterations
+        );
+    }
 
     let state = Arc::new(AppState {
         db: db.clone(),
@@ -124,7 +131,7 @@ async fn main() -> Result<()> {
         auth_token: config.server.auth_token.clone(),
         public_base_url: config.server.public_base_url.clone(),
         system_prompt: config.llm.system_prompt.clone(),
-        max_agent_iterations: config.llm.max_agent_iterations,
+        max_agent_iterations,
         max_context_messages: config.llm.max_context_messages,
         event_max_context_messages: config.llm.event_max_context_messages,
         google_config: config.google.clone(),

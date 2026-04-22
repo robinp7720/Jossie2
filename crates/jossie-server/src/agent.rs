@@ -11,9 +11,19 @@ use uuid::Uuid;
 
 // --- Goal Tracking (#4) ---
 
+const MAX_TRACKED_STEPS: usize = 8;
+const MAX_TRACKED_OBSERVATIONS: usize = 5;
+const MAX_RELEVANT_MEMORIES: usize = 4;
+const MAX_MEMORY_INDEX_ITEMS: usize = 12;
+const LOOP_GUARD_WARN_THRESHOLD: usize = 2;
+const LOOP_GUARD_STOP_THRESHOLD: usize = 3;
+
 struct GoalTracker {
     primary_goal: String,
     completed_steps: Vec<String>,
+    observations: Vec<String>,
+    last_tool_batch_signature: Option<String>,
+    repeated_tool_batch_count: usize,
 }
 
 impl GoalTracker {
@@ -27,38 +37,130 @@ impl GoalTracker {
         Self {
             primary_goal: goal,
             completed_steps: Vec::new(),
+            observations: Vec::new(),
+            last_tool_batch_signature: None,
+            repeated_tool_batch_count: 0,
         }
     }
 
     fn record_tool_calls(&mut self, calls: &[jossie_core::ToolCall]) {
         for call in calls {
-            self.completed_steps.push(format!(
-                "Called `{}` with args: {}",
-                call.name,
-                if call.arguments.len() > 100 {
-                    format!("{:.100}...", call.arguments)
-                } else {
-                    call.arguments.clone()
-                }
-            ));
+            push_recent(
+                &mut self.completed_steps,
+                format!("{} {}", call.name, preview_text(&call.arguments, 100)),
+                MAX_TRACKED_STEPS,
+            );
         }
     }
 
-    fn build_tracking_message(&self) -> String {
-        let mut msg = format!(
-            "## Goal Tracking\n**Primary Goal:** {}\n",
-            self.primary_goal
+    fn record_tool_result(
+        &mut self,
+        call: &jossie_core::ToolCall,
+        result: &jossie_core::ToolResult,
+    ) {
+        let status = if result.is_error { "error" } else { "ok" };
+        push_recent(
+            &mut self.observations,
+            format!(
+                "{} ({status}): {}",
+                call.name,
+                preview_text(&result.content, 140)
+            ),
+            MAX_TRACKED_OBSERVATIONS,
         );
-        if !self.completed_steps.is_empty() {
-            msg.push_str("**Completed Steps:**\n");
-            for (i, step) in self.completed_steps.iter().enumerate() {
-                msg.push_str(&format!("{}. {}\n", i + 1, step));
+    }
+
+    fn note_tool_batch(&mut self, calls: &[jossie_core::ToolCall]) -> Option<String> {
+        let signature = calls
+            .iter()
+            .map(|call| format!("{}:{}", call.name, preview_text(&call.arguments, 220)))
+            .collect::<Vec<_>>()
+            .join(" | ");
+
+        if self.last_tool_batch_signature.as_deref() == Some(signature.as_str()) {
+            self.repeated_tool_batch_count += 1;
+        } else {
+            self.last_tool_batch_signature = Some(signature);
+            self.repeated_tool_batch_count = 1;
+        }
+
+        if self.repeated_tool_batch_count >= LOOP_GUARD_WARN_THRESHOLD {
+            return Some(format!(
+                "You have proposed the same tool batch {} times in a row. Do not repeat it unchanged. Either refine the inputs, explain the blocker clearly, or ask one focused question.",
+                self.repeated_tool_batch_count
+            ));
+        }
+
+        None
+    }
+
+    fn should_stop_for_repetition(&self) -> bool {
+        self.repeated_tool_batch_count >= LOOP_GUARD_STOP_THRESHOLD
+    }
+
+    fn build_stuck_message(&self) -> String {
+        let mut msg = String::from(
+            "I’m not making useful progress because I keep reaching the same dead end.\n\n",
+        );
+        msg.push_str("What I’ve already checked:\n");
+        if self.completed_steps.is_empty() {
+            msg.push_str("- I haven’t completed a useful verification step yet.\n");
+        } else {
+            for step in &self.completed_steps {
+                msg.push_str("- ");
+                msg.push_str(step);
+                msg.push('\n');
+            }
+        }
+        if !self.observations.is_empty() {
+            msg.push_str("\nWhat those checks showed:\n");
+            for observation in &self.observations {
+                msg.push_str("- ");
+                msg.push_str(observation);
+                msg.push('\n');
             }
         }
         msg.push_str(
-            "**Next:** Decide if the goal is fully addressed or if more tool calls are needed.",
+            "\nI’m stopping here instead of looping. If you want, I can try a different angle or you can give me one extra constraint to narrow it down.",
         );
         msg
+    }
+
+    fn build_tracking_message(&self) -> String {
+        let mut msg = format!("## Task State\nObjective: {}\n", self.primary_goal);
+        if !self.completed_steps.is_empty() {
+            msg.push_str("Recent completed checks:\n");
+            for step in &self.completed_steps {
+                msg.push_str("- ");
+                msg.push_str(step);
+                msg.push('\n');
+            }
+        }
+        if !self.observations.is_empty() {
+            msg.push_str("Recent observations:\n");
+            for observation in &self.observations {
+                msg.push_str("- ");
+                msg.push_str(observation);
+                msg.push('\n');
+            }
+        }
+        if self.repeated_tool_batch_count >= LOOP_GUARD_WARN_THRESHOLD {
+            msg.push_str("Loop warning:\n");
+            msg.push_str("- Do not repeat the same tool call or search with unchanged inputs.\n");
+        }
+        msg.push_str("Next step rule:\n");
+        msg.push_str(
+            "- Either advance the task, explain the blocker, or ask one focused question.\n",
+        );
+        msg
+    }
+}
+
+fn push_recent(items: &mut Vec<String>, value: String, max_len: usize) {
+    items.push(value);
+    if items.len() > max_len {
+        let overflow = items.len() - max_len;
+        items.drain(0..overflow);
     }
 }
 
@@ -117,6 +219,14 @@ async fn build_system_prompt(
         prompt.push_str(&entry.content);
     }
 
+    if let Some(message) = user_message {
+        let relevant_memory_context = build_relevant_memory_context(state, message).await;
+        if !relevant_memory_context.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&relevant_memory_context);
+        }
+    }
+
     if let Some(conv_id) = conversation_id {
         if let Ok(files) = state.db.list_files_for_conversation(conv_id).await {
             if !files.is_empty() {
@@ -156,10 +266,11 @@ fn format_memory_index(keys: &[MemoryKeyInfo]) -> String {
     }
 
     let mut section = String::from(
-        "## Memory Index (All Available Memories)\nUse this dynamic list to fill context gaps before asking the user to repeat information.\n",
+        "## Memory Index\nUse this shortlist to fill context gaps before asking the user to repeat information. Search memory for anything not shown here.\n",
     );
 
-    for key_info in keys {
+    let visible = keys.len().min(MAX_MEMORY_INDEX_ITEMS);
+    for key_info in keys.iter().take(visible) {
         section.push_str("- `");
         section.push_str(&key_info.key);
         section.push('`');
@@ -168,6 +279,51 @@ fn format_memory_index(keys: &[MemoryKeyInfo]) -> String {
             section.push_str(&key_info.updated_at);
             section.push(')');
         }
+        section.push('\n');
+    }
+
+    if keys.len() > visible {
+        section.push_str(&format!(
+            "- ... {} more memory entries not shown\n",
+            keys.len() - visible
+        ));
+    }
+
+    section
+}
+
+async fn build_relevant_memory_context(state: &AppState, user_message: &str) -> String {
+    if user_message.trim().len() < 6 {
+        return String::new();
+    }
+
+    let Ok(entries) = state.db.memory_search(user_message).await else {
+        return String::new();
+    };
+
+    let filtered = entries
+        .into_iter()
+        .filter(|entry| {
+            !matches!(
+                entry.key.as_str(),
+                "agent_profile" | "agent_profile.soul" | "agent_profile.mood" | "user_profile"
+            )
+        })
+        .take(MAX_RELEVANT_MEMORIES)
+        .collect::<Vec<_>>();
+
+    if filtered.is_empty() {
+        return String::new();
+    }
+
+    let mut section = String::from(
+        "## Potentially Relevant Memory\nThese entries look relevant to the current turn:\n",
+    );
+    for entry in filtered {
+        section.push_str("- `");
+        section.push_str(&entry.key);
+        section.push_str("`: ");
+        section.push_str(&preview_text(&entry.content, 220));
         section.push('\n');
     }
 
@@ -241,7 +397,9 @@ async fn prepare_run_context(
         .await?;
 
     let last_user_msg = messages
-        .last()
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::User)
         .map(|m| m.content.clone())
         .unwrap_or_default();
 
@@ -424,6 +582,23 @@ async fn run_agent_loop_inner(
             return Ok(content);
         }
 
+        if let Some(loop_warning) = goal_tracker.note_tool_batch(&tool_calls) {
+            tracing::warn!("Loop guard triggered for conversation {conv_id}: {loop_warning}");
+            if goal_tracker.should_stop_for_repetition() {
+                let fallback = goal_tracker.build_stuck_message();
+                let msg = Message::new(conv_id, Role::Assistant, fallback.clone());
+                persist_message(state, &msg).await?;
+                return Ok(fallback);
+            }
+
+            messages.push(Message::transient(Role::Assistant, content.clone()));
+            messages.push(Message::transient(
+                Role::System,
+                format!("[LOOP GUARD: {loop_warning}]"),
+            ));
+            continue;
+        }
+
         goal_tracker.record_tool_calls(&tool_calls);
 
         let tc_json = serde_json::to_value(&tool_calls)?;
@@ -465,6 +640,7 @@ async fn run_agent_loop_inner(
                 call.name,
                 result.content
             );
+            goal_tracker.record_tool_result(&call, &result);
             let tool_msg = Message::new(conv_id, Role::Tool, result.content)
                 .with_tool_call_id(call.id.clone())
                 .with_name(call.name.clone());
@@ -647,6 +823,52 @@ async fn run_agent_loop_streaming_inner(
                 return;
             }
 
+            if let Some(loop_warning) = goal_tracker.note_tool_batch(&tool_calls) {
+                tracing::warn!(
+                    "Streaming loop guard triggered for conversation {conv_id}: {loop_warning}"
+                );
+                emit_stream_event(
+                    Some(&event_tx),
+                    ServerEvent::AssistantReset {
+                        conversation_id: conv_id,
+                        run_id: run_id.clone(),
+                        reason: "loop_guard".to_string(),
+                    },
+                )
+                .await;
+
+                if goal_tracker.should_stop_for_repetition() {
+                    let fallback = goal_tracker.build_stuck_message();
+                    emit_stream_event(
+                        Some(&event_tx),
+                        ServerEvent::AssistantDelta {
+                            conversation_id: conv_id,
+                            run_id: run_id.clone(),
+                            content: fallback.clone(),
+                        },
+                    )
+                    .await;
+                    let assistant_msg = Message::new(conv_id, Role::Assistant, fallback);
+                    let _ = persist_message(state, &assistant_msg).await;
+                    emit_stream_event(
+                        Some(&event_tx),
+                        ServerEvent::RunCompleted {
+                            conversation_id: conv_id,
+                            run_id: run_id.clone(),
+                        },
+                    )
+                    .await;
+                    return;
+                }
+
+                messages.push(Message::transient(Role::Assistant, full_content));
+                messages.push(Message::transient(
+                    Role::System,
+                    format!("[LOOP GUARD: {loop_warning}]"),
+                ));
+                continue;
+            }
+
             let assistant_msg = match serde_json::to_value(&tool_calls) {
                 Ok(tc_json) => Message::new(conv_id, Role::Assistant, full_content.clone())
                     .with_tool_calls(tc_json),
@@ -713,6 +935,7 @@ async fn run_agent_loop_streaming_inner(
                     },
                 )
                 .await;
+                goal_tracker.record_tool_result(&call, &result);
                 let tool_msg = Message::new(conv_id, Role::Tool, result.content)
                     .with_tool_call_id(call.id.clone())
                     .with_name(call.name.clone());
@@ -1863,6 +2086,39 @@ mod tests {
     fn test_memory_index_empty_state() {
         let section = format_memory_index(&[]);
         assert!(section.contains("No memories are currently saved"));
+    }
+
+    #[test]
+    fn test_memory_index_shortlists_large_memory_sets() {
+        let keys = (0..15)
+            .map(|idx| MemoryKeyInfo {
+                key: format!("memory.{idx}"),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-02T00:00:00Z".to_string(),
+            })
+            .collect::<Vec<_>>();
+
+        let section = format_memory_index(&keys);
+        assert!(section.contains("memory.0"));
+        assert!(section.contains("memory.11"));
+        assert!(!section.contains("memory.12"));
+        assert!(section.contains("3 more memory entries not shown"));
+    }
+
+    #[test]
+    fn test_goal_tracker_detects_repeated_tool_batch() {
+        let mut tracker = GoalTracker::new("diagnose the issue");
+        let calls = vec![jossie_core::ToolCall {
+            id: "call_1".to_string(),
+            name: "memory_search".to_string(),
+            arguments: r#"{"query":"diagnose"}"#.to_string(),
+        }];
+
+        assert!(tracker.note_tool_batch(&calls).is_none());
+        assert!(tracker.note_tool_batch(&calls).is_some());
+        assert!(!tracker.should_stop_for_repetition());
+        assert!(tracker.note_tool_batch(&calls).is_some());
+        assert!(tracker.should_stop_for_repetition());
     }
 
     #[test]
