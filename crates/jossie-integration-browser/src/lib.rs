@@ -1,9 +1,13 @@
-use headless_chrome::{Browser, LaunchOptions};
+use headless_chrome::{Browser, LaunchOptions, Tab};
 use jossie_core::integration::{Integration, ToolDefinition};
 use scraper::{ElementRef, Html, Selector};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::OnceCell;
+use std::time::Duration;
+use tokio::sync::{OnceCell, RwLock};
 use url::Url;
+use uuid::Uuid;
 
 /// Patterns that indicate a page blocked us (bot detection, CAPTCHA, etc.)
 const BOT_BLOCK_PATTERNS: &[&str] = &[
@@ -65,6 +69,133 @@ struct SearchResult {
     title: String,
     url: String,
     snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct BrowserOptionSummary {
+    text: String,
+    value: String,
+    selected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct BrowserElementSummary {
+    selector: String,
+    tag: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    placeholder: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    href: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<Vec<BrowserOptionSummary>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct BrowserPageSnapshot {
+    url: String,
+    title: String,
+    text_preview: String,
+    inputs: Vec<BrowserElementSummary>,
+    selects: Vec<BrowserElementSummary>,
+    actions: Vec<BrowserElementSummary>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct BrowserOpenSessionArgs {
+    url: String,
+    #[serde(default)]
+    wait_for: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct BrowserSessionSnapshotArgs {
+    session_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct BrowserNavigateArgs {
+    session_id: String,
+    url: String,
+    #[serde(default)]
+    wait_for: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct BrowserFillInputArgs {
+    session_id: String,
+    #[serde(default)]
+    selector: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    placeholder: Option<String>,
+    value: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct BrowserClickArgs {
+    session_id: String,
+    #[serde(default)]
+    selector: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    tag: Option<String>,
+    #[serde(default = "default_interaction_wait_ms")]
+    wait_after_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct BrowserSelectOptionArgs {
+    session_id: String,
+    #[serde(default)]
+    selector: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default = "default_interaction_wait_ms")]
+    wait_after_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct BrowserCloseSessionArgs {
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserMutationResult {
+    ok: bool,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+fn default_interaction_wait_ms() -> u64 {
+    1200
 }
 
 impl SearchResult {
@@ -221,6 +352,7 @@ fn collect_instant_answer_topics(items: &[serde_json::Value], out: &mut Vec<Sear
 pub struct BrowserIntegration {
     client: reqwest::Client,
     browser: Arc<OnceCell<Browser>>,
+    sessions: Arc<RwLock<HashMap<String, Arc<Tab>>>>,
 }
 
 impl BrowserIntegration {
@@ -234,7 +366,486 @@ impl BrowserIntegration {
         Self {
             client,
             browser: Arc::new(OnceCell::new()),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    async fn shared_browser(&self) -> anyhow::Result<&Browser> {
+        self.browser
+            .get_or_try_init(|| async {
+                tracing::info!("Launching shared headless browser instance");
+                let options = LaunchOptions::default_builder()
+                    .headless(true)
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("Failed to build launch options: {}", e))?;
+
+                let browser = tokio::task::spawn_blocking(move || Browser::new(options))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Join error launching browser: {}", e))?
+                    .map_err(|e| anyhow::anyhow!("Failed to launch browser: {}", e))?;
+
+                Ok::<Browser, anyhow::Error>(browser)
+            })
+            .await
+    }
+
+    fn snapshot_script() -> &'static str {
+        r#"
+(() => {
+  const collapse = (value) => (value || '').replace(/\s+/g, ' ').trim();
+  const visible = (el) => {
+    if (!el || !(el instanceof Element)) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (el.hasAttribute('hidden')) return false;
+    return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length || style.position === 'fixed');
+  };
+  const selectorFor = (el) => {
+    if (!el) return null;
+    if (el.id) return `#${CSS.escape(el.id)}`;
+    const name = el.getAttribute('name');
+    if (name) {
+      const byName = `${el.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`;
+      if (document.querySelectorAll(byName).length === 1) return byName;
+    }
+    const parts = [];
+    let current = el;
+    while (current && current.nodeType === Node.ELEMENT_NODE && current !== document.body) {
+      let part = current.tagName.toLowerCase();
+      const parent = current.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter((node) => node.tagName === current.tagName);
+        if (siblings.length > 1) {
+          part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+        }
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return parts.length ? `body > ${parts.join(' > ')}` : 'body';
+  };
+  const labelFor = (el) => collapse(
+    (el.labels && el.labels.length
+      ? Array.from(el.labels).map((label) => label.innerText).join(' ')
+      : '') || el.getAttribute('aria-label') || ''
+  );
+  const actionText = (el) => collapse(el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || '');
+  const summarizeField = (el) => ({
+    selector: selectorFor(el),
+    tag: el.tagName.toLowerCase(),
+    input_type: el.getAttribute('type'),
+    id: el.id || null,
+    name: el.getAttribute('name'),
+    label: labelFor(el) || null,
+    placeholder: el.getAttribute('placeholder'),
+    text: null,
+    href: null,
+    value_state: el.value ? 'set' : 'empty',
+    selected_value: null,
+    options: null,
+  });
+  const summarizeSelect = (el) => ({
+    selector: selectorFor(el),
+    tag: el.tagName.toLowerCase(),
+    input_type: null,
+    id: el.id || null,
+    name: el.getAttribute('name'),
+    label: labelFor(el) || null,
+    placeholder: null,
+    text: null,
+    href: null,
+    value_state: null,
+    selected_value: el.value || null,
+    options: Array.from(el.options || []).slice(0, 12).map((option) => ({
+      text: collapse(option.textContent || ''),
+      value: option.value || '',
+      selected: !!option.selected,
+    })),
+  });
+  const summarizeAction = (el) => ({
+    selector: selectorFor(el),
+    tag: el.tagName.toLowerCase(),
+    input_type: el.getAttribute('type'),
+    id: el.id || null,
+    name: el.getAttribute('name'),
+    label: labelFor(el) || null,
+    placeholder: null,
+    text: actionText(el) || null,
+    href: el.getAttribute('href'),
+    value_state: null,
+    selected_value: null,
+    options: null,
+  });
+  const inputs = Array.from(document.querySelectorAll('input, textarea'))
+    .filter((el) => visible(el) && (el.tagName.toLowerCase() !== 'input' || (el.getAttribute('type') || 'text').toLowerCase() !== 'hidden'))
+    .slice(0, 20)
+    .map(summarizeField);
+  const selects = Array.from(document.querySelectorAll('select'))
+    .filter(visible)
+    .slice(0, 20)
+    .map(summarizeSelect);
+  const actions = Array.from(document.querySelectorAll('a[href], button, input[type="submit"], input[type="button"], [role="button"]'))
+    .filter(visible)
+    .slice(0, 30)
+    .map(summarizeAction);
+
+  return {
+    url: window.location.href,
+    title: document.title || '',
+    text_preview: collapse(document.body ? document.body.innerText : '').slice(0, 4000),
+    inputs,
+    selects,
+    actions,
+  };
+})()
+"#
+    }
+
+    fn eval_json_sync<T>(tab: &Tab, script: &str, await_promise: bool) -> anyhow::Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let value = tab
+            .evaluate(script, await_promise)?
+            .value
+            .ok_or_else(|| anyhow::anyhow!("Browser script did not return a JSON value"))?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    fn capture_snapshot_sync(tab: &Tab) -> anyhow::Result<BrowserPageSnapshot> {
+        Self::eval_json_sync(tab, Self::snapshot_script(), false)
+    }
+
+    async fn session_tab(&self, session_id: &str) -> anyhow::Result<Arc<Tab>> {
+        self.sessions
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Unknown browser session '{}'", session_id))
+    }
+
+    fn format_session_snapshot(
+        session_id: &str,
+        snapshot: BrowserPageSnapshot,
+    ) -> anyhow::Result<String> {
+        let mut value = serde_json::to_value(snapshot)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("Browser snapshot was not an object"))?;
+        object.insert(
+            "session_id".to_string(),
+            serde_json::Value::String(session_id.to_string()),
+        );
+        Ok(serde_json::to_string_pretty(&value)?)
+    }
+
+    fn navigate_tab_sync(
+        tab: Arc<Tab>,
+        url: String,
+        wait_for: Option<String>,
+    ) -> anyhow::Result<BrowserPageSnapshot> {
+        tracing::info!("Navigating browser tab to {}", url);
+        tab.navigate_to(&url)
+            .map_err(|e| anyhow::anyhow!("Failed to navigate: {}", e))?;
+        tab.wait_until_navigated()
+            .map_err(|e| anyhow::anyhow!("Failed to wait for navigation: {}", e))?;
+
+        if let Some(selector) = wait_for.as_deref() {
+            tracing::info!("Waiting for selector in session: {}", selector);
+            tab.wait_for_element(selector)
+                .map_err(|e| anyhow::anyhow!("Failed waiting for selector '{}': {}", selector, e))?;
+        }
+
+        Self::capture_snapshot_sync(&tab)
+    }
+
+    fn run_fill_input_sync(
+        tab: Arc<Tab>,
+        args: &BrowserFillInputArgs,
+    ) -> anyhow::Result<BrowserPageSnapshot> {
+        let args_json = serde_json::to_string(args)?;
+        let script = format!(
+            r#"
+(() => {{
+  const args = {args_json};
+  const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const visible = (el) => {{
+    if (!el || !(el instanceof Element)) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (el.hasAttribute('hidden')) return false;
+    return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length || style.position === 'fixed');
+  }};
+  const labelFor = (el) => ((el.labels && el.labels.length
+      ? Array.from(el.labels).map((label) => label.innerText).join(' ')
+      : '') || el.getAttribute('aria-label') || '');
+  const candidates = Array.from(document.querySelectorAll('input, textarea'))
+    .filter((el) => visible(el) && (el.tagName.toLowerCase() !== 'input' || (el.getAttribute('type') || 'text').toLowerCase() !== 'hidden'));
+  const locate = () => {{
+    if (args.selector) return document.querySelector(args.selector);
+    const matchers = [
+      ['id', (el) => el.id || ''],
+      ['name', (el) => el.getAttribute('name') || ''],
+      ['label', labelFor],
+      ['placeholder', (el) => el.getAttribute('placeholder') || ''],
+    ];
+    for (const [key, getter] of matchers) {{
+      if (!args[key]) continue;
+      const expected = normalize(args[key]);
+      const exact = candidates.find((el) => normalize(getter(el)) === expected);
+      if (exact) return exact;
+      const partial = candidates.find((el) => normalize(getter(el)).includes(expected));
+      if (partial) return partial;
+    }}
+    return null;
+  }};
+  const target = locate();
+  if (!target) {{
+    return {{ ok: false, message: 'No matching input or textarea found' }};
+  }}
+  target.focus();
+  target.value = args.value;
+  target.dispatchEvent(new Event('input', {{ bubbles: true }}));
+  target.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  return {{
+    ok: true,
+    message: 'Filled input',
+  }};
+}})()
+"#
+        );
+
+        let result: BrowserMutationResult = Self::eval_json_sync(&tab, &script, false)?;
+        if !result.ok {
+            anyhow::bail!(
+                "{}",
+                result
+                    .message
+                    .unwrap_or_else(|| "Browser input fill failed".to_string())
+            );
+        }
+        Self::capture_snapshot_sync(&tab)
+    }
+
+    fn run_click_sync(tab: Arc<Tab>, args: &BrowserClickArgs) -> anyhow::Result<BrowserPageSnapshot> {
+        let args_json = serde_json::to_string(args)?;
+        let script = format!(
+            r#"
+(() => {{
+  const args = {args_json};
+  const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const visible = (el) => {{
+    if (!el || !(el instanceof Element)) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (el.hasAttribute('hidden')) return false;
+    return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length || style.position === 'fixed');
+  }};
+  const actionText = (el) => (el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || '');
+  const candidates = Array.from(document.querySelectorAll('a[href], button, input[type="submit"], input[type="button"], [role="button"]'))
+    .filter(visible)
+    .filter((el) => !args.tag || el.tagName.toLowerCase() === args.tag.toLowerCase());
+  const target = args.selector
+    ? document.querySelector(args.selector)
+    : candidates.find((el) => normalize(actionText(el)) === normalize(args.text || ''))
+        || candidates.find((el) => normalize(actionText(el)).includes(normalize(args.text || '')));
+  if (!target) {{
+    return {{ ok: false, message: 'No matching clickable element found' }};
+  }}
+  target.click();
+  return {{
+    ok: true,
+    message: 'Clicked element',
+  }};
+}})()
+"#
+        );
+
+        let result: BrowserMutationResult = Self::eval_json_sync(&tab, &script, false)?;
+        if !result.ok {
+            anyhow::bail!(
+                "{}",
+                result
+                    .message
+                    .unwrap_or_else(|| "Browser click failed".to_string())
+            );
+        }
+        std::thread::sleep(Duration::from_millis(args.wait_after_ms));
+        Self::capture_snapshot_sync(&tab)
+    }
+
+    fn run_select_option_sync(
+        tab: Arc<Tab>,
+        args: &BrowserSelectOptionArgs,
+    ) -> anyhow::Result<BrowserPageSnapshot> {
+        let args_json = serde_json::to_string(args)?;
+        let script = format!(
+            r#"
+(() => {{
+  const args = {args_json};
+  const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const visible = (el) => {{
+    if (!el || !(el instanceof Element)) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (el.hasAttribute('hidden')) return false;
+    return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length || style.position === 'fixed');
+  }};
+  const labelFor = (el) => ((el.labels && el.labels.length
+      ? Array.from(el.labels).map((label) => label.innerText).join(' ')
+      : '') || el.getAttribute('aria-label') || '');
+  const candidates = Array.from(document.querySelectorAll('select')).filter(visible);
+  const locate = () => {{
+    if (args.selector) return document.querySelector(args.selector);
+    const matchers = [
+      ['id', (el) => el.id || ''],
+      ['name', (el) => el.getAttribute('name') || ''],
+      ['label', labelFor],
+    ];
+    for (const [key, getter] of matchers) {{
+      if (!args[key]) continue;
+      const expected = normalize(args[key]);
+      const exact = candidates.find((el) => normalize(getter(el)) === expected);
+      if (exact) return exact;
+      const partial = candidates.find((el) => normalize(getter(el)).includes(expected));
+      if (partial) return partial;
+    }}
+    return null;
+  }};
+  const select = locate();
+  if (!select) {{
+    return {{ ok: false, message: 'No matching select element found' }};
+  }}
+  let option = null;
+  if (args.value) {{
+    option = Array.from(select.options).find((candidate) => candidate.value === args.value);
+  }}
+  if (!option && args.text) {{
+    option = Array.from(select.options).find((candidate) => normalize(candidate.textContent || '') === normalize(args.text))
+      || Array.from(select.options).find((candidate) => normalize(candidate.textContent || '').includes(normalize(args.text)));
+  }}
+  if (!option) {{
+    return {{ ok: false, message: 'No matching select option found' }};
+  }}
+  select.value = option.value;
+  option.selected = true;
+  select.dispatchEvent(new Event('input', {{ bubbles: true }}));
+  select.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  return {{
+    ok: true,
+    message: 'Selected option',
+  }};
+}})()
+"#
+        );
+
+        let result: BrowserMutationResult = Self::eval_json_sync(&tab, &script, false)?;
+        if !result.ok {
+            anyhow::bail!(
+                "{}",
+                result
+                    .message
+                    .unwrap_or_else(|| "Browser select failed".to_string())
+            );
+        }
+        std::thread::sleep(Duration::from_millis(args.wait_after_ms));
+        Self::capture_snapshot_sync(&tab)
+    }
+
+    async fn browser_open_session(
+        &self,
+        url: &str,
+        wait_for: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let browser = self.shared_browser().await?;
+        let tab = browser
+            .new_tab()
+            .map_err(|e| anyhow::anyhow!("Failed to open browser tab: {}", e))?;
+        let session_id = Uuid::new_v4().to_string();
+        let url = url.to_string();
+        let wait_for = wait_for.map(|value| value.to_string());
+        let session_tab = tab.clone();
+        let snapshot = tokio::task::spawn_blocking(move || {
+            Self::navigate_tab_sync(session_tab, url, wait_for)
+        })
+            .await
+            .map_err(|e| anyhow::anyhow!("Join error opening session: {}", e))??;
+
+        self.sessions.write().await.insert(session_id.clone(), tab);
+        Self::format_session_snapshot(&session_id, snapshot)
+    }
+
+    async fn browser_session_snapshot(&self, session_id: &str) -> anyhow::Result<String> {
+        let tab = self.session_tab(session_id).await?;
+        let snapshot = tokio::task::spawn_blocking(move || Self::capture_snapshot_sync(&tab))
+            .await
+            .map_err(|e| anyhow::anyhow!("Join error capturing snapshot: {}", e))??;
+        Self::format_session_snapshot(session_id, snapshot)
+    }
+
+    async fn browser_navigate(
+        &self,
+        session_id: &str,
+        url: &str,
+        wait_for: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let tab = self.session_tab(session_id).await?;
+        let url = url.to_string();
+        let wait_for = wait_for.map(|value| value.to_string());
+        let snapshot = tokio::task::spawn_blocking(move || Self::navigate_tab_sync(tab, url, wait_for))
+            .await
+            .map_err(|e| anyhow::anyhow!("Join error navigating session: {}", e))??;
+        Self::format_session_snapshot(session_id, snapshot)
+    }
+
+    async fn browser_fill_input(&self, args: &BrowserFillInputArgs) -> anyhow::Result<String> {
+        let tab = self.session_tab(&args.session_id).await?;
+        let session_id = args.session_id.clone();
+        let action_args = args.clone();
+        let snapshot =
+            tokio::task::spawn_blocking(move || Self::run_fill_input_sync(tab, &action_args))
+            .await
+            .map_err(|e| anyhow::anyhow!("Join error filling browser input: {}", e))??;
+        Self::format_session_snapshot(&session_id, snapshot)
+    }
+
+    async fn browser_click(&self, args: &BrowserClickArgs) -> anyhow::Result<String> {
+        let tab = self.session_tab(&args.session_id).await?;
+        let session_id = args.session_id.clone();
+        let action_args = args.clone();
+        let snapshot = tokio::task::spawn_blocking(move || Self::run_click_sync(tab, &action_args))
+            .await
+            .map_err(|e| anyhow::anyhow!("Join error clicking browser element: {}", e))??;
+        Self::format_session_snapshot(&session_id, snapshot)
+    }
+
+    async fn browser_select_option(
+        &self,
+        args: &BrowserSelectOptionArgs,
+    ) -> anyhow::Result<String> {
+        let tab = self.session_tab(&args.session_id).await?;
+        let session_id = args.session_id.clone();
+        let action_args = args.clone();
+        let snapshot =
+            tokio::task::spawn_blocking(move || Self::run_select_option_sync(tab, &action_args))
+                .await
+                .map_err(|e| anyhow::anyhow!("Join error selecting browser option: {}", e))??;
+        Self::format_session_snapshot(&session_id, snapshot)
+    }
+
+    async fn browser_close_session(&self, session_id: &str) -> anyhow::Result<String> {
+        let tab = self
+            .sessions
+            .write()
+            .await
+            .remove(session_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown browser session '{}'", session_id))?;
+        tokio::task::spawn_blocking(move || tab.close(true))
+            .await
+            .map_err(|e| anyhow::anyhow!("Join error closing browser session: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to close browser session: {}", e))?;
+        Ok(format!("Closed browser session '{}'", session_id))
     }
 
     /// Launch or reuse the shared browser, then open a new tab.
@@ -243,23 +854,7 @@ impl BrowserIntegration {
         url_str: &str,
         selector: Option<&str>,
     ) -> anyhow::Result<String> {
-        let browser = self
-            .browser
-            .get_or_try_init(|| async {
-                tracing::info!("Launching shared headless browser instance");
-                let options = LaunchOptions::default_builder()
-                    .headless(true)
-                    .build()
-                    .map_err(|e| anyhow::anyhow!("Failed to build launch options: {}", e))?;
-
-                let b = tokio::task::spawn_blocking(move || Browser::new(options))
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Join error launching browser: {}", e))?
-                    .map_err(|e| anyhow::anyhow!("Failed to launch browser: {}", e))?;
-
-                Ok::<Browser, anyhow::Error>(b)
-            })
-            .await?;
+        let browser = self.shared_browser().await?;
 
         let url_owned = url_str.to_string();
         let selector_owned = selector.map(|s| s.to_string());
@@ -659,6 +1254,138 @@ impl Integration for BrowserIntegration {
                 }),
             },
             ToolDefinition {
+                name: "browser_open_session".to_string(),
+                description: "Open an interactive browser session for a site that needs logins, clicks, forms, or preserved cookies. Returns a session snapshot with visible inputs, selects, and actions."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "The URL to open in a persistent browser tab"
+                        },
+                        "wait_for": {
+                            "type": ["string", "null"],
+                            "description": "Optional CSS selector to wait for after navigation"
+                        }
+                    },
+                    "required": ["url"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "browser_session_snapshot".to_string(),
+                description: "Return the current state of an interactive browser session, including page text preview and visible interactive elements."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": "The browser session to inspect"
+                        }
+                    },
+                    "required": ["session_id"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "browser_navigate".to_string(),
+                description: "Navigate an existing interactive browser session to a new URL and keep the same cookies and login state."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": "The browser session to reuse"
+                        },
+                        "url": {
+                            "type": "string",
+                            "description": "The destination URL"
+                        },
+                        "wait_for": {
+                            "type": ["string", "null"],
+                            "description": "Optional CSS selector to wait for after navigation"
+                        }
+                    },
+                    "required": ["session_id", "url"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "browser_fill_input".to_string(),
+                description: "Fill a visible input or textarea in an interactive browser session. Prefer `selector` when known, otherwise use `id`, `name`, `label`, or `placeholder`."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string", "description": "The browser session to use"},
+                        "selector": {"type": ["string", "null"], "description": "Optional CSS selector for the input"},
+                        "id": {"type": ["string", "null"], "description": "Optional element id"},
+                        "name": {"type": ["string", "null"], "description": "Optional input name"},
+                        "label": {"type": ["string", "null"], "description": "Optional visible label text"},
+                        "placeholder": {"type": ["string", "null"], "description": "Optional placeholder text"},
+                        "value": {"type": "string", "description": "The value to enter"}
+                    },
+                    "required": ["session_id", "value"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "browser_click".to_string(),
+                description: "Click a visible link, button, or submit control in an interactive browser session. Use `selector` when available, otherwise use a visible `text` snippet."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string", "description": "The browser session to use"},
+                        "selector": {"type": ["string", "null"], "description": "Optional CSS selector for the clickable element"},
+                        "text": {"type": ["string", "null"], "description": "Optional visible text to match on links or buttons"},
+                        "tag": {"type": ["string", "null"], "description": "Optional tag name filter such as `a` or `button`"},
+                        "wait_after_ms": {"type": "integer", "description": "How long to wait after the click before capturing the next snapshot. Defaults to 1200."}
+                    },
+                    "required": ["session_id"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "browser_select_option".to_string(),
+                description: "Choose an option in a visible `<select>` element in an interactive browser session."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string", "description": "The browser session to use"},
+                        "selector": {"type": ["string", "null"], "description": "Optional CSS selector for the select element"},
+                        "id": {"type": ["string", "null"], "description": "Optional element id"},
+                        "name": {"type": ["string", "null"], "description": "Optional select name"},
+                        "label": {"type": ["string", "null"], "description": "Optional visible label text"},
+                        "text": {"type": ["string", "null"], "description": "Optional visible option text to select"},
+                        "value": {"type": ["string", "null"], "description": "Optional option value to select"},
+                        "wait_after_ms": {"type": "integer", "description": "How long to wait after the selection before capturing the next snapshot. Defaults to 1200."}
+                    },
+                    "required": ["session_id"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "browser_close_session".to_string(),
+                description: "Close an interactive browser session and discard its cookies and page state."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": "The browser session to close"
+                        }
+                    },
+                    "required": ["session_id"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
                 name: "browser_search".to_string(),
                 description: "Searches the web for a query using multiple search providers."
                     .to_string(),
@@ -687,6 +1414,51 @@ impl Integration for BrowserIntegration {
                     .ok_or_else(|| anyhow::anyhow!("Missing url"))?;
                 let selector = args.get("selector").and_then(|v| v.as_str());
                 self.browser_read_page(url, selector).await
+            }
+            "browser_open_session" => {
+                let args: BrowserOpenSessionArgs = serde_json::from_value(args)?;
+                self.browser_open_session(&args.url, args.wait_for.as_deref())
+                    .await
+            }
+            "browser_session_snapshot" => {
+                let args: BrowserSessionSnapshotArgs = serde_json::from_value(args)?;
+                self.browser_session_snapshot(&args.session_id).await
+            }
+            "browser_navigate" => {
+                let args: BrowserNavigateArgs = serde_json::from_value(args)?;
+                self.browser_navigate(&args.session_id, &args.url, args.wait_for.as_deref())
+                    .await
+            }
+            "browser_fill_input" => {
+                let args: BrowserFillInputArgs = serde_json::from_value(args)?;
+                self.browser_fill_input(&args).await
+            }
+            "browser_click" => {
+                let args: BrowserClickArgs = serde_json::from_value(args)?;
+                if args.selector.is_none() && args.text.is_none() {
+                    anyhow::bail!("browser_click requires either selector or text");
+                }
+                self.browser_click(&args).await
+            }
+            "browser_select_option" => {
+                let args: BrowserSelectOptionArgs = serde_json::from_value(args)?;
+                if args.selector.is_none()
+                    && args.id.is_none()
+                    && args.name.is_none()
+                    && args.label.is_none()
+                {
+                    anyhow::bail!(
+                        "browser_select_option requires selector, id, name, or label"
+                    );
+                }
+                if args.text.is_none() && args.value.is_none() {
+                    anyhow::bail!("browser_select_option requires text or value");
+                }
+                self.browser_select_option(&args).await
+            }
+            "browser_close_session" => {
+                let args: BrowserCloseSessionArgs = serde_json::from_value(args)?;
+                self.browser_close_session(&args.session_id).await
             }
             "browser_search" => {
                 let query = args["query"]

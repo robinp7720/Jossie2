@@ -18,3 +18,4 @@ urlencoding = { workspace = true }
 scraper = { workspace = true }
 url = "2.5"
 tokio = { workspace = true }
+uuid = { workspace = true }

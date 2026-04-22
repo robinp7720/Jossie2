@@ -13,3 +13,4 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+totp-rs = { version = "5.7", features = ["otpauth"] }
