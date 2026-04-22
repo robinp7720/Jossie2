@@ -174,6 +174,12 @@ pub enum OnboardingStatus {
 pub trait Integration: Send + Sync {
     fn name(&self) -> &str;
     fn tools(&self) -> Vec<ToolDefinition>;
+    fn agent_tools(&self) -> Vec<ToolDefinition> {
+        self.tools()
+    }
+    fn show_in_onboarding(&self) -> bool {
+        true
+    }
     async fn execute(&self, tool_name: &str, arguments: &str) -> anyhow::Result<String>;
     async fn check_onboarding(&self) -> anyhow::Result<OnboardingStatus> {
         Ok(OnboardingStatus::Configured)
@@ -206,6 +212,13 @@ impl IntegrationRegistry {
 
     pub fn all_tool_definitions(&self) -> Vec<ToolDefinition> {
         self.integrations.iter().flat_map(|i| i.tools()).collect()
+    }
+
+    pub fn all_agent_tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.integrations
+            .iter()
+            .flat_map(|i| i.agent_tools())
+            .collect()
     }
 
     pub fn get_integrations(&self) -> &[Arc<dyn Integration>] {

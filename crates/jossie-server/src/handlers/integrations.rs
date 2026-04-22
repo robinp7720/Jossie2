@@ -26,6 +26,9 @@ pub async fn onboarding_status_handler(
 ) -> Result<Json<Vec<IntegrationStatus>>, AppError> {
     let mut statuses = Vec::new();
     for integration in state.registry.get_integrations() {
+        if !integration.show_in_onboarding() {
+            continue;
+        }
         let status = integration.check_onboarding().await?;
         statuses.push(IntegrationStatus {
             name: integration.name().to_string(),

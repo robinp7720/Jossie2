@@ -212,7 +212,7 @@ fn build_tools_for_options(
     state: &AppState,
     options: &AgentRunOptions,
 ) -> Vec<jossie_core::ToolDefinition> {
-    let mut tools = state.registry.all_tool_definitions();
+    let mut tools = state.registry.all_agent_tool_definitions();
     if !options.allow_schedule_management {
         tools.retain(|tool| tool.name != "schedule_task" && tool.name != "schedule_recurring_task");
     }
