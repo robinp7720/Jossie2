@@ -144,6 +144,22 @@ The server will start on `http://0.0.0.0:3000` by default.
 3. **Chat with Jossie**: Start a conversation!
 4. **View Knowledge Graph**: Visit `http://localhost:3000/graph` to visualize relationships
 
+### Terminal Chat Helper
+
+For operator workflows and Codex-driven testing, use the repo helper:
+
+```bash
+python3 scripts/jossie_chat.py
+python3 scripts/jossie_chat.py ask "What are you working on?"
+python3 scripts/jossie_chat.py --remote-config-host prometheus ask "Hello Jossie"
+```
+
+What it does:
+
+- reads `config.toml` automatically, or bootstraps credentials from a remote host over SSH
+- stores the last conversation id per Jossie base URL in `.jossie-chat-state.json`
+- supports one-shot asks, an interactive REPL, history inspection, conversation listing, and run cancellation
+
 ## ⚙️ Configuration
 
 Jossie is configured via `config.toml` in the project root. See [`config.sample.toml`](config.sample.toml) for a complete annotated example.

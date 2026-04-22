@@ -6,5 +6,6 @@
 .env
 config.toml
 jossie.db
+.jossie-chat-state.json
 frontend/node_modules
 frontend/dist
