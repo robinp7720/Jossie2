@@ -1289,6 +1289,9 @@ struct EventNotificationState {
 const EVENT_NOTIFICATION_MARKER: &str = "integration_event_notification";
 const EVENT_MODE_SETTINGS_NAMESPACE: &str = "event_mode";
 const EVENT_NOTIFY_COOLDOWN_SECONDS: i64 = 120;
+const EVENT_MODE_MAX_ITERATIONS: usize = 3;
+const EVENT_TOOL_READ_TRIGGER_EMAIL: &str = "event_read_trigger_email";
+const EVENT_TOOL_READ_BATCH_EMAIL: &str = "event_read_batch_email";
 
 async fn generate_event_message_inner(
     state: &AppState,
@@ -1307,7 +1310,7 @@ async fn generate_event_message_inner(
     let event_context = build_event_context_hint(event);
     let mut prompt = build_system_prompt(state, Some(conversation_id), Some(&event_context)).await;
     prompt.push_str(
-        "\n\n## Event Mode\nYou are evaluating whether this integration event deserves an interruption.\nDefault to quiet triage.\nNotify only if the event is urgent, time-sensitive, actionable, clearly relevant to the user, or materially changes their plans.\nSkip low-signal items such as newsletters, receipts, marketing mail, routine confirmations, automated churn, or minor non-actionable calendar edits.\nFor email batches, notify only when the batch as a whole suggests something worth surfacing now.\nInterpret this event independently as a fresh arrival.\nDo NOT imply that you made a prior mistake, correction, or retraction unless the event payload explicitly says so.\nFor `gmail_new_message` and `new_email_batch`, frame updates as newly arrived emails, even when similar to prior ones.\nIf you notify, keep the message short, concrete, and explain why it matters now.\nRespond with strict JSON only:\n{\"action\":\"notify\",\"message\":\"<short user-facing message>\"}\nor\n{\"action\":\"skip\",\"message\":\"\"}"
+        "\n\n## Incoming Notification Mode\nThis is still Jossie: same judgment, same continuity, same general tool access as a normal conversation.\nThe difference is that you are deciding whether this newly arrived event deserves an interruption right now.\nDefault to quiet triage.\nNotify only if the event is urgent, time-sensitive, actionable, clearly relevant to the user, or materially changes their plans.\nSkip low-signal items such as newsletters, receipts, marketing mail, routine confirmations, automated churn, or minor non-actionable calendar edits.\nFor email batches, notify only when the batch as a whole suggests something worth surfacing now.\nInterpret this event independently as a fresh arrival.\nDo NOT imply that you made a prior mistake, correction, or retraction unless the event payload explicitly says so.\nFor `gmail_new_message` and `new_email_batch`, frame updates as newly arrived emails, even when similar to prior ones.\nUse tools normally when they materially improve confidence, especially before notifying about details hidden behind an email summary, snippet, attachment, or linked system.\nDo not claim room changes, schedule changes, requirement changes, or downstream consequences unless the email body or another checked source explicitly confirms them.\nIf an email mentions another system such as Moodle, an attachment, or a linked page that you did not verify, say only that the email mentions it.\nIf you notify, write it like Jossie: short, concrete, natural, and grounded in what you actually checked.\nRespond with strict JSON only:\n{\"action\":\"notify\",\"message\":\"<short user-facing message>\"}\nor\n{\"action\":\"skip\",\"message\":\"\"}"
     );
 
     messages.insert(0, Message::transient(Role::System, prompt));
@@ -1327,50 +1330,244 @@ async fn generate_event_message_inner(
         ),
     ));
 
-    let (content, tool_calls) = state.llm.complete(&messages, &[]).await?;
-    if !tool_calls.is_empty() {
-        tracing::warn!("Event loop returned tool calls; ignoring for now");
-    }
-
+    let tools = build_event_mode_tools(state, event);
     let fingerprint = event_notification_fingerprint(event);
 
-    if let Some(decision) = parse_event_mode_response(&content) {
-        let action = decision.action.trim().to_ascii_lowercase();
-        if action == "skip" {
+    for _ in 0..EVENT_MODE_MAX_ITERATIONS {
+        let (content, tool_calls) = state.llm.complete(&messages, &tools).await?;
+
+        if tool_calls.is_empty() {
+            if let Some(decision) = parse_event_mode_response(&content) {
+                let action = decision.action.trim().to_ascii_lowercase();
+                if action == "skip" {
+                    return Ok(None);
+                }
+                if action == "notify" {
+                    let message = decision.message.trim();
+                    if message.is_empty() {
+                        return Ok(None);
+                    }
+                    if should_suppress_event_notification(state, conversation_id, &fingerprint)
+                        .await?
+                    {
+                        tracing::debug!(
+                            "Suppressing duplicate event notification for conversation {}",
+                            conversation_id
+                        );
+                        return Ok(None);
+                    }
+                    record_event_notification(state, conversation_id, &fingerprint).await?;
+                    return Ok(Some(message.to_string()));
+                }
+            }
+
+            let trimmed = content.trim();
+            if trimmed
+                .trim_matches(|c| c == '"' || c == '`')
+                .trim()
+                .eq_ignore_ascii_case("no_action")
+                || trimmed.is_empty()
+            {
+                return Ok(None);
+            }
+
+            tracing::warn!(
+                "Dropping invalid event-mode output instead of forwarding raw content: {:.400}",
+                trimmed
+            );
             return Ok(None);
         }
-        if action == "notify" {
-            let message = decision.message.trim();
-            if message.is_empty() {
-                return Ok(None);
-            }
-            if should_suppress_event_notification(state, conversation_id, &fingerprint).await? {
-                tracing::debug!(
-                    "Suppressing duplicate event notification for conversation {}",
-                    conversation_id
-                );
-                return Ok(None);
-            }
-            record_event_notification(state, conversation_id, &fingerprint).await?;
-            return Ok(Some(message.to_string()));
-        }
-    }
 
-    let trimmed = content.trim();
-    if trimmed
-        .trim_matches(|c| c == '"' || c == '`')
-        .trim()
-        .eq_ignore_ascii_case("no_action")
-        || trimmed.is_empty()
-    {
-        return Ok(None);
+        let assistant_msg = Message::transient(Role::Assistant, content.clone())
+            .with_tool_calls(serde_json::to_value(&tool_calls)?);
+        messages.push(assistant_msg);
+
+        for call in tool_calls {
+            let result = execute_event_mode_tool(state, event, &call).await;
+            let tool_msg = match result {
+                Ok(result) => Message::transient(Role::Tool, result.content)
+                    .with_tool_call_id(call.id.clone())
+                    .with_name(call.name.clone()),
+                Err(err) => Message::transient(Role::Tool, format!("Error: {err}"))
+                    .with_tool_call_id(call.id.clone())
+                    .with_name(call.name.clone()),
+            };
+            messages.push(tool_msg);
+        }
     }
 
     tracing::warn!(
-        "Dropping invalid event-mode output instead of forwarding raw content: {:.400}",
-        trimmed
+        "Event mode exceeded max iterations ({EVENT_MODE_MAX_ITERATIONS}) for conversation {conversation_id}"
     );
     Ok(None)
+}
+
+fn build_event_mode_tools(
+    state: &AppState,
+    event: &IntegrationEvent,
+) -> Vec<jossie_core::ToolDefinition> {
+    let mut tools = build_tools_for_options(
+        state,
+        &AgentRunOptions {
+            allow_schedule_management: false,
+            allow_oob_messages: false,
+            scheduled_execution: false,
+        },
+    );
+    if event_supports_trigger_email_read(event) {
+        tools.push(jossie_core::ToolDefinition {
+            name: EVENT_TOOL_READ_TRIGGER_EMAIL.to_string(),
+            description: "Read the full triggering email before notifying when the summary alone is not enough.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            }),
+        });
+    }
+    if event.event_type == "new_email_batch"
+        && event
+            .payload
+            .get("emails")
+            .and_then(|v| v.as_array())
+            .is_some_and(|emails| !emails.is_empty())
+    {
+        tools.push(jossie_core::ToolDefinition {
+            name: EVENT_TOOL_READ_BATCH_EMAIL.to_string(),
+            description: "Read one specific email from the current batch by 1-based index when you need more context before notifying.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "index": {
+                        "type": "integer",
+                        "description": "1-based index of the email in the batch payload"
+                    }
+                },
+                "required": ["index"],
+                "additionalProperties": false
+            }),
+        });
+    }
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    tools.dedup_by(|a, b| a.name == b.name);
+    tools
+}
+
+fn event_supports_trigger_email_read(event: &IntegrationEvent) -> bool {
+    match event.event_type.as_str() {
+        "gmail_new_message" => event
+            .payload
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .is_some(),
+        "new_email" => event.payload.get("uid").and_then(|v| v.as_u64()).is_some(),
+        _ => false,
+    }
+}
+
+async fn execute_event_mode_tool(
+    state: &AppState,
+    event: &IntegrationEvent,
+    call: &jossie_core::ToolCall,
+) -> anyhow::Result<jossie_core::ToolResult> {
+    let delegated = match call.name.as_str() {
+        EVENT_TOOL_READ_TRIGGER_EMAIL => build_trigger_email_read_call(event, &call.id)?,
+        EVENT_TOOL_READ_BATCH_EMAIL => build_batch_email_read_call(event, call)?,
+        _ => call.clone(),
+    };
+    let result = state.registry.execute(&delegated).await;
+    Ok(jossie_core::ToolResult {
+        tool_call_id: call.id.clone(),
+        content: result.content,
+        is_error: result.is_error,
+    })
+}
+
+fn build_trigger_email_read_call(
+    event: &IntegrationEvent,
+    tool_call_id: &str,
+) -> anyhow::Result<jossie_core::ToolCall> {
+    match event.event_type.as_str() {
+        "gmail_new_message" => {
+            let message_id = event
+                .payload
+                .get("message_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("event is missing Gmail message_id"))?;
+            let account_id = event
+                .payload
+                .get("account_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(event.account_id.as_str());
+            Ok(jossie_core::ToolCall {
+                id: tool_call_id.to_string(),
+                name: "gmail_read".to_string(),
+                arguments: serde_json::json!({
+                    "account_id": account_id,
+                    "message_id": message_id
+                })
+                .to_string(),
+            })
+        }
+        "new_email" => {
+            let uid = event
+                .payload
+                .get("uid")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| anyhow::anyhow!("event is missing IMAP uid"))?;
+            let folder = event
+                .payload
+                .get("folder")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let account_id = event
+                .payload
+                .get("account_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(event.account_id.as_str());
+            Ok(jossie_core::ToolCall {
+                id: tool_call_id.to_string(),
+                name: "email_read".to_string(),
+                arguments: serde_json::json!({
+                    "account_id": account_id,
+                    "uid": uid,
+                    "folder": folder
+                })
+                .to_string(),
+            })
+        }
+        _ => anyhow::bail!("event does not support reading a trigger email"),
+    }
+}
+
+fn build_batch_email_read_call(
+    event: &IntegrationEvent,
+    call: &jossie_core::ToolCall,
+) -> anyhow::Result<jossie_core::ToolCall> {
+    #[derive(Deserialize)]
+    struct Args {
+        index: usize,
+    }
+
+    if event.event_type != "new_email_batch" {
+        anyhow::bail!("batch email reader only works for new_email_batch events");
+    }
+
+    let args: Args = serde_json::from_str(&call.arguments)?;
+    anyhow::ensure!(args.index > 0, "batch email index must be 1 or greater");
+
+    let emails = event
+        .payload
+        .get("emails")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow::anyhow!("event batch is missing emails"))?;
+    let Some(selected) = emails.get(args.index - 1) else {
+        anyhow::bail!("batch email index {} is out of range", args.index);
+    };
+
+    let selected_event: IntegrationEvent = serde_json::from_value(selected.clone())?;
+    build_trigger_email_read_call(&selected_event, &call.id)
 }
 
 fn is_event_notification_message(message: &Message) -> bool {
