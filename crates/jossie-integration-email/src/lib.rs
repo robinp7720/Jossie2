@@ -482,12 +482,16 @@ impl EmailIntegration {
                         .get_first_value("Subject")
                         .unwrap_or_default();
                     let from = parsed.headers.get_first_value("From").unwrap_or_default();
+                    let to = parse_recipient_list(
+                        &parsed.headers.get_first_value("To").unwrap_or_default(),
+                    );
                     let date = parsed.headers.get_first_value("Date").unwrap_or_default();
                     let body_text =
                         truncate_with_notice(extract_message_body(&parsed), MAX_EMAIL_BODY_CHARS);
                     serde_json::json!({
                         "uid": uid,
                         "from": from,
+                        "to": to,
                         "subject": subject,
                         "date": date,
                         "body": body_text,
@@ -499,6 +503,7 @@ impl EmailIntegration {
                     serde_json::json!({
                         "uid": uid,
                         "from": from,
+                        "to": Vec::<String>::new(),
                         "subject": subject,
                         "date": date,
                         "body": truncate_with_notice(text_fallback_preview(raw_message), MAX_FALLBACK_PREVIEW_CHARS),
@@ -589,6 +594,10 @@ impl EmailIntegration {
 impl Integration for EmailIntegration {
     fn name(&self) -> &str {
         "email"
+    }
+
+    fn agent_tools(&self) -> Vec<ToolDefinition> {
+        Vec::new()
     }
 
     fn tools(&self) -> Vec<ToolDefinition> {

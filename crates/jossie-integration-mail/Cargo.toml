@@ -1,0 +1,14 @@
+[package]
+name = "jossie-integration-mail"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+jossie-core = { workspace = true }
+jossie-integration-email = { workspace = true }
+jossie-integration-google = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }

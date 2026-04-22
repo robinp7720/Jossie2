@@ -73,7 +73,8 @@ async fn main() -> Result<()> {
 
     let mut email = jossie_integration_email::EmailIntegration::new(&config.email);
     email.set_db(db.clone());
-    registry.register(Arc::new(email));
+    let email = Arc::new(email);
+    registry.register(email.clone());
     tracing::info!("Registered email integration");
 
     let mut google_integration: Option<Arc<jossie_integration_google::GoogleIntegration>> = None;
@@ -85,6 +86,12 @@ async fn main() -> Result<()> {
         google_integration = Some(google);
         tracing::info!("Registered Google integration");
     }
+
+    registry.register(Arc::new(jossie_integration_mail::MailIntegration::new(
+        email.clone(),
+        google_integration.clone(),
+    )));
+    tracing::info!("Registered mail integration");
 
     // Browser Integration
     registry.register(Arc::new(

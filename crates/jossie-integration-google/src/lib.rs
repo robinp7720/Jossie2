@@ -986,6 +986,29 @@ impl GoogleIntegration {
         Ok(format!("Email sent to {to}"))
     }
 
+    async fn gmail_list_labels(&self, account_id: &str) -> anyhow::Result<String> {
+        let token = self.get_access_token(account_id).await?;
+        let resp = self
+            .client
+            .get("https://gmail.googleapis.com/gmail/v1/users/me/labels")
+            .bearer_auth(&token)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Gmail label list failed: {body}");
+        }
+
+        let data: serde_json::Value = resp.json().await?;
+        let labels = data
+            .get("labels")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(serde_json::to_string_pretty(&labels)?)
+    }
+
     async fn drive_search(&self, account_id: &str, query: &str) -> anyhow::Result<String> {
         let token = self.get_access_token(account_id).await?;
         let q = format!("name contains '{}'", query.replace('"', "\""));
@@ -1682,6 +1705,13 @@ impl Integration for GoogleIntegration {
         "google"
     }
 
+    fn agent_tools(&self) -> Vec<ToolDefinition> {
+        self.tools()
+            .into_iter()
+            .filter(|tool| !tool.name.starts_with("gmail_"))
+            .collect()
+    }
+
     fn tools(&self) -> Vec<ToolDefinition> {
         vec![
             ToolDefinition {
@@ -1734,6 +1764,18 @@ impl Integration for GoogleIntegration {
                         "body": {"type": "string", "description": "Email body text"}
                     },
                     "required": ["account_id", "to", "subject", "body"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "gmail_list_labels".to_string(),
+                description: "List Gmail labels and system mailboxes".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "string", "description": "Account ID from google_list_accounts"}
+                    },
+                    "required": ["account_id"],
                     "additionalProperties": false
                 }),
             },
@@ -1873,6 +1915,14 @@ impl Integration for GoogleIntegration {
                 let args: Args = serde_json::from_str(arguments)?;
                 self.gmail_send(&args.account_id, &args.to, &args.subject, &args.body)
                     .await
+            }
+            "gmail_list_labels" => {
+                #[derive(Deserialize)]
+                struct Args {
+                    account_id: String,
+                }
+                let args: Args = serde_json::from_str(arguments)?;
+                self.gmail_list_labels(&args.account_id).await
             }
             "drive_search" => {
                 #[derive(Deserialize)]

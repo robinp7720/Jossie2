@@ -7,6 +7,7 @@ members = [
     "crates/jossie-telegram",
     "crates/jossie-integration-browser",
     "crates/jossie-integration-email",
+    "crates/jossie-integration-mail",
     "crates/jossie-integration-google",
     "crates/jossie-integration-graph",
     "crates/jossie-integration-http",
@@ -23,6 +24,7 @@ jossie-db = { path = "crates/jossie-db" }
 jossie-server = { path = "crates/jossie-server" }
 jossie-telegram = { path = "crates/jossie-telegram" }
 jossie-integration-email = { path = "crates/jossie-integration-email" }
+jossie-integration-mail = { path = "crates/jossie-integration-mail" }
 jossie-integration-google = { path = "crates/jossie-integration-google" }
 jossie-integration-graph = { path = "crates/jossie-integration-graph" }
 jossie-integration-memory = { path = "crates/jossie-integration-memory" }
@@ -87,6 +89,7 @@ jossie-server = { workspace = true }
 jossie-integration-memory = { workspace = true }
 jossie-integration-files = { path = "crates/jossie-integration-files" }
 jossie-integration-email = { workspace = true }
+jossie-integration-mail = { workspace = true }
 jossie-integration-google = { workspace = true }
 jossie-integration-graph = { workspace = true }
 jossie-integration-browser = { workspace = true }
