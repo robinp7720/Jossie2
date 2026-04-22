@@ -1278,6 +1278,18 @@ struct EventModeResponse {
     action: String,
     #[serde(default)]
     message: String,
+    #[serde(default)]
+    what_happened: String,
+    #[serde(default)]
+    why_now: String,
+    #[serde(default)]
+    what_changed: String,
+    #[serde(default)]
+    suggested_action: String,
+    #[serde(default)]
+    confidence: Option<f32>,
+    #[serde(default)]
+    interrupt_score: Option<f32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1292,6 +1304,9 @@ const EVENT_NOTIFY_COOLDOWN_SECONDS: i64 = 120;
 const EVENT_MODE_MAX_ITERATIONS: usize = 3;
 const EVENT_TOOL_READ_TRIGGER_EMAIL: &str = "event_read_trigger_email";
 const EVENT_TOOL_READ_BATCH_EMAIL: &str = "event_read_batch_email";
+const EVENT_NOTIFICATION_HISTORY_LIMIT: usize = 3;
+const EVENT_NOTIFY_CONFIDENCE_THRESHOLD: f32 = 0.55;
+const EVENT_NOTIFY_INTERRUPT_THRESHOLD: f32 = 0.65;
 
 async fn generate_event_message_inner(
     state: &AppState,
@@ -1302,6 +1317,7 @@ async fn generate_event_message_inner(
         .db
         .get_messages(conversation_id, Some(state.event_max_context_messages))
         .await?;
+    let recent_notification_context = build_recent_notification_context(&messages);
     messages.retain(|m| !is_event_notification_message(m));
     strip_tool_activity_from_event_context(&mut messages);
 
@@ -1312,6 +1328,13 @@ async fn generate_event_message_inner(
     prompt.push_str(
         "\n\n## Incoming Notification Mode\nThis is still Jossie: same judgment, same continuity, same general tool access as a normal conversation.\nThe difference is that you are deciding whether this newly arrived event deserves an interruption right now.\nDefault to quiet triage.\nNotify only if the event is urgent, time-sensitive, actionable, clearly relevant to the user, or materially changes their plans.\nSkip low-signal items such as newsletters, receipts, marketing mail, routine confirmations, automated churn, or minor non-actionable calendar edits.\nFor email batches, notify only when the batch as a whole suggests something worth surfacing now.\nInterpret this event independently as a fresh arrival.\nDo NOT imply that you made a prior mistake, correction, or retraction unless the event payload explicitly says so.\nFor `gmail_new_message` and `new_email_batch`, frame updates as newly arrived emails, even when similar to prior ones.\nUse tools normally when they materially improve confidence, especially before notifying about details hidden behind an email summary, snippet, attachment, or linked system.\nDo not claim room changes, schedule changes, requirement changes, or downstream consequences unless the email body or another checked source explicitly confirms them.\nIf an email mentions another system such as Moodle, an attachment, or a linked page that you did not verify, say only that the email mentions it.\nIf you notify, write it like Jossie: short, concrete, natural, and grounded in what you actually checked.\nRespond with strict JSON only:\n{\"action\":\"notify\",\"message\":\"<short user-facing message>\"}\nor\n{\"action\":\"skip\",\"message\":\"\"}"
     );
+    prompt.push_str(
+        "\nBefore deciding, build a compact internal notification brief with these fields:\n- `what_happened`\n- `why_now`\n- `what_changed`\n- `suggested_action`\n- `confidence` (0.0 to 1.0)\n- `interrupt_score` (0.0 to 1.0)\nOnly notify when both confidence and interrupt_score are strong enough.\nReturn strict JSON only in this shape:\n{\"action\":\"notify|skip\",\"message\":\"<short user-facing message>\",\"what_happened\":\"...\",\"why_now\":\"...\",\"what_changed\":\"...\",\"suggested_action\":\"...\",\"confidence\":0.0,\"interrupt_score\":0.0}"
+    );
+    if !recent_notification_context.is_empty() {
+        prompt.push_str("\n\n");
+        prompt.push_str(&recent_notification_context);
+    }
 
     messages.insert(0, Message::transient(Role::System, prompt));
 
@@ -1345,6 +1368,15 @@ async fn generate_event_message_inner(
                 if action == "notify" {
                     let message = decision.message.trim();
                     if message.is_empty() {
+                        return Ok(None);
+                    }
+                    if !decision.should_notify() {
+                        tracing::debug!(
+                            "Skipping event notification for conversation {} because confidence/interrupt score was too low: confidence={:?} interrupt_score={:?}",
+                            conversation_id,
+                            decision.confidence,
+                            decision.interrupt_score
+                        );
                         return Ok(None);
                     }
                     if should_suppress_event_notification(state, conversation_id, &fingerprint)
@@ -1572,6 +1604,70 @@ fn build_batch_email_read_call(
 
 fn is_event_notification_message(message: &Message) -> bool {
     message.role == Role::Assistant && message.name.as_deref() == Some(EVENT_NOTIFICATION_MARKER)
+}
+
+impl EventModeResponse {
+    fn has_minimal_brief(&self) -> bool {
+        !self.what_happened.trim().is_empty()
+            && !self.why_now.trim().is_empty()
+            && (!self.what_changed.trim().is_empty() || !self.suggested_action.trim().is_empty())
+    }
+
+    fn confidence_value(&self) -> f32 {
+        self.confidence.unwrap_or(0.0).clamp(0.0, 1.0)
+    }
+
+    fn interrupt_score_value(&self) -> f32 {
+        self.interrupt_score.unwrap_or(0.0).clamp(0.0, 1.0)
+    }
+
+    fn should_notify(&self) -> bool {
+        self.has_minimal_brief()
+            && self.confidence_value() >= EVENT_NOTIFY_CONFIDENCE_THRESHOLD
+            && self.interrupt_score_value() >= EVENT_NOTIFY_INTERRUPT_THRESHOLD
+    }
+}
+
+fn build_recent_notification_context(messages: &[Message]) -> String {
+    let recent = messages
+        .iter()
+        .rev()
+        .filter(|message| is_event_notification_message(message))
+        .take(EVENT_NOTIFICATION_HISTORY_LIMIT)
+        .map(|message| {
+            format!(
+                "- {} ago: {}",
+                format_relative_age(message),
+                preview_text(&message.content, 160)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if recent.is_empty() {
+        return String::new();
+    }
+
+    let mut section = String::from(
+        "## Recent Notification Delivery Context\nAvoid redundant interruptions if this event overlaps with what was just surfaced:\n",
+    );
+    for entry in recent.into_iter().rev() {
+        section.push_str(&entry);
+        section.push('\n');
+    }
+    section
+}
+
+fn format_relative_age(message: &Message) -> String {
+    let age = chrono::Utc::now().signed_duration_since(message.created_at);
+    if age.num_minutes() < 1 {
+        "less than a minute".to_string()
+    } else if age.num_hours() < 1 {
+        format!("{} minute(s)", age.num_minutes())
+    } else if age.num_days() < 1 {
+        format!("{} hour(s)", age.num_hours())
+    } else {
+        format!("{} day(s)", age.num_days())
+    }
 }
 
 fn strip_tool_activity_from_event_context(messages: &mut Vec<Message>) {
@@ -2316,6 +2412,45 @@ mod tests {
         assert!(!tracker.should_stop_for_repetition());
         assert!(tracker.note_tool_batch(&calls).is_some());
         assert!(tracker.should_stop_for_repetition());
+    }
+
+    #[test]
+    fn test_event_mode_response_notify_thresholds() {
+        let strong = EventModeResponse {
+            action: "notify".to_string(),
+            message: "Heads up".to_string(),
+            what_happened: "Email arrived".to_string(),
+            why_now: "It affects tomorrow".to_string(),
+            what_changed: "Room changed".to_string(),
+            suggested_action: "Check details".to_string(),
+            confidence: Some(0.8),
+            interrupt_score: Some(0.9),
+        };
+        let weak = EventModeResponse {
+            confidence: Some(0.4),
+            ..strong
+        };
+
+        assert!(weak.interrupt_score_value() >= EVENT_NOTIFY_INTERRUPT_THRESHOLD);
+        assert!(!weak.should_notify());
+    }
+
+    #[test]
+    fn test_recent_notification_context_lists_previous_notifications() {
+        let conv_id = Uuid::new_v4();
+        let mut notification = Message::new(
+            conv_id,
+            Role::Assistant,
+            "Your lecture moved rooms.".to_string(),
+        )
+        .with_name(EVENT_NOTIFICATION_MARKER.to_string());
+        notification.created_at = chrono::Utc::now() - chrono::Duration::minutes(12);
+        let regular = Message::new(conv_id, Role::Assistant, "Normal reply".to_string());
+
+        let section = build_recent_notification_context(&[regular, notification]);
+        assert!(section.contains("Recent Notification Delivery Context"));
+        assert!(section.contains("Your lecture moved rooms."));
+        assert!(section.contains("12 minute(s) ago"));
     }
 
     #[test]
