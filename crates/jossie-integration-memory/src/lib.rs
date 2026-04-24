@@ -203,7 +203,7 @@ impl Integration for MemoryIntegration {
         vec![
             ToolDefinition {
                 name: "memory_save".to_string(),
-                description: "Save durable context to long-term memory, such as preferences, relationships, ongoing projects, recurring needs, credentials, API keys, tokens, MFA seed material, or other information likely to matter again. For structured secrets, prefer stable keys such as `credential.rwth_sso` and JSON content."
+                description: "Save durable context to long-term memory, such as preferences, relationships, ongoing projects, recurring needs, credentials, API keys, tokens, MFA seed material, or other information likely to matter again. For structured secrets, prefer stable keys such as `credential.rwth_sso` and JSON content. Use prompt_scope only for compact, non-secret memories that should be automatically included in future chat/event prompts."
                     .to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
@@ -211,7 +211,9 @@ impl Integration for MemoryIntegration {
                         "key": {"type": "string", "description": "Unique key for this memory"},
                         "content": {"type": "string", "description": "Durable content to remember"},
                         "tags": {"type": "string", "description": "Space-separated tags for categorization (use empty string for none)"},
-                        "allow_sensitive": {"type": "boolean", "description": "Legacy compatibility flag. It is optional and ignored."}
+                        "allow_sensitive": {"type": "boolean", "description": "Legacy compatibility flag. It is optional and ignored."},
+                        "prompt_scope": {"type": "string", "enum": ["none", "chat", "event", "both"], "description": "Optional automatic prompt inclusion scope. Use none for secrets or low-signal memories."},
+                        "importance": {"type": "integer", "minimum": 0, "maximum": 100, "description": "Optional prompt priority for prompt-scoped memories. Higher is included first."}
                     },
                     "required": ["key", "content", "tags"],
                     "additionalProperties": false
@@ -292,11 +294,21 @@ impl Integration for MemoryIntegration {
                     tags: String,
                     #[serde(default)]
                     allow_sensitive: bool,
+                    #[serde(default)]
+                    prompt_scope: Option<String>,
+                    #[serde(default)]
+                    importance: Option<i64>,
                 }
                 let args: Args = serde_json::from_str(arguments)?;
                 let _ = args.allow_sensitive;
                 self.db
-                    .memory_save(&args.key, &args.content, &args.tags)
+                    .memory_save_with_prompt_metadata(
+                        &args.key,
+                        &args.content,
+                        &args.tags,
+                        args.prompt_scope.as_deref(),
+                        args.importance,
+                    )
                     .await?;
                 Ok(format!("Saved memory with key '{}'", args.key))
             }

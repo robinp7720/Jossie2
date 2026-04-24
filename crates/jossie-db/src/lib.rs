@@ -90,7 +90,7 @@ impl Database {
             if let Err(e) = sqlx::query(statement).execute(&self.pool).await {
                 // FTS5 virtual tables can't use IF NOT EXISTS, so ignore "already exists" errors
                 let msg = e.to_string();
-                if msg.contains("already exists") {
+                if msg.contains("already exists") || msg.contains("duplicate column name") {
                     tracing::debug!(
                         "Migration statement skipped (already exists): {}",
                         &statement[..statement.len().min(80)]
@@ -415,6 +415,26 @@ impl Database {
 
     // Memory (FTS5)
     pub async fn memory_save(&self, key: &str, content: &str, tags: &str) -> anyhow::Result<()> {
+        self.memory_save_with_prompt_metadata(key, content, tags, None, None)
+            .await
+    }
+
+    pub async fn memory_save_with_prompt_metadata(
+        &self,
+        key: &str,
+        content: &str,
+        tags: &str,
+        prompt_scope: Option<&str>,
+        importance: Option<i64>,
+    ) -> anyhow::Result<()> {
+        let existing = self.memory_prompt_metadata(key).await?;
+        let prompt_scope = prompt_scope
+            .map(normalize_prompt_scope)
+            .unwrap_or_else(|| existing.0.unwrap_or_else(|| "none".to_string()));
+        let importance = importance
+            .map(normalize_memory_importance)
+            .unwrap_or_else(|| existing.1.unwrap_or(0));
+
         // Delete existing entry if any
         sqlx::query("DELETE FROM memory WHERE key = ?")
             .bind(key)
@@ -429,14 +449,39 @@ impl Database {
             .await?;
         let now_str = Utc::now().to_rfc3339();
         sqlx::query(
-            "INSERT OR REPLACE INTO memory_metadata (key, created_at, updated_at) VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO memory_metadata (key, created_at, updated_at, prompt_scope, importance) VALUES (?, COALESCE((SELECT created_at FROM memory_metadata WHERE key = ?), ?), ?, ?, ?)",
         )
+        .bind(key)
         .bind(key)
         .bind(&now_str)
         .bind(&now_str)
+        .bind(prompt_scope)
+        .bind(importance)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn memory_prompt_metadata(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<(Option<String>, Option<i64>)> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            prompt_scope: Option<String>,
+            importance: Option<i64>,
+        }
+
+        let row = sqlx::query_as::<_, Row>(
+            "SELECT prompt_scope, importance FROM memory_metadata WHERE key = ?",
+        )
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row
+            .map(|r| (r.prompt_scope, r.importance))
+            .unwrap_or((None, None)))
     }
 
     pub async fn memory_search(&self, query: &str) -> anyhow::Result<Vec<MemoryEntry>> {
@@ -537,6 +582,102 @@ impl Database {
                 updated_at: r.updated_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
             })
             .collect())
+    }
+
+    pub async fn memory_prompt_context(
+        &self,
+        scope: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemoryPromptEntry>> {
+        let scope = normalize_prompt_scope(scope);
+        if scope == "none" {
+            return Ok(Vec::new());
+        }
+
+        let rows = sqlx::query_as::<_, MemoryPromptRow>(
+            "SELECT m.key, m.content, m.tags, mm.prompt_scope, mm.importance, mm.updated_at
+             FROM memory m
+             INNER JOIN memory_metadata mm ON m.key = mm.key
+             WHERE mm.prompt_scope IN (?, 'both')
+             ORDER BY mm.importance DESC, mm.updated_at DESC
+             LIMIT ?",
+        )
+        .bind(scope)
+        .bind(limit.max(1).min(50) as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| MemoryPromptEntry {
+                key: r.key,
+                content: r.content,
+                tags: r.tags,
+                prompt_scope: r.prompt_scope,
+                importance: r.importance,
+                updated_at: r.updated_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
+            })
+            .collect())
+    }
+
+    pub async fn memory_prompt_search(
+        &self,
+        scope: &str,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemoryPromptEntry>> {
+        let scope = normalize_prompt_scope(scope);
+        if scope == "none" || query.trim().len() < 2 {
+            return Ok(Vec::new());
+        }
+
+        let mut results = Vec::new();
+        let mut seen_keys = HashSet::new();
+
+        for match_query in build_memory_search_queries(query) {
+            let rows = sqlx::query_as::<_, MemoryPromptRow>(
+                "SELECT memory.key, memory.content, memory.tags, mm.prompt_scope, mm.importance, mm.updated_at
+                 FROM memory
+                 INNER JOIN memory_metadata mm ON memory.key = mm.key
+                 WHERE memory MATCH ? AND mm.prompt_scope IN (?, 'both')
+                 ORDER BY bm25(memory, 8.0, 1.0, 3.0), mm.importance DESC, memory.rowid DESC
+                 LIMIT ?",
+            )
+            .bind(&match_query)
+            .bind(&scope)
+            .bind(limit.max(1).min(50) as i64)
+            .fetch_all(&self.pool)
+            .await;
+
+            let rows = match rows {
+                Ok(rows) => rows,
+                Err(err) => {
+                    tracing::warn!(
+                        "Prompt memory search strategy failed for query {:?}: {err}",
+                        match_query
+                    );
+                    continue;
+                }
+            };
+
+            for row in rows {
+                if seen_keys.insert(row.key.clone()) {
+                    results.push(MemoryPromptEntry {
+                        key: row.key,
+                        content: row.content,
+                        tags: row.tags,
+                        prompt_scope: row.prompt_scope,
+                        importance: row.importance,
+                        updated_at: row.updated_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
+                    });
+                    if results.len() >= limit {
+                        return Ok(results);
+                    }
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     async fn memory_search_match(
@@ -1469,6 +1610,19 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(sidecar)
 }
 
+fn normalize_prompt_scope(scope: &str) -> String {
+    match scope.trim().to_ascii_lowercase().as_str() {
+        "chat" => "chat".to_string(),
+        "event" | "events" => "event".to_string(),
+        "both" | "all" => "both".to_string(),
+        _ => "none".to_string(),
+    }
+}
+
+fn normalize_memory_importance(importance: i64) -> i64 {
+    importance.clamp(0, 100)
+}
+
 fn copy_if_exists(from: &Path, to: &Path) -> std::io::Result<()> {
     if !from.exists() {
         return Ok(());
@@ -1788,6 +1942,16 @@ pub struct MemoryEntryWithMetadata {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemoryPromptEntry {
+    pub key: String,
+    pub content: String,
+    pub tags: String,
+    pub prompt_scope: String,
+    pub importance: i64,
+    pub updated_at: String,
+}
+
 #[derive(sqlx::FromRow)]
 struct MemoryKeyRow {
     key: String,
@@ -1801,6 +1965,16 @@ struct MemoryEntryMetadataRow {
     content: String,
     tags: String,
     created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct MemoryPromptRow {
+    key: String,
+    content: String,
+    tags: String,
+    prompt_scope: String,
+    importance: i64,
     updated_at: Option<String>,
 }
 
@@ -2109,6 +2283,82 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert!(all.iter().any(|e| e.key == "k1" && e.content == "c1"));
         assert!(all.iter().any(|e| e.key == "k2" && e.content == "c2"));
+    }
+
+    #[tokio::test]
+    async fn memory_prompt_context_filters_by_scope_and_importance() {
+        let db = test_db().await;
+        db.memory_save_with_prompt_metadata(
+            "chat.low",
+            "Use short answers in chat",
+            "preference",
+            Some("chat"),
+            Some(20),
+        )
+        .await
+        .unwrap();
+        db.memory_save_with_prompt_metadata(
+            "event.high",
+            "Always surface messages from Ada",
+            "notification preference",
+            Some("event"),
+            Some(90),
+        )
+        .await
+        .unwrap();
+        db.memory_save_with_prompt_metadata(
+            "both.medium",
+            "The user prefers deadline-first summaries",
+            "preference",
+            Some("both"),
+            Some(50),
+        )
+        .await
+        .unwrap();
+
+        let event = db.memory_prompt_context("event", 10).await.unwrap();
+        let keys = event
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["event.high", "both.medium"]);
+
+        let chat = db.memory_prompt_context("chat", 10).await.unwrap();
+        let keys = chat
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["both.medium", "chat.low"]);
+    }
+
+    #[tokio::test]
+    async fn memory_prompt_search_only_returns_prompt_scoped_matches() {
+        let db = test_db().await;
+        db.memory_save_with_prompt_metadata(
+            "notify.ada",
+            "Ada Lovelace messages should be surfaced quickly",
+            "notification",
+            Some("event"),
+            Some(80),
+        )
+        .await
+        .unwrap();
+        db.memory_save_with_prompt_metadata(
+            "secret.ada",
+            "Ada account recovery code 123456",
+            "secret",
+            Some("none"),
+            Some(100),
+        )
+        .await
+        .unwrap();
+
+        let results = db
+            .memory_prompt_search("event", "Ada Lovelace", 10)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "notify.ada");
     }
 
     #[tokio::test]

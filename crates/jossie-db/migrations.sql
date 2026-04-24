@@ -27,8 +27,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory USING fts5(
 CREATE TABLE IF NOT EXISTS memory_metadata (
     key TEXT PRIMARY KEY,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    prompt_scope TEXT NOT NULL DEFAULT 'none',
+    importance INTEGER NOT NULL DEFAULT 0
 );
+
+ALTER TABLE memory_metadata ADD COLUMN prompt_scope TEXT NOT NULL DEFAULT 'none';
+ALTER TABLE memory_metadata ADD COLUMN importance INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS telegram_chats (
     telegram_chat_id INTEGER PRIMARY KEY,

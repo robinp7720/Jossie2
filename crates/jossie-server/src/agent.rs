@@ -1,7 +1,7 @@
 use crate::events::{ServerEvent, persist_message, preview_text};
 use crate::state::AppState;
 use jossie_core::types::{Message, Role};
-use jossie_db::{IntegrationEvent, MemoryKeyInfo};
+use jossie_db::{IntegrationEvent, MemoryKeyInfo, MemoryPromptEntry};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -14,11 +14,28 @@ use uuid::Uuid;
 const MAX_TRACKED_STEPS: usize = 8;
 const MAX_TRACKED_OBSERVATIONS: usize = 5;
 const MAX_RELEVANT_MEMORIES: usize = 4;
+const MAX_PROMPT_MEMORIES: usize = 6;
+const MAX_EVENT_PROMPT_MEMORY_MATCHES: usize = 4;
 const MAX_MEMORY_INDEX_ITEMS: usize = 12;
 const LOOP_GUARD_WARN_THRESHOLD: usize = 2;
 const LOOP_GUARD_STOP_THRESHOLD: usize = 3;
 const LIVE_STANCE_MESSAGE_WINDOW: usize = 6;
 const REFLECTION_CONTEXT_WINDOW: usize = 4;
+
+#[derive(Clone, Copy)]
+enum PromptMemoryScope {
+    Chat,
+    Event,
+}
+
+impl PromptMemoryScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Event => "event",
+        }
+    }
+}
 
 struct GoalTracker {
     primary_goal: String,
@@ -408,6 +425,7 @@ async fn build_system_prompt(
     conversation_id: Option<Uuid>,
     user_message: Option<&str>,
     context_messages: Option<&[Message]>,
+    prompt_memory_scope: PromptMemoryScope,
 ) -> String {
     let mut prompt = state.system_prompt.clone();
 
@@ -440,6 +458,13 @@ async fn build_system_prompt(
     if let Ok(Some(entry)) = state.db.get_memory("user_profile").await {
         prompt.push_str("\n\n## User Description\n");
         prompt.push_str(&entry.content);
+    }
+
+    let important_memory_context =
+        build_important_prompt_memory_context(state, prompt_memory_scope).await;
+    if !important_memory_context.is_empty() {
+        prompt.push_str("\n\n");
+        prompt.push_str(&important_memory_context);
     }
 
     if let Some(messages) = context_messages {
@@ -523,6 +548,66 @@ fn format_memory_index(keys: &[MemoryKeyInfo]) -> String {
     section
 }
 
+async fn build_important_prompt_memory_context(
+    state: &AppState,
+    scope: PromptMemoryScope,
+) -> String {
+    let Ok(entries) = state
+        .db
+        .memory_prompt_context(scope.as_str(), MAX_PROMPT_MEMORIES)
+        .await
+    else {
+        return String::new();
+    };
+
+    let entries = entries
+        .into_iter()
+        .filter(|entry| !is_builtin_profile_memory(&entry.key))
+        .collect::<Vec<_>>();
+
+    format_prompt_memory_section(
+        match scope {
+            PromptMemoryScope::Chat => {
+                "## Important Chat Memory\nUse these durable preferences and traits unless the current user instruction overrides them.\n"
+            }
+            PromptMemoryScope::Event => {
+                "## Important Event Memory\nUse these durable notification preferences and user traits when deciding whether an event matters.\n"
+            }
+        },
+        &entries,
+        260,
+    )
+}
+
+fn format_prompt_memory_section(
+    heading: &str,
+    entries: &[MemoryPromptEntry],
+    preview_chars: usize,
+) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+
+    let mut section = String::from(heading);
+    for entry in entries {
+        section.push_str("- `");
+        section.push_str(&entry.key);
+        section.push_str("`");
+        section.push_str(&format!(" (importance {})", entry.importance));
+        section.push_str(": ");
+        section.push_str(&preview_text(&entry.content, preview_chars));
+        section.push('\n');
+    }
+    section
+}
+
+fn is_builtin_profile_memory(key: &str) -> bool {
+    matches!(
+        key,
+        "agent_profile" | "agent_profile.soul" | "agent_profile.mood" | "user_profile"
+    )
+}
+
 async fn build_relevant_memory_context(state: &AppState, user_message: &str) -> String {
     if user_message.trim().len() < 6 {
         return String::new();
@@ -534,12 +619,7 @@ async fn build_relevant_memory_context(state: &AppState, user_message: &str) -> 
 
     let filtered = entries
         .into_iter()
-        .filter(|entry| {
-            !matches!(
-                entry.key.as_str(),
-                "agent_profile" | "agent_profile.soul" | "agent_profile.mood" | "user_profile"
-            )
-        })
+        .filter(|entry| !is_builtin_profile_memory(&entry.key))
         .take(MAX_RELEVANT_MEMORIES)
         .collect::<Vec<_>>();
 
@@ -573,6 +653,7 @@ pub async fn prepend_system_prompt(
         conversation_id,
         user_message,
         Some(&context_snapshot),
+        PromptMemoryScope::Chat,
     )
     .await;
     if content.is_empty() {
@@ -1585,8 +1666,14 @@ async fn generate_event_message_inner(
         Some(conversation_id),
         Some(&event_context),
         Some(&context_snapshot),
+        PromptMemoryScope::Event,
     )
     .await;
+    let event_memory_context = build_event_specific_prompt_memory_context(state, event).await;
+    if !event_memory_context.is_empty() {
+        prompt.push_str("\n\n");
+        prompt.push_str(&event_memory_context);
+    }
     prompt.push_str(
         "\n\n## Incoming Notification Mode\nThis is still Jossie: same judgment, same continuity, same general tool access as a normal conversation.\nThe difference is that you are deciding whether this newly arrived event deserves an interruption right now.\nDefault to quiet triage.\nNotify only if the event is urgent, time-sensitive, actionable, clearly relevant to the user, or materially changes their plans.\nSkip low-signal items such as newsletters, receipts, marketing mail, routine confirmations, automated churn, or minor non-actionable calendar edits.\nFor email batches, notify only when the batch as a whole suggests something worth surfacing now.\nInterpret this event independently as a fresh arrival.\nDo NOT imply that you made a prior mistake, correction, or retraction unless the event payload explicitly says so.\nFor `gmail_new_message` and `new_email_batch`, frame updates as newly arrived emails, even when similar to prior ones.\nUse tools normally when they materially improve confidence, especially before notifying about details hidden behind an email summary, snippet, attachment, or linked system.\nDo not claim room changes, schedule changes, requirement changes, or downstream consequences unless the email body or another checked source explicitly confirms them.\nIf an email mentions another system such as Moodle, an attachment, or a linked page that you did not verify, say only that the email mentions it.\nIf you notify, write it like Jossie: short, concrete, natural, and grounded in what you actually checked.\nRespond with strict JSON only:\n{\"action\":\"notify\",\"message\":\"<short user-facing message>\"}\nor\n{\"action\":\"skip\",\"message\":\"\"}"
     );
@@ -2045,6 +2132,105 @@ fn build_event_context_hint(event: &IntegrationEvent) -> String {
     }
 
     lines.join("\n")
+}
+
+async fn build_event_specific_prompt_memory_context(
+    state: &AppState,
+    event: &IntegrationEvent,
+) -> String {
+    let query = build_event_memory_query(event);
+    if query.trim().is_empty() {
+        return String::new();
+    }
+
+    let Ok(entries) = state
+        .db
+        .memory_prompt_search(
+            PromptMemoryScope::Event.as_str(),
+            &query,
+            MAX_EVENT_PROMPT_MEMORY_MATCHES,
+        )
+        .await
+    else {
+        return String::new();
+    };
+
+    let entries = entries
+        .into_iter()
+        .filter(|entry| !is_builtin_profile_memory(&entry.key))
+        .collect::<Vec<_>>();
+
+    format_prompt_memory_section(
+        "## Event-Specific Memory Matches\nThese prompt-eligible memories match this event's sender, subject, title, integration, or event type.\n",
+        &entries,
+        240,
+    )
+}
+
+fn build_event_memory_query(event: &IntegrationEvent) -> String {
+    let mut terms = vec![
+        event.integration.as_str(),
+        event.event_type.as_str(),
+        event.account_id.as_str(),
+    ]
+    .into_iter()
+    .filter(|term| !term.trim().is_empty())
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+
+    match event.event_type.as_str() {
+        "gmail_new_message" | "new_email" => {
+            push_payload_str(&event.payload, "from", &mut terms);
+            push_payload_str(&event.payload, "sender", &mut terms);
+            push_payload_str(&event.payload, "subject", &mut terms);
+        }
+        "new_email_batch" => {
+            if let Some(emails) = event.payload.get("emails").and_then(|v| v.as_array()) {
+                for email in emails.iter().take(8) {
+                    if let Some(payload) = email.get("payload") {
+                        push_payload_str(payload, "from", &mut terms);
+                        push_payload_str(payload, "sender", &mut terms);
+                        push_payload_str(payload, "subject", &mut terms);
+                    }
+                }
+            }
+        }
+        "calendar_event" | "calendar_event_updated" => {
+            push_payload_str(&event.payload, "summary", &mut terms);
+            push_payload_str(&event.payload, "organizer", &mut terms);
+            push_payload_str(&event.payload, "location", &mut terms);
+            push_payload_str(&event.payload, "calendar_id", &mut terms);
+        }
+        "calendar_event_batch" => {
+            if let Some(events) = event.payload.get("events").and_then(|v| v.as_array()) {
+                for item in events.iter().take(8) {
+                    if let Some(payload) = item.get("payload") {
+                        push_payload_str(payload, "summary", &mut terms);
+                        push_payload_str(payload, "organizer", &mut terms);
+                        push_payload_str(payload, "location", &mut terms);
+                        push_payload_str(payload, "calendar_id", &mut terms);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    terms
+        .join(" ")
+        .split_whitespace()
+        .take(80)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn push_payload_str(payload: &serde_json::Value, key: &str, terms: &mut Vec<String>) {
+    if let Some(value) = payload.get(key).and_then(|v| v.as_str()) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            terms.push(trimmed.to_string());
+        }
+    }
 }
 
 fn event_notification_fingerprint(event: &IntegrationEvent) -> String {
@@ -2770,6 +2956,31 @@ mod tests {
     #[test]
     fn test_parse_event_mode_response_rejects_non_json_text() {
         assert!(parse_event_mode_response("let me check those emails first").is_none());
+    }
+
+    #[test]
+    fn test_event_memory_query_includes_email_fields() {
+        let event = IntegrationEvent {
+            id: "evt_1".to_string(),
+            integration: "gmail".to_string(),
+            account_id: "work".to_string(),
+            event_type: "gmail_new_message".to_string(),
+            dedupe_key: "dedupe".to_string(),
+            payload: serde_json::json!({
+                "from": "Ada Lovelace <ada@example.com>",
+                "subject": "Project deadline moved"
+            }),
+            status: "new".to_string(),
+            created_at: "2026-04-24T00:00:00Z".to_string(),
+            processed_at: None,
+            last_error: None,
+        };
+
+        let query = build_event_memory_query(&event);
+        assert!(query.contains("gmail"));
+        assert!(query.contains("gmail_new_message"));
+        assert!(query.contains("Ada Lovelace"));
+        assert!(query.contains("Project deadline moved"));
     }
 
     #[test]
