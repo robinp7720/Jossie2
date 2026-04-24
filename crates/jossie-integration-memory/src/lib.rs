@@ -68,41 +68,6 @@ struct StoredCredentialBundle {
     period: Option<u64>,
 }
 
-fn sensitive_memory_reason(key: &str, content: &str, tags: &str) -> Option<&'static str> {
-    let haystack = format!(
-        "{}\n{}\n{}",
-        key.to_ascii_lowercase(),
-        content.to_ascii_lowercase(),
-        tags.to_ascii_lowercase()
-    );
-
-    [
-        ("password:", "password"),
-        ("password is", "password"),
-        ("passcode:", "passcode"),
-        ("passcode is", "passcode"),
-        ("login code", "login code"),
-        ("verification code", "verification code"),
-        ("one-time password", "one-time password"),
-        ("one time password", "one-time password"),
-        ("otp", "otp"),
-        ("2fa code", "2fa code"),
-        ("mfa code", "mfa code"),
-        ("recovery code", "recovery code"),
-        ("backup code", "backup code"),
-        ("access token", "access token"),
-        ("refresh token", "refresh token"),
-        ("api key", "api key"),
-        ("client secret", "client secret"),
-        ("secret key", "secret key"),
-        ("private key", "private key"),
-        ("session token", "session token"),
-        ("bearer ", "bearer token"),
-    ]
-    .into_iter()
-    .find_map(|(needle, label)| haystack.contains(needle).then_some(label))
-}
-
 fn parse_totp_algorithm(value: Option<&str>) -> anyhow::Result<Algorithm> {
     match value
         .map(|s| s.trim())
@@ -238,7 +203,7 @@ impl Integration for MemoryIntegration {
         vec![
             ToolDefinition {
                 name: "memory_save".to_string(),
-                description: "Save durable context to long-term memory, such as preferences, relationships, ongoing projects, recurring needs, or other information likely to matter again. If the user explicitly wants credentials or MFA seed material retained, store a structured JSON object under a stable key such as `credential.rwth_sso` and set `allow_sensitive=true`."
+                description: "Save durable context to long-term memory, such as preferences, relationships, ongoing projects, recurring needs, credentials, API keys, tokens, MFA seed material, or other information likely to matter again. For structured secrets, prefer stable keys such as `credential.rwth_sso` and JSON content."
                     .to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
@@ -246,7 +211,7 @@ impl Integration for MemoryIntegration {
                         "key": {"type": "string", "description": "Unique key for this memory"},
                         "content": {"type": "string", "description": "Durable content to remember"},
                         "tags": {"type": "string", "description": "Space-separated tags for categorization (use empty string for none)"},
-                        "allow_sensitive": {"type": "boolean", "description": "Set true only when the user explicitly wants a sensitive secret retained and there is a clear durable reason. Defaults to false."}
+                        "allow_sensitive": {"type": "boolean", "description": "Legacy compatibility flag. It is optional and ignored."}
                     },
                     "required": ["key", "content", "tags"],
                     "additionalProperties": false
@@ -329,15 +294,7 @@ impl Integration for MemoryIntegration {
                     allow_sensitive: bool,
                 }
                 let args: Args = serde_json::from_str(arguments)?;
-                if !args.allow_sensitive {
-                    if let Some(reason) =
-                        sensitive_memory_reason(&args.key, &args.content, &args.tags)
-                    {
-                        anyhow::bail!(
-                            "Refusing to save likely sensitive secret ({reason}) to long-term memory without allow_sensitive=true"
-                        );
-                    }
-                }
+                let _ = args.allow_sensitive;
                 self.db
                     .memory_save(&args.key, &args.content, &args.tags)
                     .await?;
@@ -467,7 +424,10 @@ mod tests {
             .unwrap();
         assert!(save_result.contains("Saved"));
 
-        let get_result = mem.execute("memory_get", r#"{"key":"test"}"#).await.unwrap();
+        let get_result = mem
+            .execute("memory_get", r#"{"key":"test"}"#)
+            .await
+            .unwrap();
         assert!(get_result.contains("\"content\": \"important info\""));
 
         let search_result = mem
@@ -478,33 +438,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_sensitive_memory_by_default() {
+    async fn saves_sensitive_memory_without_override() {
         let mem = test_memory().await;
 
         let result = mem
             .execute(
                 "memory_save",
                 r#"{"key":"ops","content":"password: hunter2","tags":""}"#,
-            )
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("allow_sensitive=true")
-        );
-    }
-
-    #[tokio::test]
-    async fn allows_sensitive_memory_with_explicit_override() {
-        let mem = test_memory().await;
-
-        let result = mem
-            .execute(
-                "memory_save",
-                r#"{"key":"ops","content":"password: hunter2","tags":"","allow_sensitive":true}"#,
             )
             .await
             .unwrap();
@@ -518,7 +458,7 @@ mod tests {
 
         mem.execute(
             "memory_save",
-            r#"{"key":"credential.rwth_sso","content":"{\"username\":\"ab123456\",\"totp_secret\":\"GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ\",\"totp_digits\":8,\"totp_algorithm\":\"SHA1\",\"totp_period\":30}","tags":"credential rwth","allow_sensitive":true}"#,
+            r#"{"key":"credential.rwth_sso","content":"{\"username\":\"ab123456\",\"totp_secret\":\"GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ\",\"totp_digits\":8,\"totp_algorithm\":\"SHA1\",\"totp_period\":30}","tags":"credential rwth"}"#,
         )
         .await
         .unwrap();
@@ -542,7 +482,7 @@ mod tests {
 
         mem.execute(
             "memory_save",
-            r#"{"key":"credential.rwth_sso","content":"otpauth://totp/RWTH:ab123456?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=RWTH&algorithm=SHA1&digits=8&period=30","tags":"credential rwth","allow_sensitive":true}"#,
+            r#"{"key":"credential.rwth_sso","content":"otpauth://totp/RWTH:ab123456?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=RWTH&algorithm=SHA1&digits=8&period=30","tags":"credential rwth"}"#,
         )
         .await
         .unwrap();
