@@ -66,8 +66,8 @@ export const Composer: React.FC<ComposerProps> = ({
   }, [messages]);
 
   const handleSend = () => {
-    if (composer.trim()) {
-      onSend(composer);
+    if (composer.trim() || pendingFileIds.length > 0) {
+      onSend(composer || 'Review the attached file.');
       setComposer('');
     }
   };

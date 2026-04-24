@@ -3,6 +3,7 @@ import { useAppContext } from '../../../context/AppContext';
 import { useChat } from '../../../hooks/useChat';
 import { ChatFeed } from './ChatFeed';
 import { Composer } from './Composer';
+import { RunStatusPanel } from './RunStatusPanel';
 import { Chip } from '../../common/UI';
 
 export const ChatView: React.FC = () => {
@@ -12,6 +13,7 @@ export const ChatView: React.FC = () => {
     isSending,
     isStreaming,
     setIsStreaming,
+    runStatus,
     uploading,
     pendingFileIds,
     uploadFile,
@@ -70,6 +72,7 @@ export const ChatView: React.FC = () => {
           </div>
           <p className="support-copy">Endpoint: {apiConfig.baseUrl || 'not configured'}</p>
         </div>
+        <RunStatusPanel status={runStatus} />
         <ChatFeed messages={messages} />
         <Composer
           messages={messages}

@@ -17,6 +17,8 @@ const MAX_RELEVANT_MEMORIES: usize = 4;
 const MAX_MEMORY_INDEX_ITEMS: usize = 12;
 const LOOP_GUARD_WARN_THRESHOLD: usize = 2;
 const LOOP_GUARD_STOP_THRESHOLD: usize = 3;
+const LIVE_STANCE_MESSAGE_WINDOW: usize = 6;
+const REFLECTION_CONTEXT_WINDOW: usize = 4;
 
 struct GoalTracker {
     primary_goal: String,
@@ -164,6 +166,226 @@ fn push_recent(items: &mut Vec<String>, value: String, max_len: usize) {
     }
 }
 
+fn snapshot_recent_dialogue(messages: &[Message], max_messages: usize) -> Vec<Message> {
+    let mut snapshot = messages
+        .iter()
+        .rev()
+        .filter(|message| {
+            matches!(message.role, Role::User | Role::Assistant)
+                && message.tool_call_id.is_none()
+                && !message.content.trim().is_empty()
+        })
+        .take(max_messages)
+        .cloned()
+        .collect::<Vec<_>>();
+    snapshot.reverse();
+    snapshot
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
+fn build_live_stance_context(messages: &[Message]) -> String {
+    let recent = snapshot_recent_dialogue(messages, LIVE_STANCE_MESSAGE_WINDOW);
+    if recent.len() < 2 {
+        return String::new();
+    }
+
+    let last_user = recent
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::User)
+        .map(|message| message.content.trim())
+        .unwrap_or_default();
+    if last_user.is_empty() {
+        return String::new();
+    }
+
+    let combined = recent
+        .iter()
+        .map(|message| message.content.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let last_user_lower = last_user.to_lowercase();
+
+    let mode = if contains_any(
+        &combined,
+        &[
+            "feel",
+            "felt",
+            "frustrat",
+            "upset",
+            "sad",
+            "angry",
+            "hurt",
+            "overreact",
+            "relationship",
+            "lonely",
+        ],
+    ) {
+        "emotionally engaged and personal"
+    } else if contains_any(
+        &combined,
+        &[
+            "api", "bug", "error", "compile", "stack", "test", "rust", "code", "query", "trace",
+        ],
+    ) {
+        "technical and problem-solving"
+    } else if contains_any(
+        &combined,
+        &[
+            "should i",
+            "which",
+            "choose",
+            "pick",
+            "send",
+            "reply",
+            "what should",
+        ],
+    ) {
+        "decision-focused"
+    } else if contains_any(
+        &combined,
+        &["why", "pattern", "what do you think", "how do i"],
+    ) {
+        "reflective and analytical"
+    } else if contains_any(
+        &combined,
+        &["urgent", "asap", "right now", "tonight", "immediately"],
+    ) {
+        "time-sensitive and action-oriented"
+    } else {
+        "practical and conversational"
+    };
+
+    let directness = if contains_any(
+        &last_user_lower,
+        &[
+            "just give me",
+            "just answer",
+            "be direct",
+            "brief",
+            "short",
+            "concise",
+            "quick answer",
+            "cut straight",
+            "just do it",
+            "don't explain",
+        ],
+    ) || contains_any(
+        &last_user_lower,
+        &["damn", "stupid", "ridiculous", "wtf", "fuck"],
+    ) {
+        "blunt and compact"
+    } else if mode == "emotionally engaged and personal" {
+        "gentle but still plain"
+    } else {
+        "normal and direct"
+    };
+
+    let warmth = if mode == "emotionally engaged and personal" {
+        "close and earned"
+    } else if mode == "technical and problem-solving" {
+        "light, low-friction, and not chatty"
+    } else {
+        "present and natural"
+    };
+
+    let response_bias = if directness == "blunt and compact"
+        || matches!(
+            mode,
+            "technical and problem-solving"
+                | "decision-focused"
+                | "time-sensitive and action-oriented"
+        ) {
+        "answer first, explain only if it materially helps"
+    } else {
+        "lead with the core point, then expand only if needed"
+    };
+
+    let mut style_cues = Vec::new();
+    if contains_any(
+        &combined,
+        &[
+            "be direct",
+            "just give me the answer",
+            "just answer",
+            "don't explain",
+            "brief",
+            "short",
+        ],
+    ) {
+        style_cues.push("The user wants low-friction directness; avoid padding.");
+    }
+    if contains_any(&combined, &["don't ask", "just do it", "go ahead"]) {
+        style_cues.push("Do not ask ceremonial permission when the next step is obvious.");
+    }
+    if contains_any(
+        &combined,
+        &["too formal", "too wordy", "generic", "robotic"],
+    ) {
+        style_cues.push("Avoid drifting into polished but generic assistant phrasing.");
+    }
+    if contains_any(
+        &combined,
+        &[
+            "feel",
+            "hurt",
+            "frustrat",
+            "upset",
+            "sad",
+            "relationship",
+            "overreact",
+        ],
+    ) {
+        style_cues.push("Warmth should be earned by the moment, not stock empathy.");
+    }
+
+    let mut section = String::from(
+        "## Live Conversational Stance\nEstimate this from the recent dialogue and preserve it unless the user clearly shifts tone or goals.\n",
+    );
+    section.push_str(&format!("- Current mode: {mode}\n"));
+    section.push_str(&format!("- Directness: {directness}\n"));
+    section.push_str(&format!("- Warmth: {warmth}\n"));
+    section.push_str(&format!("- Response bias: {response_bias}\n"));
+    section.push_str(&format!(
+        "- Open thread: {}\n",
+        preview_text(last_user, 180)
+    ));
+    if !style_cues.is_empty() {
+        for cue in style_cues {
+            section.push_str("- Active style cue: ");
+            section.push_str(cue);
+            section.push('\n');
+        }
+    }
+    section.push_str(
+        "- Guardrail: Do not reset into generic assistant voice, over-explain, or add unearned softness.\n",
+    );
+    section
+}
+
+fn build_reflection_context(messages: &[Message]) -> String {
+    let recent = snapshot_recent_dialogue(messages, REFLECTION_CONTEXT_WINDOW);
+    if recent.is_empty() {
+        return "No recent dialogue context available.".to_string();
+    }
+
+    recent
+        .into_iter()
+        .map(|message| {
+            let speaker = if message.role == Role::User {
+                "User"
+            } else {
+                "Assistant"
+            };
+            format!("{speaker}: {}", preview_text(&message.content, 220))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentRunOptions {
     pub allow_schedule_management: bool,
@@ -185,6 +407,7 @@ async fn build_system_prompt(
     state: &AppState,
     conversation_id: Option<Uuid>,
     user_message: Option<&str>,
+    context_messages: Option<&[Message]>,
 ) -> String {
     let mut prompt = state.system_prompt.clone();
 
@@ -217,6 +440,14 @@ async fn build_system_prompt(
     if let Ok(Some(entry)) = state.db.get_memory("user_profile").await {
         prompt.push_str("\n\n## User Description\n");
         prompt.push_str(&entry.content);
+    }
+
+    if let Some(messages) = context_messages {
+        let live_stance = build_live_stance_context(messages);
+        if !live_stance.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&live_stance);
+        }
     }
 
     if let Some(message) = user_message {
@@ -336,7 +567,14 @@ pub async fn prepend_system_prompt(
     messages: &mut Vec<Message>,
     user_message: Option<&str>,
 ) {
-    let content = build_system_prompt(state, conversation_id, user_message).await;
+    let context_snapshot = snapshot_recent_dialogue(messages, LIVE_STANCE_MESSAGE_WINDOW);
+    let content = build_system_prompt(
+        state,
+        conversation_id,
+        user_message,
+        Some(&context_snapshot),
+    )
+    .await;
     if content.is_empty() {
         return;
     }
@@ -552,7 +790,9 @@ async fn run_agent_loop_inner(
 
         if tool_calls.is_empty() {
             if reflection_retries_remaining > 0 {
-                if let Some(feedback) = self_reflect(state, &last_user_msg, &content).await {
+                if let Some(feedback) =
+                    self_reflect(state, &messages, &last_user_msg, &content).await
+                {
                     reflection_retries_remaining -= 1;
                     tracing::info!("Self-reflection retry. Feedback: {feedback}");
                     // Add the assistant's response and feedback, then continue the loop
@@ -947,7 +1187,9 @@ async fn run_agent_loop_streaming_inner(
         }
 
         if reflection_retries_remaining > 0 {
-            if let Some(feedback) = self_reflect(state, &last_user_msg, &full_content).await {
+            if let Some(feedback) =
+                self_reflect(state, &messages, &last_user_msg, &full_content).await
+            {
                 reflection_retries_remaining -= 1;
                 emit_stream_event(
                     Some(&event_tx),
@@ -1019,11 +1261,16 @@ async fn run_agent_loop_streaming_inner(
 /// Returns Some(feedback) if the response should be retried, None if it's acceptable.
 async fn self_reflect(
     state: &AppState,
+    recent_messages: &[Message],
     user_message: &str,
     assistant_response: &str,
 ) -> Option<String> {
+    let recent_context = build_reflection_context(recent_messages);
     let prompt = format!(
         r#"Evaluate the quality of this assistant response to the user's message.
+
+Recent conversation context:
+{recent_context}
 
 User message: {user_message}
 
@@ -1032,7 +1279,9 @@ Assistant response: {assistant_response}
 Evaluate on these criteria:
 1. Does it actually answer the user's question/request?
 2. Is information accurate and complete?
-3. Is the tone appropriate?
+3. Does it preserve the current conversational stance instead of resetting into generic assistant voice?
+4. Is it specific, direct, and naturally warm when appropriate?
+5. Does it avoid stock empathy, unnecessary hedging, obvious restatements, and balanced-but-vague filler?
 
 Respond with EXACTLY one of:
 - "PASS" if the response is acceptable
@@ -1097,7 +1346,7 @@ async fn maybe_summarize_context(state: &AppState, conv_id: Uuid, messages: &mut
             messages.push(Message::transient(
                 Role::System,
                 format!(
-                    "## Conversation Summary (previous {} messages)\n{}",
+                    "## Conversation Continuity Summary (previous {} messages)\nUse this to preserve facts, relationship continuity, and conversational stance.\n{}",
                     existing.messages_summarized, existing.summary
                 ),
             ));
@@ -1119,10 +1368,16 @@ async fn maybe_summarize_context(state: &AppState, conv_id: Uuid, messages: &mut
 
     let summarize_text = to_summarize.join("\n---\n");
     let prompt = format!(
-        r#"Summarize the following conversation history into a compact summary.
-Preserve: key facts, decisions made, tool results, ongoing goals, and any commitments.
+        r#"Summarize the following conversation history into a compact continuity summary.
+Preserve: key facts, decisions made, tool results, ongoing goals, commitments, user preferences about how to be helped, the current conversational stance, and any recent style corrections the assistant should remember.
 Omit: pleasantries, redundant information, and tool call arguments.
+Do not invent motives, emotions, or certainty that are not grounded in the conversation.
 Be concise but complete.
+Output short markdown with exactly these sections:
+## Facts And Decisions
+## User Preferences And Relationship Signals
+## Current Stance To Preserve
+## Open Loops
 
 Conversation:
 {summarize_text}"#
@@ -1151,7 +1406,7 @@ Conversation:
             messages.push(Message::transient(
                 Role::System,
                 format!(
-                    "## Conversation Summary (previous {} messages)\n{}",
+                    "## Conversation Continuity Summary (previous {} messages)\nUse this to preserve facts, relationship continuity, and conversational stance.\n{}",
                     messages_count, summary
                 ),
             ));
@@ -1324,7 +1579,14 @@ async fn generate_event_message_inner(
     sanitize_context_window(&mut messages);
 
     let event_context = build_event_context_hint(event);
-    let mut prompt = build_system_prompt(state, Some(conversation_id), Some(&event_context)).await;
+    let context_snapshot = snapshot_recent_dialogue(&messages, LIVE_STANCE_MESSAGE_WINDOW);
+    let mut prompt = build_system_prompt(
+        state,
+        Some(conversation_id),
+        Some(&event_context),
+        Some(&context_snapshot),
+    )
+    .await;
     prompt.push_str(
         "\n\n## Incoming Notification Mode\nThis is still Jossie: same judgment, same continuity, same general tool access as a normal conversation.\nThe difference is that you are deciding whether this newly arrived event deserves an interruption right now.\nDefault to quiet triage.\nNotify only if the event is urgent, time-sensitive, actionable, clearly relevant to the user, or materially changes their plans.\nSkip low-signal items such as newsletters, receipts, marketing mail, routine confirmations, automated churn, or minor non-actionable calendar edits.\nFor email batches, notify only when the batch as a whole suggests something worth surfacing now.\nInterpret this event independently as a fresh arrival.\nDo NOT imply that you made a prior mistake, correction, or retraction unless the event payload explicitly says so.\nFor `gmail_new_message` and `new_email_batch`, frame updates as newly arrived emails, even when similar to prior ones.\nUse tools normally when they materially improve confidence, especially before notifying about details hidden behind an email summary, snippet, attachment, or linked system.\nDo not claim room changes, schedule changes, requirement changes, or downstream consequences unless the email body or another checked source explicitly confirms them.\nIf an email mentions another system such as Moodle, an attachment, or a linked page that you did not verify, say only that the email mentions it.\nIf you notify, write it like Jossie: short, concrete, natural, and grounded in what you actually checked.\nRespond with strict JSON only:\n{\"action\":\"notify\",\"message\":\"<short user-facing message>\"}\nor\n{\"action\":\"skip\",\"message\":\"\"}"
     );
@@ -2396,6 +2658,47 @@ mod tests {
         assert!(section.contains("memory.11"));
         assert!(!section.contains("memory.12"));
         assert!(section.contains("3 more memory entries not shown"));
+    }
+
+    #[test]
+    fn test_live_stance_context_captures_directness_and_guardrail() {
+        let conv_id = Uuid::new_v4();
+        let messages = vec![
+            Message::new(
+                conv_id,
+                Role::Assistant,
+                "Let's cut to the part that matters.".to_string(),
+            ),
+            Message::new(
+                conv_id,
+                Role::User,
+                "This is getting ridiculous. Just give me the answer.".to_string(),
+            ),
+        ];
+
+        let section = build_live_stance_context(&messages);
+        assert!(section.contains("Live Conversational Stance"));
+        assert!(section.contains("Directness: blunt and compact"));
+        assert!(section.contains("answer first"));
+        assert!(section.contains("Do not reset into generic assistant voice"));
+    }
+
+    #[test]
+    fn test_reflection_context_uses_recent_dialogue_only() {
+        let conv_id = Uuid::new_v4();
+        let assistant = Message::new(
+            conv_id,
+            Role::Assistant,
+            "Here's the core issue.".to_string(),
+        );
+        let tool = Message::new(conv_id, Role::Tool, "internal".to_string())
+            .with_tool_call_id("call_1".to_string());
+        let user = Message::new(conv_id, Role::User, "Just give me the answer.".to_string());
+
+        let context = build_reflection_context(&[assistant, tool, user]);
+        assert!(context.contains("Assistant: Here's the core issue."));
+        assert!(context.contains("User: Just give me the answer."));
+        assert!(!context.contains("internal"));
     }
 
     #[test]

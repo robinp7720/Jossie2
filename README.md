@@ -152,6 +152,7 @@ For operator workflows and Codex-driven testing, use the repo helper:
 python3 scripts/jossie_chat.py
 python3 scripts/jossie_chat.py ask "What are you working on?"
 python3 scripts/jossie_chat.py --remote-config-host prometheus ask "Hello Jossie"
+python3 scripts/jossie_chat.py --remote-config-host prometheus --profile codex ask "Hello Jossie"
 ```
 
 What it does:
@@ -159,6 +160,8 @@ What it does:
 - reads `config.toml` automatically, or bootstraps credentials from a remote host over SSH
 - stores the last conversation id per Jossie base URL in `.jossie-chat-state.json`
 - supports one-shot asks, an interactive REPL, history inspection, conversation listing, and run cancellation
+- defaults to a WebSocket turn runner with explicit run lifecycle handling, timeouts, and cancellation recovery
+- supports isolated conversation profiles such as `--profile codex` so operator testing does not collide with normal user chats
 
 ## ⚙️ Configuration
 

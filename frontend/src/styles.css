@@ -574,6 +574,116 @@ code {
   padding-right: 6px;
 }
 
+.run-status {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-radius: 22px;
+  border: 1px solid rgba(18, 36, 51, 0.1);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.run-status.active {
+  border-color: rgba(78, 170, 200, 0.38);
+  background:
+    linear-gradient(135deg, rgba(78, 170, 200, 0.12), rgba(255, 255, 255, 0.78));
+}
+
+.run-status-main,
+.run-status-meta,
+.run-status-steps li {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.run-status-main {
+  align-items: start;
+  justify-content: space-between;
+}
+
+.run-status-main h3 {
+  margin-top: 4px;
+  font-size: 20px;
+}
+
+.run-status-pill {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  background: rgba(18, 36, 51, 0.08);
+  color: var(--ink-soft);
+}
+
+.run-status-pill.live {
+  background: rgba(239, 179, 102, 0.2);
+  color: #8b4b16;
+}
+
+.run-status-pill.done {
+  background: rgba(173, 193, 120, 0.2);
+  color: #546528;
+}
+
+.run-status-detail {
+  color: var(--ink-strong);
+  line-height: 1.5;
+}
+
+.run-status-meta {
+  flex-wrap: wrap;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.run-status-steps {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.run-status-steps li {
+  align-items: start;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(18, 36, 51, 0.08);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.run-status-steps li.tone-success {
+  border-color: rgba(173, 193, 120, 0.32);
+  background: rgba(173, 193, 120, 0.12);
+}
+
+.run-status-steps li.tone-warn {
+  border-color: rgba(215, 122, 97, 0.28);
+  background: rgba(215, 122, 97, 0.1);
+}
+
+.run-status-steps span {
+  flex: 0 0 150px;
+  font-weight: 800;
+  color: var(--ink-strong);
+}
+
+.run-status-steps p {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+
+.run-status-steps time {
+  flex: 0 0 auto;
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+
 .empty-state,
 .empty-panel {
   display: grid;
@@ -1522,9 +1632,15 @@ code {
   .chat-stage-head,
   .composer-head,
   .composer-actions,
+  .run-status-main,
+  .run-status-steps li,
   .graph-toolbar {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .run-status-steps span {
+    flex-basis: auto;
   }
 
   .message {
