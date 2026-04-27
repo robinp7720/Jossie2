@@ -136,10 +136,31 @@ impl ServerEvent {
 
 pub fn preview_text(content: &str, max_len: usize) -> String {
     let trimmed = content.split_whitespace().collect::<Vec<_>>().join(" ");
-    if trimmed.len() <= max_len {
+    let mut chars = trimmed.chars();
+    let preview = chars.by_ref().take(max_len).collect::<String>();
+    if chars.next().is_none() {
         trimmed
     } else {
-        format!("{}...", &trimmed[..max_len])
+        format!("{preview}...")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preview_text;
+
+    #[test]
+    fn preview_text_truncates_on_char_boundaries() {
+        let content = "If either wasn’t you, check those accounts now.";
+
+        assert_eq!(preview_text(content, 16), "If either wasn’t...");
+    }
+
+    #[test]
+    fn preview_text_preserves_short_unicode_content() {
+        let content = "PayPal says you sent €7.50.";
+
+        assert_eq!(preview_text(content, 100), content);
     }
 }
 

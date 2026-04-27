@@ -11,6 +11,7 @@ const INTEGRATION_POLL_INTERVAL_SECS: u64 = 120;
 const BACKGROUND_WORK_INTERVAL_SECS: u64 = 5;
 const PENDING_LIMIT: usize = 20;
 const CALENDAR_BATCH_MAX_EVENTS: usize = 50;
+const STALE_PROCESSING_EVENT_TIMEOUT_SECS: i64 = 60 * 60;
 
 #[derive(Clone, Copy, Debug)]
 struct BackgroundTarget {
@@ -19,6 +20,8 @@ struct BackgroundTarget {
 }
 
 pub async fn start_event_loop(state: Arc<AppState>) -> anyhow::Result<()> {
+    recover_stale_processing_events(&state).await?;
+
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(
         BACKGROUND_WORK_INTERVAL_SECS,
     ));
@@ -52,6 +55,24 @@ pub async fn start_event_loop(state: Arc<AppState>) -> anyhow::Result<()> {
 
         interval.tick().await;
     }
+}
+
+async fn recover_stale_processing_events(state: &Arc<AppState>) -> anyhow::Result<()> {
+    let before =
+        (Utc::now() - chrono::Duration::seconds(STALE_PROCESSING_EVENT_TIMEOUT_SECS)).to_rfc3339();
+    let recovered = state
+        .db
+        .mark_stale_processing_integration_events_failed(
+            &before,
+            "Marked failed at startup because the event was left in processing by a previous worker",
+        )
+        .await?;
+
+    if recovered > 0 {
+        tracing::warn!("Marked {recovered} stale processing integration event(s) as failed");
+    }
+
+    Ok(())
 }
 
 async fn process_pending_events(state: &Arc<AppState>) -> anyhow::Result<()> {

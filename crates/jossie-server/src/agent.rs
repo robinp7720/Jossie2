@@ -1,10 +1,12 @@
 use crate::events::{ServerEvent, persist_message, preview_text};
 use crate::state::AppState;
+use futures::FutureExt;
 use jossie_core::types::{Message, Role};
 use jossie_db::{IntegrationEvent, MemoryKeyInfo, MemoryPromptEntry};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -683,6 +685,16 @@ async fn release_conversation(state: &AppState, conv_id: Uuid) {
     state.clear_cancel(conv_id).await;
 }
 
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_string(),
+            Err(_) => "unknown panic payload".to_string(),
+        },
+    }
+}
+
 fn build_tools_for_options(
     state: &AppState,
     options: &AgentRunOptions,
@@ -820,13 +832,21 @@ pub async fn run_agent_loop_with_options(
     // Try to claim this conversation
     claim_conversation(state, conv_id).await?;
 
-    // Execute the agent loop and ensure we release the lock even on panic/error
-    let result = run_agent_loop_inner(state, conv_id, &options).await;
+    let result = AssertUnwindSafe(run_agent_loop_inner(state, conv_id, &options))
+        .catch_unwind()
+        .await;
 
     // Release the conversation lock
     release_conversation(state, conv_id).await;
 
-    result
+    match result {
+        Ok(result) => result,
+        Err(payload) => {
+            let panic_message = panic_payload_to_string(payload);
+            tracing::error!("Agent loop panicked for conversation {conv_id}: {panic_message}");
+            anyhow::bail!("Agent loop panicked: {panic_message}")
+        }
+    }
 }
 
 async fn run_agent_loop_inner(
@@ -994,8 +1014,24 @@ pub async fn run_agent_loop_streaming(
         return;
     }
 
-    run_agent_loop_streaming_inner(state, conv_id, event_tx).await;
+    let event_tx_for_error = event_tx.clone();
+    let result = AssertUnwindSafe(run_agent_loop_streaming_inner(state, conv_id, event_tx))
+        .catch_unwind()
+        .await;
     release_conversation(state, conv_id).await;
+    if let Err(payload) = result {
+        let panic_message = panic_payload_to_string(payload);
+        tracing::error!(
+            "Streaming agent loop panicked for conversation {conv_id}: {panic_message}"
+        );
+        let _ = event_tx_for_error
+            .send(ServerEvent::Error {
+                conversation_id: conv_id,
+                run_id: None,
+                error: format!("Agent loop panicked: {panic_message}"),
+            })
+            .await;
+    }
 }
 
 async fn run_agent_loop_streaming_inner(
@@ -1599,14 +1635,25 @@ pub async fn generate_event_message(
         }
     }
 
-    let result = generate_event_message_inner(state, conversation_id, event).await;
+    let result = AssertUnwindSafe(generate_event_message_inner(state, conversation_id, event))
+        .catch_unwind()
+        .await;
 
     {
         let mut active = state.active_conversations.write().await;
         active.remove(&conversation_id);
     }
 
-    result
+    match result {
+        Ok(result) => result,
+        Err(payload) => {
+            let panic_message = panic_payload_to_string(payload);
+            tracing::error!(
+                "Event-mode agent loop panicked for conversation {conversation_id}: {panic_message}"
+            );
+            anyhow::bail!("Event-mode agent loop panicked: {panic_message}")
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

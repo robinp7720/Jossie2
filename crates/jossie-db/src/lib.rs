@@ -955,6 +955,26 @@ impl Database {
         Ok(())
     }
 
+    pub async fn mark_stale_processing_integration_events_failed(
+        &self,
+        before: &str,
+        error: &str,
+    ) -> anyhow::Result<u64> {
+        let now_str = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE integration_events
+             SET status = 'failed', processed_at = ?, last_error = ?
+             WHERE status = 'processing'
+               AND julianday(created_at) < julianday(?)",
+        )
+        .bind(&now_str)
+        .bind(error)
+        .bind(before)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     // Knowledge Graph
 
     pub async fn graph_upsert_node(
@@ -1810,13 +1830,12 @@ fn build_memory_search_queries(query: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    let mut queries = vec![trimmed.to_string()];
-
     let terms = extract_memory_search_terms(trimmed);
     if terms.is_empty() {
-        return queries;
+        return Vec::new();
     }
 
+    let mut queries = Vec::new();
     for prefix in ["key:", "tags:", ""] {
         let q = terms
             .iter()
@@ -1833,7 +1852,7 @@ fn extract_memory_search_terms(query: &str) -> Vec<String> {
     let mut terms = Vec::new();
     let mut seen = HashSet::new();
 
-    for token in query.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')) {
+    for token in query.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')) {
         if token.len() < 2 {
             continue;
         }
@@ -2401,16 +2420,47 @@ mod tests {
             "actionable items deadlines upcoming appointments user calendar email preferences",
         );
 
-        assert_eq!(
-            queries[0],
-            "actionable items deadlines upcoming appointments user calendar email preferences"
-        );
         assert!(queries.iter().any(|query| query.contains("key:calendar*")));
         assert!(queries.iter().any(|query| query.contains("tags:email*")));
         assert!(
             queries
                 .iter()
                 .any(|query| query.contains("calendar* OR email*"))
+        );
+    }
+
+    #[test]
+    fn memory_search_query_builder_tokenizes_fts_syntax_characters() {
+        let queries = build_memory_search_queries(
+            "Event type: new_email_batch 00bef406-979d-4699-a6e6 USB-RS485-Konverter",
+        );
+
+        assert_eq!(queries.len(), 3);
+        assert!(!queries.iter().any(|query| query.contains("Event type:")));
+        assert!(queries.iter().any(|query| query.contains("key:979d*")));
+        assert!(queries.iter().any(|query| query.contains("rs485*")));
+    }
+
+    #[tokio::test]
+    async fn memory_search_handles_event_text_with_fts_syntax_characters() {
+        let db = test_db().await;
+        db.memory_save(
+            "email.usb_converter",
+            "USB RS485 converter discussion",
+            "email hardware",
+        )
+        .await
+        .unwrap();
+
+        let results = db
+            .memory_search("Event type: new_email_batch 00bef406-979d USB-RS485-Konverter")
+            .await
+            .unwrap();
+
+        assert!(
+            results
+                .iter()
+                .any(|entry| entry.key == "email.usb_converter")
         );
     }
 
@@ -2577,6 +2627,60 @@ mod tests {
             .unwrap();
         let pending_after = db.list_pending_integration_events(10).await.unwrap();
         assert!(pending_after.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_processing_integration_events_are_failed() {
+        let db = test_db().await;
+        let payload = serde_json::json!({"foo": "bar"});
+
+        db.insert_integration_event("google", "acc1", "gmail_new_message", "old", &payload)
+            .await
+            .unwrap();
+        db.insert_integration_event("google", "acc1", "gmail_new_message", "fresh", &payload)
+            .await
+            .unwrap();
+
+        let pending = db.list_pending_integration_events(10).await.unwrap();
+        for event in &pending {
+            assert!(
+                db.mark_integration_event_processing(&event.id)
+                    .await
+                    .unwrap()
+            );
+        }
+
+        let old_event = pending
+            .iter()
+            .find(|event| event.dedupe_key == "old")
+            .unwrap();
+        sqlx::query("UPDATE integration_events SET created_at = ? WHERE id = ?")
+            .bind("2026-01-01T00:00:00Z")
+            .bind(&old_event.id)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+
+        let before = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let failed = db
+            .mark_stale_processing_integration_events_failed(&before, "stale processing event")
+            .await
+            .unwrap();
+        assert_eq!(failed, 1);
+
+        let statuses = sqlx::query_as::<_, (String, String)>(
+            "SELECT dedupe_key, status FROM integration_events ORDER BY dedupe_key",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            statuses,
+            vec![
+                ("fresh".to_string(), "processing".to_string()),
+                ("old".to_string(), "failed".to_string()),
+            ]
+        );
     }
 
     #[tokio::test]
