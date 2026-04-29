@@ -82,6 +82,17 @@ pub struct CalendarListEntry {
     pub primary: bool,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+struct CalendarEventUpdate {
+    summary: Option<String>,
+    start_time: Option<String>,
+    end_time: Option<String>,
+    start_date: Option<String>,
+    end_date: Option<String>,
+    description: Option<String>,
+    location: Option<String>,
+}
+
 impl GoogleIntegration {
     pub fn new(config: &GoogleConfig) -> Self {
         Self {
@@ -1234,6 +1245,47 @@ impl GoogleIntegration {
         Ok(serde_json::to_string_pretty(&event)?)
     }
 
+    async fn calendar_update_event(
+        &self,
+        account_id: &str,
+        calendar_id: Option<String>,
+        event_id: &str,
+        update: CalendarEventUpdate,
+        send_updates: Option<String>,
+    ) -> anyhow::Result<String> {
+        let token = self.get_access_token(account_id).await?;
+        let event_id = event_id.trim();
+        if event_id.is_empty() {
+            anyhow::bail!("event_id is required");
+        }
+
+        let calendar_id = calendar_id.unwrap_or_else(|| "primary".to_string());
+        let mut url = reqwest::Url::parse("https://www.googleapis.com/calendar/v3/calendars")?;
+        url.path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("URL cannot be base"))?
+            .push(&calendar_id)
+            .push("events")
+            .push(event_id);
+
+        let body = build_calendar_update_body(update)?;
+        let send_updates = normalize_calendar_send_updates(send_updates.as_deref())?;
+
+        let mut req = self.client.patch(url).bearer_auth(&token).json(&body);
+        if let Some(send_updates) = send_updates.as_deref() {
+            req = req.query(&[("sendUpdates", send_updates)]);
+        }
+
+        let resp = req.send().await?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Calendar update failed: {body}");
+        }
+
+        let event: serde_json::Value = resp.json().await?;
+        Ok(serde_json::to_string_pretty(&event)?)
+    }
+
     async fn poll_gmail_for_account(
         &self,
         db: &Arc<Database>,
@@ -1699,6 +1751,94 @@ fn extract_event_time(value: Option<&serde_json::Value>) -> Option<String> {
     None
 }
 
+fn build_calendar_update_body(update: CalendarEventUpdate) -> anyhow::Result<serde_json::Value> {
+    let mut body = serde_json::Map::new();
+
+    if let Some(summary) = non_empty_optional(update.summary.as_deref()) {
+        body.insert(
+            "summary".to_string(),
+            serde_json::Value::String(summary.to_string()),
+        );
+    }
+
+    if let Some(description) = update.description {
+        body.insert(
+            "description".to_string(),
+            serde_json::Value::String(description),
+        );
+    }
+
+    if let Some(location) = update.location {
+        body.insert("location".to_string(), serde_json::Value::String(location));
+    }
+
+    let has_time = update
+        .start_time
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+        || update
+            .end_time
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
+    let has_date = update
+        .start_date
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+        || update
+            .end_date
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
+
+    if has_time && has_date {
+        anyhow::bail!("Use either start_time/end_time or start_date/end_date, not both");
+    }
+
+    if has_time {
+        let start = non_empty_optional(update.start_time.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("start_time is required when end_time is set"))?;
+        let end = non_empty_optional(update.end_time.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("end_time is required when start_time is set"))?;
+        body.insert(
+            "start".to_string(),
+            serde_json::json!({ "dateTime": start }),
+        );
+        body.insert("end".to_string(), serde_json::json!({ "dateTime": end }));
+    }
+
+    if has_date {
+        let start = non_empty_optional(update.start_date.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("start_date is required when end_date is set"))?;
+        let end = non_empty_optional(update.end_date.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("end_date is required when start_date is set"))?;
+        body.insert("start".to_string(), serde_json::json!({ "date": start }));
+        body.insert("end".to_string(), serde_json::json!({ "date": end }));
+    }
+
+    if body.is_empty() {
+        anyhow::bail!("At least one calendar event field must be provided");
+    }
+
+    Ok(serde_json::Value::Object(body))
+}
+
+fn non_empty_optional(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn normalize_calendar_send_updates(value: Option<&str>) -> anyhow::Result<Option<String>> {
+    let Some(value) = non_empty_optional(value) else {
+        return Ok(Some("none".to_string()));
+    };
+
+    match value {
+        "all" | "externalOnly" | "none" => Ok(Some(value.to_string())),
+        other => anyhow::bail!(
+            "send_updates must be one of 'all', 'externalOnly', or 'none', got '{}'",
+            other
+        ),
+    }
+}
+
 #[async_trait::async_trait]
 impl Integration for GoogleIntegration {
     fn name(&self) -> &str {
@@ -1867,6 +2007,28 @@ impl Integration for GoogleIntegration {
                     "additionalProperties": false
                 }),
             },
+            ToolDefinition {
+                name: "calendar_update_event".to_string(),
+                description: "Modify an existing Google Calendar event by exact event ID. Use calendar_list_events first when the event ID is unknown or the user request could match multiple events. Only change fields the user asked to change; unspecified fields remain unchanged. Defaults to not notifying guests unless send_updates is explicitly set.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "string", "description": "Account ID from google_list_accounts"},
+                        "calendar_id": {"type": ["string", "null"], "description": "Calendar ID (optional, defaults to primary)"},
+                        "event_id": {"type": "string", "description": "Exact Google Calendar event ID from calendar_list_events"},
+                        "summary": {"type": ["string", "null"], "description": "New event title, or null to leave unchanged"},
+                        "start_time": {"type": ["string", "null"], "description": "New timed-event start time (ISO 8601), paired with end_time; use null to leave unchanged"},
+                        "end_time": {"type": ["string", "null"], "description": "New timed-event end time (ISO 8601), paired with start_time; use null to leave unchanged"},
+                        "start_date": {"type": ["string", "null"], "description": "New all-day start date (YYYY-MM-DD), paired with end_date; use null to leave unchanged"},
+                        "end_date": {"type": ["string", "null"], "description": "New all-day exclusive end date (YYYY-MM-DD), paired with start_date; use null to leave unchanged"},
+                        "description": {"type": ["string", "null"], "description": "New event description; use empty string to clear or null to leave unchanged"},
+                        "location": {"type": ["string", "null"], "description": "New event location; use empty string to clear or null to leave unchanged"},
+                        "send_updates": {"type": ["string", "null"], "enum": ["all", "externalOnly", "none", null], "description": "Guest notification behavior; defaults to none"}
+                    },
+                    "required": ["account_id", "calendar_id", "event_id", "summary", "start_time", "end_time", "start_date", "end_date", "description", "location", "send_updates"],
+                    "additionalProperties": false
+                }),
+            },
         ]
     }
 
@@ -2022,6 +2184,41 @@ impl Integration for GoogleIntegration {
                 )
                 .await
             }
+            "calendar_update_event" => {
+                #[derive(Deserialize)]
+                struct Args {
+                    account_id: String,
+                    calendar_id: Option<String>,
+                    event_id: String,
+                    summary: Option<String>,
+                    start_time: Option<String>,
+                    end_time: Option<String>,
+                    start_date: Option<String>,
+                    end_date: Option<String>,
+                    description: Option<String>,
+                    location: Option<String>,
+                    send_updates: Option<String>,
+                }
+                let args: Args = serde_json::from_str(arguments)?;
+                let calendar_id = args.calendar_id.filter(|c| !c.trim().is_empty());
+                let update = CalendarEventUpdate {
+                    summary: args.summary,
+                    start_time: args.start_time,
+                    end_time: args.end_time,
+                    start_date: args.start_date,
+                    end_date: args.end_date,
+                    description: args.description,
+                    location: args.location,
+                };
+                self.calendar_update_event(
+                    &args.account_id,
+                    calendar_id,
+                    &args.event_id,
+                    update,
+                    args.send_updates,
+                )
+                .await
+            }
             _ => anyhow::bail!("Unknown google tool: {tool_name}"),
         }
     }
@@ -2081,5 +2278,105 @@ impl Integration for GoogleIntegration {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calendar_update_body_builds_timed_patch() {
+        let body = build_calendar_update_body(CalendarEventUpdate {
+            summary: Some("Project sync".to_string()),
+            start_time: Some("2026-05-01T10:00:00+02:00".to_string()),
+            end_time: Some("2026-05-01T10:30:00+02:00".to_string()),
+            description: Some("".to_string()),
+            location: Some("Room 4".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(body["summary"], "Project sync");
+        assert_eq!(body["start"]["dateTime"], "2026-05-01T10:00:00+02:00");
+        assert_eq!(body["end"]["dateTime"], "2026-05-01T10:30:00+02:00");
+        assert_eq!(body["description"], "");
+        assert_eq!(body["location"], "Room 4");
+    }
+
+    #[test]
+    fn calendar_update_body_builds_all_day_patch() {
+        let body = build_calendar_update_body(CalendarEventUpdate {
+            start_date: Some("2026-05-01".to_string()),
+            end_date: Some("2026-05-02".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(body["start"]["date"], "2026-05-01");
+        assert_eq!(body["end"]["date"], "2026-05-02");
+    }
+
+    #[test]
+    fn calendar_update_body_rejects_empty_patch() {
+        let err = build_calendar_update_body(CalendarEventUpdate::default()).unwrap_err();
+        assert!(err.to_string().contains("At least one"));
+    }
+
+    #[test]
+    fn calendar_update_body_rejects_partial_time_change() {
+        let err = build_calendar_update_body(CalendarEventUpdate {
+            start_time: Some("2026-05-01T10:00:00+02:00".to_string()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("end_time is required"));
+    }
+
+    #[test]
+    fn calendar_update_body_rejects_mixed_timed_and_all_day_change() {
+        let err = build_calendar_update_body(CalendarEventUpdate {
+            start_time: Some("2026-05-01T10:00:00+02:00".to_string()),
+            end_time: Some("2026-05-01T10:30:00+02:00".to_string()),
+            start_date: Some("2026-05-01".to_string()),
+            end_date: Some("2026-05-02".to_string()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("Use either"));
+    }
+
+    #[test]
+    fn calendar_send_updates_defaults_to_none_and_validates_values() {
+        assert_eq!(
+            normalize_calendar_send_updates(None).unwrap(),
+            Some("none".to_string())
+        );
+        assert_eq!(
+            normalize_calendar_send_updates(Some("externalOnly")).unwrap(),
+            Some("externalOnly".to_string())
+        );
+        assert!(normalize_calendar_send_updates(Some("invalid")).is_err());
+    }
+
+    #[test]
+    fn google_tools_include_calendar_update_event() {
+        let integration = GoogleIntegration::new(&GoogleConfig::default());
+        let tools = integration.tools();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "calendar_update_event")
+            .expect("calendar_update_event tool should be registered");
+
+        assert_eq!(
+            tool.parameters["properties"]["event_id"]["type"],
+            serde_json::json!("string")
+        );
+        assert!(
+            tool.parameters["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("send_updates"))
+        );
     }
 }
