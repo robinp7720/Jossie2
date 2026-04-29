@@ -182,8 +182,8 @@ auth_token = "your-secret-token"
 [llm]
 api_url = "https://api.openai.com/v1"
 api_key = "sk-..."
-model = "gpt-4"
-kg_model = "gpt-4o-mini"  # Optional: cheaper model for knowledge graph extraction
+model = "gpt-5.5"
+kg_model = "gpt-5-nano"   # Optional: cheaper model for knowledge graph extraction
 system_prompt = "..."      # Jossie's personality and behavior
 max_agent_iterations = 20
 max_context_messages = 50

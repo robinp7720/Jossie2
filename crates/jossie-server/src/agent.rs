@@ -431,11 +431,11 @@ async fn build_system_prompt(
 ) -> String {
     let mut prompt = state.system_prompt.clone();
 
-    // Add current time context
+    // Add user-local time context for scheduling and personal-assistant decisions.
     let now = chrono::Local::now();
     prompt.push_str(&format!(
-        "\n\nCurrent Date and Time: {}",
-        now.format("%A, %B %d, %Y %H:%M:%S")
+        "\n\nCurrent Local Date and Time: {}",
+        now.format("%A, %B %d, %Y %H:%M:%S %:z")
     ));
 
     // Dynamically append agent and user profiles from memory
@@ -1399,6 +1399,8 @@ Evaluate on these criteria:
 3. Does it preserve the current conversational stance instead of resetting into generic assistant voice?
 4. Is it specific, direct, and naturally warm when appropriate?
 5. Does it avoid stock empathy, unnecessary hedging, obvious restatements, and balanced-but-vague filler?
+6. Does it take a useful next step or name one when the user's goal is not finished?
+7. Does it handle uncertainty with evidence instead of guessing?
 
 Respond with EXACTLY one of:
 - "PASS" if the response is acceptable
@@ -1486,7 +1488,7 @@ async fn maybe_summarize_context(state: &AppState, conv_id: Uuid, messages: &mut
     let summarize_text = to_summarize.join("\n---\n");
     let prompt = format!(
         r#"Summarize the following conversation history into a compact continuity summary.
-Preserve: key facts, decisions made, tool results, ongoing goals, commitments, user preferences about how to be helped, the current conversational stance, and any recent style corrections the assistant should remember.
+Preserve: key facts, decisions made, tool results, ongoing goals, commitments, unresolved blockers, next actions, user preferences about how to be helped, the current conversational stance, and any recent style corrections the assistant should remember.
 Omit: pleasantries, redundant information, and tool call arguments.
 Do not invent motives, emotions, or certainty that are not grounded in the conversation.
 Be concise but complete.
@@ -1556,6 +1558,8 @@ pub(crate) async fn spawn_knowledge_extraction(
         r#"Extract knowledge from this conversation turn.
 Identify Entities (people, projects, concepts) and Relationships.
 Ignore trivial chit-chat.
+Only extract information grounded in the turn. Do not infer private facts, emotions, or relationships that are not stated.
+Use stable lowercase IDs and merge obvious aliases to the same ID.
 
 User: {user_msg}
 Assistant: {assistant_msg}
@@ -1722,10 +1726,7 @@ async fn generate_event_message_inner(
         prompt.push_str(&event_memory_context);
     }
     prompt.push_str(
-        "\n\n## Incoming Notification Mode\nThis is still Jossie: same judgment, same continuity, same general tool access as a normal conversation.\nThe difference is that you are deciding whether this newly arrived event deserves an interruption right now.\nDefault to quiet triage.\nNotify only if the event is urgent, time-sensitive, actionable, clearly relevant to the user, or materially changes their plans.\nSkip low-signal items such as newsletters, receipts, marketing mail, routine confirmations, automated churn, or minor non-actionable calendar edits.\nFor email batches, notify only when the batch as a whole suggests something worth surfacing now.\nInterpret this event independently as a fresh arrival.\nDo NOT imply that you made a prior mistake, correction, or retraction unless the event payload explicitly says so.\nFor `gmail_new_message` and `new_email_batch`, frame updates as newly arrived emails, even when similar to prior ones.\nUse tools normally when they materially improve confidence, especially before notifying about details hidden behind an email summary, snippet, attachment, or linked system.\nDo not claim room changes, schedule changes, requirement changes, or downstream consequences unless the email body or another checked source explicitly confirms them.\nIf an email mentions another system such as Moodle, an attachment, or a linked page that you did not verify, say only that the email mentions it.\nIf you notify, write it like Jossie: short, concrete, natural, and grounded in what you actually checked.\nRespond with strict JSON only:\n{\"action\":\"notify\",\"message\":\"<short user-facing message>\"}\nor\n{\"action\":\"skip\",\"message\":\"\"}"
-    );
-    prompt.push_str(
-        "\nBefore deciding, build a compact internal notification brief with these fields:\n- `what_happened`\n- `why_now`\n- `what_changed`\n- `suggested_action`\n- `confidence` (0.0 to 1.0)\n- `interrupt_score` (0.0 to 1.0)\nOnly notify when both confidence and interrupt_score are strong enough.\nReturn strict JSON only in this shape:\n{\"action\":\"notify|skip\",\"message\":\"<short user-facing message>\",\"what_happened\":\"...\",\"why_now\":\"...\",\"what_changed\":\"...\",\"suggested_action\":\"...\",\"confidence\":0.0,\"interrupt_score\":0.0}"
+        "\n\n## Incoming Notification Mode\nThis is still Jossie: same judgment, same continuity, same general tool access as a normal conversation.\nThe difference is that you are deciding whether this newly arrived event deserves an interruption right now.\nDefault to quiet triage.\nNotify only if the event is urgent, time-sensitive, actionable, clearly relevant to the user, or materially changes their plans.\nSkip low-signal items such as newsletters, receipts, marketing mail, routine confirmations, automated churn, or minor non-actionable calendar edits.\nFor email batches, notify only when the batch as a whole suggests something worth surfacing now.\nInterpret this event independently as a fresh arrival.\nDo NOT imply that you made a prior mistake, correction, or retraction unless the event payload explicitly says so.\nFor `gmail_new_message` and `new_email_batch`, frame updates as newly arrived emails, even when similar to prior ones.\nUse tools normally when they materially improve confidence, especially before notifying about details hidden behind an email summary, snippet, attachment, or linked system.\nDo not claim room changes, schedule changes, requirement changes, or downstream consequences unless the email body or another checked source explicitly confirms them.\nIf an email mentions another system such as Moodle, an attachment, or a linked page that you did not verify, say only that the email mentions it.\nIf you notify, write it like Jossie: short, concrete, natural, and grounded in what you actually checked.\nBefore deciding, build a compact internal notification brief and use it to choose `notify` or `skip`.\nOnly notify when confidence and interrupt_score are both strong enough.\nReturn strict JSON only, with no markdown, in this exact shape:\n{\"action\":\"notify|skip\",\"message\":\"<short user-facing message>\",\"what_happened\":\"...\",\"why_now\":\"...\",\"what_changed\":\"...\",\"suggested_action\":\"...\",\"confidence\":0.0,\"interrupt_score\":0.0}"
     );
     if !recent_notification_context.is_empty() {
         prompt.push_str("\n\n");
