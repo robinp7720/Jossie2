@@ -70,6 +70,11 @@ input:focus,textarea:focus,select:focus { border-color: #bde76d; box-shadow: 0 0
 .message-body table { display: block; max-width: 100%; overflow-x: auto; }
 .message-body code { overflow-wrap: anywhere; }
 .message-body img { display: block; max-width: 100%; height: auto; }
+.chat-context { max-width: 48rem; margin: .25rem 0 1.6rem; border: 1px solid #2d3744; border-radius: .65rem; background: #131923; color: #93a0af; font-size: .72rem; }
+.chat-context summary { cursor: pointer; padding: .72rem .85rem; color: #b7d776; font-weight: 600; }
+.chat-context p { margin: 0; padding: 0 .85rem; line-height: 1.5; }
+.chat-context ul { display: flex; flex-wrap: wrap; gap: .35rem; margin: .65rem 0 0; padding: .65rem .85rem; border-top: 1px solid #293440; list-style: none; }
+.chat-context li { border: 1px solid #35414e; border-radius: 999px; padding: .2rem .45rem; color: #9eabb9; font: .6rem 'DM Mono', monospace; }
 
 .typed-account-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .typed-account-form .form-span { grid-column: 1 / -1; }
