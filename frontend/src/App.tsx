@@ -211,14 +211,28 @@ function Chat({ conversations, onRefresh }: { conversations: Conversation[]; onR
   const [sending, setSending] = useState(false)
   const [files, setFiles] = useState<Array<{ id: string; name: string }>>([])
   const [activity, setActivity] = useState<string | null>(null)
-  const visibleMessages = useMemo(
-    () => messages.filter((message) => message.role === 'user' || message.role === 'assistant'),
-    [messages],
-  )
-  const contextSources = useMemo(
-    () => Array.from(new Set(messages.filter((message) => message.role === 'tool').map((message) => contextLabelForTool(message.name)))).slice(0, 5),
-    [messages],
-  )
+  const visibleMessages = useMemo(() => {
+    const entries: Array<Message & { contextSources: string[] }> = []
+    let pendingSources: string[] = []
+    for (const message of messages) {
+      if (message.role === 'tool') {
+        pendingSources.push(contextLabelForTool(message.name))
+        continue
+      }
+      if (message.role === 'system') continue
+      if (message.role === 'user') pendingSources = []
+      if (message.role === 'user' || message.role === 'assistant') {
+        entries.push({
+          ...message,
+          contextSources: message.role === 'assistant'
+            ? Array.from(new Set(pendingSources)).slice(0, 5)
+            : [],
+        })
+        if (message.role === 'assistant') pendingSources = []
+      }
+    }
+    return entries
+  }, [messages])
 
   useEffect(() => { if (activeId) getMessages(api, activeId, 100).then(setMessages).catch(() => setMessages([])); else setMessages([]) }, [activeId])
 
@@ -258,7 +272,7 @@ function Chat({ conversations, onRefresh }: { conversations: Conversation[]; onR
     <div className="chat-layout">
       <aside className="thread-list"><p className="list-label">RECENT CONVERSATIONS</p>{conversations.map((conversation) => <button key={conversation.id} className={conversation.id === activeId ? 'thread selected' : 'thread'} onClick={() => setActiveId(conversation.id)}><strong>{conversation.title || 'Untitled conversation'}</strong><small>{relativeDate(conversation.updated_at)}</small></button>)}</aside>
       <div className="chat-panel">
-        <div className="message-feed">{visibleMessages.length ? <>{visibleMessages.map((message) => <article key={message.id} className={`message ${message.role}`}><span className="message-author">{message.role === 'user' ? 'You' : 'Jossie'}</span><div className="message-body"><ReactMarkdown>{message.content}</ReactMarkdown></div></article>)}{contextSources.length > 0 && <details className="chat-context"><summary>Context Jossie consulted</summary><p>Used to keep this conversation accurate and continuous.</p><ul>{contextSources.map((source) => <li key={source}>{source}</li>)}</ul></details>}</> : <div className="chat-empty"><span className="brand-orb">J</span><h2>What’s on your mind?</h2><p>Jossie keeps the thread, the context, and the useful details together.</p></div>}</div>
+        <div className="message-feed">{visibleMessages.length ? visibleMessages.map((message) => <article key={message.id} className={`message ${message.role}`}><span className="message-author">{message.role === 'user' ? 'You' : 'Jossie'}</span><div className="message-body"><ReactMarkdown>{message.content}</ReactMarkdown></div>{message.role === 'assistant' && message.contextSources.length > 0 && <details className="chat-context"><summary>Context used for this reply</summary><ul>{message.contextSources.map((source) => <li key={source}>{source}</li>)}</ul></details>}</article>) : <div className="chat-empty"><span className="brand-orb">J</span><h2>What’s on your mind?</h2><p>Jossie keeps the thread, the context, and the useful details together.</p></div>}</div>
         <form className="composer-new" onSubmit={submit}><div className="attachment-row">{files.map((file) => <span key={file.id} className="attachment">{file.name}<button type="button" onClick={() => setFiles((prev) => prev.filter((item) => item.id !== file.id))}>×</button></span>)}</div><textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder="Message Jossie…" rows={2} /><div className="composer-foot"><label className="attach-control">Attach<input type="file" onChange={(e) => void attach(e.target.files?.[0])} /></label><span>{activity}</span><button className="button primary" disabled={sending || !input.trim()}>{sending ? 'Working…' : 'Send'}</button></div></form>
         {sending && activeId && <button className="cancel-run" onClick={() => void cancelConversation(api, activeId)}>Stop current run</button>}
       </div>
