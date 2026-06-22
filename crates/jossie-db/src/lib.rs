@@ -1290,6 +1290,38 @@ impl Database {
         }
     }
 
+    /// Delete a node and all relations connected to it.
+    ///
+    /// Foreign-key cascading removes the incident edges as part of the same statement.
+    /// Returns `true` when the node existed and was deleted.
+    pub async fn graph_delete_node(&self, id: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query("DELETE FROM graph_nodes WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Delete a relation identified by its source, target, and relation type.
+    ///
+    /// Returns `true` when the relation existed and was deleted.
+    pub async fn graph_delete_edge(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        relation: &str,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM graph_edges WHERE source_id = ? AND target_id = ? AND relation = ?",
+        )
+        .bind(source_id)
+        .bind(target_id)
+        .bind(relation)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn graph_get_node(&self, id: &str) -> anyhow::Result<Option<GraphNode>> {
         let row = sqlx::query_as::<_, GraphNodeRow>("SELECT * FROM graph_nodes WHERE id = ?")
             .bind(id)
@@ -3068,6 +3100,57 @@ mod tests {
             apollo_neighbors
                 .iter()
                 .any(|n| n.node.id == "robin" && n.direction == "incoming")
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_delete_node_cascades_incident_edges() {
+        let db = test_db().await;
+        for (id, label) in [("robin", "Robin"), ("apollo", "Apollo"), ("ada", "Ada")] {
+            db.graph_upsert_node(id, label, "Person", &serde_json::json!({}))
+                .await
+                .unwrap();
+        }
+        db.graph_upsert_edge("robin", "apollo", "WORKS_ON", 1.0, &serde_json::json!({}))
+            .await
+            .unwrap();
+        db.graph_upsert_edge("ada", "robin", "KNOWS", 1.0, &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert!(db.graph_delete_node("robin").await.unwrap());
+        assert!(db.graph_get_node("robin").await.unwrap().is_none());
+        assert!(db.graph_list_edges(10).await.unwrap().is_empty());
+        assert!(!db.graph_delete_node("robin").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn graph_delete_edge_removes_exact_relation() {
+        let db = test_db().await;
+        for (id, label) in [("robin", "Robin"), ("apollo", "Apollo")] {
+            db.graph_upsert_node(id, label, "Person", &serde_json::json!({}))
+                .await
+                .unwrap();
+        }
+        db.graph_upsert_edge("robin", "apollo", "WORKS_ON", 1.0, &serde_json::json!({}))
+            .await
+            .unwrap();
+        db.graph_upsert_edge("robin", "apollo", "KNOWS", 1.0, &serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert!(
+            db.graph_delete_edge("robin", "apollo", "WORKS_ON")
+                .await
+                .unwrap()
+        );
+        let edges = db.graph_list_edges(10).await.unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].relation, "KNOWS");
+        assert!(
+            !db.graph_delete_edge("robin", "apollo", "WORKS_ON")
+                .await
+                .unwrap()
         );
     }
 

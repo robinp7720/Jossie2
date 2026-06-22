@@ -7,6 +7,91 @@ pub struct GraphIntegration {
     db: Arc<Database>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_graph() -> GraphIntegration {
+        let db = Database::new("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        GraphIntegration::new(Arc::new(db))
+    }
+
+    #[tokio::test]
+    async fn deletes_nodes_and_connected_relations() {
+        let graph = test_graph().await;
+        graph
+            .execute(
+                "graph_upsert_node",
+                r#"{"id":"robin","label":"Robin","type":"Person","attributes":[]}"#,
+            )
+            .await
+            .unwrap();
+        graph
+            .execute(
+                "graph_upsert_node",
+                r#"{"id":"apollo","label":"Apollo","type":"Project","attributes":[]}"#,
+            )
+            .await
+            .unwrap();
+        graph
+            .execute(
+                "graph_add_relation",
+                r#"{"source_id":"robin","target_id":"apollo","relation":"WORKS_ON","weight":1,"attributes":[]}"#,
+            )
+            .await
+            .unwrap();
+
+        let result = graph
+            .execute("graph_delete_node", r#"{"id":"robin"}"#)
+            .await
+            .unwrap();
+        assert!(result.contains("Deleted graph node"));
+        assert_eq!(graph.db.graph_list_edges(10).await.unwrap().len(), 0);
+        assert!(
+            graph
+                .execute("graph_delete_node", r#"{"id":"robin"}"#)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn deletes_exact_relation() {
+        let graph = test_graph().await;
+        for (id, label) in [("robin", "Robin"), ("apollo", "Apollo")] {
+            graph
+                .add_node(id, label, "Person", serde_json::json!({}))
+                .await
+                .unwrap();
+        }
+        graph
+            .add_edge("robin", "apollo", "WORKS_ON", 1.0, serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert!(
+            graph
+                .execute(
+                    "graph_delete_relation",
+                    r#"{"source_id":"robin","target_id":"apollo","relation":"WORKS_ON"}"#,
+                )
+                .await
+                .unwrap()
+                .contains("Deleted relation")
+        );
+        assert!(
+            graph
+                .execute(
+                    "graph_delete_relation",
+                    r#"{"source_id":"robin","target_id":"apollo","relation":"WORKS_ON"}"#,
+                )
+                .await
+                .is_err()
+        );
+    }
+}
+
 impl GraphIntegration {
     pub fn new(db: Arc<Database>) -> Self {
         Self { db }
@@ -44,6 +129,42 @@ impl GraphIntegration {
             "Edge {} --[{}]--> {} created.",
             source_id, relation, target_id
         ))
+    }
+
+    async fn delete_node(&self, id: &str) -> anyhow::Result<String> {
+        if self.db.graph_delete_node(id).await? {
+            Ok(format!(
+                "Deleted graph node '{}' and all of its connected relations.",
+                id
+            ))
+        } else {
+            anyhow::bail!("No graph node found with ID '{}'", id)
+        }
+    }
+
+    async fn delete_edge(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        relation: &str,
+    ) -> anyhow::Result<String> {
+        if self
+            .db
+            .graph_delete_edge(source_id, target_id, relation)
+            .await?
+        {
+            Ok(format!(
+                "Deleted relation {} --[{}]--> {}.",
+                source_id, relation, target_id
+            ))
+        } else {
+            anyhow::bail!(
+                "No relation found from '{}' to '{}' with type '{}'",
+                source_id,
+                target_id,
+                relation
+            )
+        }
     }
 
     async fn query_graph(&self, query: &str) -> anyhow::Result<String> {
@@ -298,6 +419,34 @@ impl Integration for GraphIntegration {
                 }),
             },
             ToolDefinition {
+                name: "graph_delete_node".to_string(),
+                description: "Permanently delete a Knowledge Graph entity by its exact ID, along with every relation connected to it. Use only when the user explicitly asks to forget it."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Exact ID of the entity to permanently delete"}
+                    },
+                    "required": ["id"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
+                name: "graph_delete_relation".to_string(),
+                description: "Permanently delete one exact Knowledge Graph relation. Use only when the user explicitly asks to remove it."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "source_id": {"type": "string", "description": "Exact source entity ID"},
+                        "target_id": {"type": "string", "description": "Exact target entity ID"},
+                        "relation": {"type": "string", "description": "Exact relation type"}
+                    },
+                    "required": ["source_id", "target_id", "relation"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
                 name: "graph_search".to_string(),
                 description: "Search the Knowledge Graph for entities and their relationships. Use this proactively to understand context before answering questions.".to_string(),
                 parameters: serde_json::json!({
@@ -387,6 +536,25 @@ impl Integration for GraphIntegration {
                     attributes,
                 )
                 .await
+            }
+            "graph_delete_node" => {
+                #[derive(Deserialize)]
+                struct Args {
+                    id: String,
+                }
+                let args: Args = serde_json::from_str(arguments)?;
+                self.delete_node(&args.id).await
+            }
+            "graph_delete_relation" => {
+                #[derive(Deserialize)]
+                struct Args {
+                    source_id: String,
+                    target_id: String,
+                    relation: String,
+                }
+                let args: Args = serde_json::from_str(arguments)?;
+                self.delete_edge(&args.source_id, &args.target_id, &args.relation)
+                    .await
             }
             "graph_search" => {
                 #[derive(Deserialize)]
