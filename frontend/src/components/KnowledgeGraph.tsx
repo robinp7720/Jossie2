@@ -1,307 +1,146 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import * as d3 from 'd3';
-import { fetchGraph } from '../api';
-import type { ApiConfig } from '../api';
-import type { GraphNode, GraphEdge } from '../types';
-import { Button, Chip } from './common/UI';
+import { useEffect, useMemo, useRef, useState } from 'react'
+import * as d3 from 'd3'
+import { fetchGraph } from '../api'
+import type { ApiConfig } from '../api'
+import type { GraphEdge, GraphNode } from '../types'
 
-type KnowledgeGraphProps = {
-  apiConfig: ApiConfig;
-};
+type KnowledgeGraphProps = { apiConfig: ApiConfig }
+type SimulationNode = GraphNode & d3.SimulationNodeDatum
+type SimulationLink = GraphEdge & d3.SimulationLinkDatum<SimulationNode>
 
-type SimulationNode = GraphNode & d3.SimulationNodeDatum;
-type SimulationLink = GraphEdge & d3.SimulationLinkDatum<SimulationNode>;
+const INITIAL_NODE_LIMIT = 90
+const FILTERED_NODE_LIMIT = 150
+const palette = ['#c8ee76', '#8fc7c3', '#b7a5f5', '#e7b773', '#e88886', '#7eaae5']
 
-export const KnowledgeGraph = ({ apiConfig }: KnowledgeGraphProps) => {
-  const graphRef = useRef<HTMLDivElement>(null);
-  const [data, setData] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] } | null>(null);
-  const [filter, setFilter] = useState('');
-  const [status, setStatus] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
-  const [nodeTypes, setNodeTypes] = useState<string[]>([]);
-  const [viewport, setViewport] = useState({ width: 0, height: 0 });
-  const colorScale = useRef(d3.scaleOrdinal(d3.schemeTableau10));
+const shortLabel = (value: string, max = 24) =>
+  value.length > max ? `${value.slice(0, max - 1)}…` : value
+
+export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
+  const graphRef = useRef<HTMLDivElement>(null)
+  const [data, setData] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] } | null>(null)
+  const [filter, setFilter] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null)
+  const [viewport, setViewport] = useState({ width: 0, height: 0 })
+  const colorScale = useRef(d3.scaleOrdinal<string, string>().range(palette))
 
   const loadGraph = async () => {
-    if (!apiConfig.token) {
-      setStatus('Token required');
-      setData(null);
-      return;
-    }
-
-    setLoading(true);
-    setStatus('Loading graph…');
-
+    setLoading(true)
+    setError(null)
     try {
-      const result = await fetchGraph(apiConfig, 1000);
-      setData(result);
-      setStatus(`Loaded ${result.nodes.length} nodes and ${result.edges.length} edges`);
-      setNodeTypes(Array.from(new Set(result.nodes.map((node) => node.node_type || 'Unknown'))));
-    } catch (error) {
-      setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`);
-      setData(null);
+      const result = await fetchGraph(apiConfig, 500)
+      setData(result)
+    } catch (reason) {
+      setData(null)
+      setError(reason instanceof Error ? reason.message : 'Unable to load the knowledge graph.')
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
-  };
+  }
+
+  useEffect(() => { void loadGraph() }, [apiConfig.baseUrl])
 
   useEffect(() => {
-    loadGraph();
-  }, [apiConfig.token, apiConfig.baseUrl]);
+    const element = graphRef.current
+    if (!element) return
+    const resize = () => setViewport({ width: element.clientWidth, height: element.clientHeight })
+    resize()
+    const observer = new ResizeObserver(resize)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
+  const graph = useMemo(() => {
+    if (!data) return null
+    const term = filter.trim().toLowerCase()
+    const candidates = term
+      ? data.nodes.filter((node) => node.label.toLowerCase().includes(term) || node.node_type.toLowerCase().includes(term))
+      : data.nodes
+    const visibleNodes = candidates.slice(0, term ? FILTERED_NODE_LIMIT : INITIAL_NODE_LIMIT)
+    const visibleIds = new Set(visibleNodes.map((node) => node.id))
+    return {
+      nodes: visibleNodes,
+      edges: data.edges.filter((edge) => visibleIds.has(edge.source_id) && visibleIds.has(edge.target_id)),
+      isLimited: candidates.length > visibleNodes.length,
+      matchingCount: candidates.length,
+    }
+  }, [data, filter])
+
+  const types = useMemo(() => {
+    if (!graph) return []
+    return Array.from(new Set(graph.nodes.map((node) => node.node_type || 'Unknown'))).slice(0, 8)
+  }, [graph])
 
   useEffect(() => {
-    const element = graphRef.current;
-    if (!element) return;
+    if (!graphRef.current || !graph || viewport.width < 1 || viewport.height < 1) return
+    const container = d3.select(graphRef.current)
+    container.selectAll('svg').remove()
+    if (graph.nodes.length === 0) return
 
-    const updateSize = () => {
-      setViewport({
-        width: element.clientWidth || 960,
-        height: element.clientHeight || 640,
-      });
-    };
+    const nodes: SimulationNode[] = graph.nodes.map((node) => ({ ...node }))
+    const links: SimulationLink[] = graph.edges.map((edge) => ({ ...edge, source: edge.source_id, target: edge.target_id }))
+    const width = viewport.width
+    const height = viewport.height
+    const svg = container.append('svg').attr('viewBox', `0 0 ${width} ${height}`).attr('role', 'img').attr('aria-label', 'Knowledge graph')
+    const root = svg.append('g')
+    svg.call(d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.4, 4]).on('zoom', (event) => root.attr('transform', event.transform)))
 
-    updateSize();
-
-    const observer = new ResizeObserver(() => updateSize());
-    observer.observe(element);
-
-    return () => observer.disconnect();
-  }, []);
-
-  const filteredGraph = useMemo(() => {
-    if (!data) return null;
-
-    let nodes = data.nodes;
-    let edges = data.edges;
-
-    if (filter.trim()) {
-      const term = filter.toLowerCase();
-      nodes = nodes.filter(
-        (node) =>
-          node.label.toLowerCase().includes(term) ||
-          node.node_type.toLowerCase().includes(term),
-      );
-
-      const nodeIds = new Set(nodes.map((node) => node.id));
-      edges = edges.filter(
-        (edge) => nodeIds.has(edge.source_id) && nodeIds.has(edge.target_id),
-      );
-    }
-
-    return { nodes, edges };
-  }, [data, filter]);
-
-  useEffect(() => {
-    if (!filteredGraph || !graphRef.current || viewport.width === 0 || viewport.height === 0) {
-      return;
-    }
-
-    const nodes: SimulationNode[] = filteredGraph.nodes.map((node) => ({ ...node }));
-    const links: SimulationLink[] = filteredGraph.edges.map((edge) => ({
-      ...edge,
-      source: edge.source_id,
-      target: edge.target_id,
-    }));
-
-    const container = d3.select(graphRef.current);
-    container.selectAll('svg').remove();
-
-    if (nodes.length === 0) {
-      return;
-    }
-
-    const width = viewport.width;
-    const height = viewport.height;
-
-    const svg = container
-      .append('svg')
-      .attr('width', '100%')
-      .attr('height', '100%')
-      .attr('viewBox', [0, 0, width, height])
-      .attr('preserveAspectRatio', 'xMidYMid meet');
-
-    const root = svg.append('g');
-
-    svg.call(
-      d3
-        .zoom<SVGSVGElement, unknown>()
-        .scaleExtent([0.35, 4])
-        .on('zoom', (event) => {
-          root.attr('transform', event.transform);
-        }),
-    );
-
-    const simulation = d3
-      .forceSimulation(nodes)
-      .force(
-        'link',
-        d3
-          .forceLink<SimulationNode, SimulationLink>(links)
-          .id((node) => node.id)
-          .distance(110),
-      )
-      .force('charge', d3.forceManyBody().strength(-300))
+    const simulation = d3.forceSimulation(nodes)
+      .force('link', d3.forceLink<SimulationNode, SimulationLink>(links).id((node) => node.id).distance(80))
+      .force('charge', d3.forceManyBody().strength(-190))
       .force('center', d3.forceCenter(width / 2, height / 2))
-      .force('collide', d3.forceCollide().radius(26));
+      .force('collide', d3.forceCollide().radius(20))
 
-    const link = root
-      .append('g')
-      .attr('stroke', 'rgba(117, 140, 156, 0.45)')
-      .selectAll('line')
-      .data(links)
-      .join('line')
-      .attr('stroke-width', (edge) => Math.max(1, Math.sqrt(edge.weight || 1)));
+    const linksSelection = root.append('g').attr('stroke', 'rgba(151, 169, 192, .28)').selectAll('line').data(links).join('line').attr('stroke-width', (edge) => Math.max(1, Math.sqrt(edge.weight || 1)))
+    const nodeSelection = root.append('g').selectAll<SVGGElement, SimulationNode>('g').data(nodes).join('g').attr('class', 'knowledge-node').attr('tabindex', 0)
+      .on('click', (event, node) => { event.stopPropagation(); setSelectedNode(node) })
+      .on('keydown', (event, node) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedNode(node) } })
+      .call(d3.drag<SVGGElement, SimulationNode>()
+        .on('start', (event, node) => { if (!event.active) simulation.alphaTarget(.2).restart(); node.fx = node.x; node.fy = node.y })
+        .on('drag', (event, node) => { node.fx = event.x; node.fy = event.y })
+        .on('end', (event, node) => { if (!event.active) simulation.alphaTarget(0); node.fx = null; node.fy = null }))
 
-    const node = root
-      .append('g')
-      .selectAll<SVGGElement, SimulationNode>('g')
-      .data(nodes)
-      .join('g')
-      .attr('cursor', 'pointer')
-      .on('click', (event, datum) => {
-        setSelectedNode(datum);
-        event.stopPropagation();
-      })
-      .call(
-        d3
-          .drag<SVGGElement, SimulationNode>()
-          .on('start', (event, datum) => {
-            if (!event.active) simulation.alphaTarget(0.2).restart();
-            datum.fx = datum.x;
-            datum.fy = datum.y;
-          })
-          .on('drag', (event, datum) => {
-            datum.fx = event.x;
-            datum.fy = event.y;
-          })
-          .on('end', (event, datum) => {
-            if (!event.active) simulation.alphaTarget(0);
-            datum.fx = null;
-            datum.fy = null;
-          }),
-      );
-
-    node
-      .append('circle')
-      .attr('r', 11)
-      .attr('fill', (datum) => colorScale.current(datum.node_type))
-      .attr('stroke', '#f4eee3')
-      .attr('stroke-width', 2.5);
-
-    node
-      .append('text')
-      .text((datum) => datum.label)
-      .attr('x', 16)
-      .attr('y', 4)
-      .attr('fill', '#0e1f2b')
-      .style('font-size', '11px')
-      .style('font-weight', '700')
-      .style('letter-spacing', '0.02em')
-      .style('pointer-events', 'none');
+    nodeSelection.append('circle').attr('r', 8).attr('fill', (node) => colorScale.current(node.node_type || 'Unknown')).attr('stroke', '#0d1219').attr('stroke-width', 2)
+    if (nodes.length <= 45) {
+      nodeSelection.append('text').text((node) => shortLabel(node.label)).attr('x', 12).attr('y', 4).attr('fill', '#dce4d6').attr('font-size', 10).attr('pointer-events', 'none')
+    }
 
     simulation.on('tick', () => {
-      link
-        .attr('x1', (datum) => (datum.source as SimulationNode).x ?? 0)
-        .attr('y1', (datum) => (datum.source as SimulationNode).y ?? 0)
-        .attr('x2', (datum) => (datum.target as SimulationNode).x ?? 0)
-        .attr('y2', (datum) => (datum.target as SimulationNode).y ?? 0);
+      linksSelection.attr('x1', (edge) => (edge.source as SimulationNode).x ?? 0).attr('y1', (edge) => (edge.source as SimulationNode).y ?? 0).attr('x2', (edge) => (edge.target as SimulationNode).x ?? 0).attr('y2', (edge) => (edge.target as SimulationNode).y ?? 0)
+      nodeSelection.attr('transform', (node) => `translate(${node.x ?? 0},${node.y ?? 0})`)
+    })
+    svg.on('click', () => setSelectedNode(null))
+    return () => { simulation.stop() }
+  }, [graph, viewport])
 
-      node.attr('transform', (datum) => `translate(${datum.x ?? 0},${datum.y ?? 0})`);
-    });
-
-    svg.on('click', () => setSelectedNode(null));
-
-    return () => {
-      simulation.stop();
-    };
-  }, [filteredGraph, viewport]);
-
-  return (
-    <div className="graph-shell">
-      <div className="graph-toolbar">
-        <div className="graph-toolbar-copy">
-          <p className="eyebrow">Graph explorer</p>
-          <h2>Entity map</h2>
-        </div>
-        <div className="graph-toolbar-actions">
-          <input
-            type="text"
-            placeholder="Filter nodes by label or type"
-            value={filter}
-            onChange={(event) => setFilter(event.target.value)}
-            className="graph-search"
-          />
-          <Button variant="ghost" onClick={loadGraph} loading={loading}>
-            Refresh
-          </Button>
-        </div>
-      </div>
-
-      <div className="graph-summary">
-        <Chip variant="neutral">{filteredGraph?.nodes.length ?? 0} nodes</Chip>
-        <Chip variant="neutral">{filteredGraph?.edges.length ?? 0} edges</Chip>
-        <Chip variant={status?.startsWith('Error') ? 'warning' : 'accent'}>
-          {status ?? 'Idle'}
-        </Chip>
-      </div>
-
-      <div className="graph-workspace">
-        <div className="graph-main">
-          {nodeTypes.length > 0 ? (
-            <div className="graph-legend">
-              {nodeTypes.map((type) => (
-                <div key={type} className="legend-item">
-                  <span
-                    className="legend-dot"
-                    style={{ backgroundColor: colorScale.current(type) }}
-                  />
-                  <span>{type}</span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-
-          <div className="graph-container" ref={graphRef}>
-            {!filteredGraph && !loading ? (
-              <div className="graph-empty">
-                Configure an auth token, then refresh to load graph memory.
-              </div>
-            ) : null}
-            {filteredGraph && filteredGraph.nodes.length === 0 ? (
-              <div className="graph-empty">No nodes match the current filter.</div>
-            ) : null}
-          </div>
-        </div>
-
-        <aside className="graph-sidebar">
-          {selectedNode ? (
-            <div className="graph-node-panel">
-              <div className="graph-node-head">
-                <div>
-                  <p className="eyebrow">Selected node</p>
-                  <h3>{selectedNode.label}</h3>
-                </div>
-                <Chip variant="accent">{selectedNode.node_type}</Chip>
-              </div>
-              <pre className="code graph-node-code">
-                {JSON.stringify(selectedNode.properties, null, 2)}
-              </pre>
-              <Button variant="ghost" size="sm" onClick={() => setSelectedNode(null)}>
-                Clear selection
-              </Button>
-            </div>
-          ) : (
-            <div className="graph-node-panel empty">
-              <p className="eyebrow">Inspector</p>
-              <h3>Select a node</h3>
-              <p className="support-copy">
-                Click any node in the graph to inspect its stored properties and type.
-              </p>
-            </div>
-          )}
-        </aside>
-      </div>
+  const visibleLabel = graph ? `${graph.nodes.length} shown` : 'No nodes'
+  return <section className="knowledge-explorer">
+    <header className="knowledge-explorer-head">
+      <div><p className="eyebrow">EXPLORE RELATIONSHIPS</p><h2>Entity map</h2></div>
+      <button className="button secondary graph-refresh" onClick={() => void loadGraph()} disabled={loading}>{loading ? 'Loading…' : 'Refresh'}</button>
+    </header>
+    <div className="knowledge-controls">
+      <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter people, projects, or types" aria-label="Filter graph nodes" />
+      <div className="knowledge-summary"><span>{visibleLabel}</span><span>{graph?.edges.length ?? 0} links</span>{graph?.isLimited && <span>Refine search to see more</span>}</div>
     </div>
-  );
-};
+    <div className="knowledge-workspace">
+      <div className="knowledge-map-wrap">
+        {types.length > 0 && <div className="knowledge-legend">{types.map((type) => <span key={type}><i style={{ background: colorScale.current(type) }} />{type}</span>)}</div>}
+        <div className="knowledge-map" ref={graphRef}>
+          {loading && <div className="knowledge-empty">Loading graph memory…</div>}
+          {error && <div className="knowledge-empty error">{error}</div>}
+          {!loading && !error && graph?.nodes.length === 0 && <div className="knowledge-empty">No entities match this filter.</div>}
+          {!loading && !error && graph?.nodes.length && graph.nodes.length > 45 ? <div className="knowledge-map-note">Select a node to inspect it. Zoom and drag to explore.</div> : null}
+        </div>
+      </div>
+      <aside className="knowledge-inspector">
+        {selectedNode ? <>
+          <div className="inspector-title"><div><p className="eyebrow">SELECTED ENTITY</p><h3>{selectedNode.label}</h3></div><span>{selectedNode.node_type}</span></div>
+          <pre>{JSON.stringify(selectedNode.properties, null, 2)}</pre>
+          <button className="text-button" onClick={() => setSelectedNode(null)}>Clear selection</button>
+        </> : <div className="inspector-placeholder"><p className="eyebrow">INSPECTOR</p><h3>Select an entity</h3><p>Tap a node to view its type and stored properties.</p></div>}
+      </aside>
+    </div>
+  </section>
+}
