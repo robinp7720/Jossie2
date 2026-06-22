@@ -69,15 +69,27 @@ export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
     const candidates = term
       ? data.nodes.filter((node) => node.label.toLowerCase().includes(term) || node.node_type.toLowerCase().includes(term))
       : data.nodes
-    const visibleNodes = candidates.slice(0, term ? FILTERED_NODE_LIMIT : INITIAL_NODE_LIMIT)
+    const initialNodes = candidates.slice(0, term ? FILTERED_NODE_LIMIT : INITIAL_NODE_LIMIT)
+    const expandedIds = new Set<string>()
+    if (selectedNode) {
+      expandedIds.add(selectedNode.id)
+      data.edges.forEach((edge) => {
+        if (edge.source_id === selectedNode.id) expandedIds.add(edge.target_id)
+        if (edge.target_id === selectedNode.id) expandedIds.add(edge.source_id)
+      })
+    }
+    const initialIds = new Set(initialNodes.map((node) => node.id))
+    const expandedNodes = data.nodes.filter((node) => expandedIds.has(node.id) && !initialIds.has(node.id))
+    const visibleNodes = [...initialNodes, ...expandedNodes]
     const visibleIds = new Set(visibleNodes.map((node) => node.id))
     return {
       nodes: visibleNodes,
       edges: data.edges.filter((edge) => visibleIds.has(edge.source_id) && visibleIds.has(edge.target_id)),
       isLimited: candidates.length > visibleNodes.length,
       matchingCount: candidates.length,
+      expandedNodeCount: expandedNodes.length,
     }
-  }, [data, filter])
+  }, [data, filter, selectedNode])
 
   const types = useMemo(() => {
     if (!graph) return []
@@ -108,6 +120,16 @@ export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
 
     const nodes: SimulationNode[] = graph.nodes.map((node) => ({ ...node }))
     const links: SimulationLink[] = graph.edges.map((edge) => ({ ...edge, source: edge.source_id, target: edge.target_id }))
+    const selectedId = selectedNode?.id
+    const connectedNodeIds = new Set<string>()
+    if (selectedId) {
+      connectedNodeIds.add(selectedId)
+      links.forEach((edge) => {
+        if (edge.source_id === selectedId) connectedNodeIds.add(edge.target_id)
+        if (edge.target_id === selectedId) connectedNodeIds.add(edge.source_id)
+      })
+    }
+    const isSelectedLink = (edge: SimulationLink) => edge.source_id === selectedId || edge.target_id === selectedId
     const width = viewport.width
     const height = viewport.height
     const svg = container.append('svg').attr('viewBox', `0 0 ${width} ${height}`).attr('role', 'img').attr('aria-label', 'Knowledge graph')
@@ -121,10 +143,10 @@ export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
       .force('collide', d3.forceCollide().radius(20))
 
     const linksSelection = root.append('g')
-      .attr('stroke', 'rgba(151, 169, 192, .32)')
       .selectAll('line')
       .data(links)
       .join('line')
+      .attr('stroke', (edge) => !selectedId || isSelectedLink(edge) ? 'rgba(190, 223, 124, .8)' : 'rgba(151, 169, 192, .12)')
       .attr('stroke-width', (edge) => Math.max(1, Math.sqrt(edge.weight || 1)))
     const linkLabels = root.append('g')
       .attr('class', 'knowledge-link-labels')
@@ -134,7 +156,7 @@ export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
       .text((edge) => shortLabel(readableRelation(edge.relation), 18))
       .attr('text-anchor', 'middle')
       .attr('dy', -5)
-      .attr('fill', '#aebbc8')
+      .attr('fill', (edge) => !selectedId || isSelectedLink(edge) ? '#c9dc9a' : '#65707e')
       .attr('font-size', 8)
       .attr('pointer-events', 'none')
     const nodeSelection = root.append('g').selectAll<SVGGElement, SimulationNode>('g').data(nodes).join('g').attr('class', 'knowledge-node').attr('tabindex', 0)
@@ -145,7 +167,12 @@ export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
         .on('drag', (event, node) => { node.fx = event.x; node.fy = event.y })
         .on('end', (event, node) => { if (!event.active) simulation.alphaTarget(0); node.fx = null; node.fy = null }))
 
-    nodeSelection.append('circle').attr('r', 8).attr('fill', (node) => colorScale.current(node.node_type || 'Unknown')).attr('stroke', '#0d1219').attr('stroke-width', 2)
+    nodeSelection.attr('opacity', (node) => !selectedId || connectedNodeIds.has(node.id) ? 1 : .38)
+    nodeSelection.append('circle')
+      .attr('r', (node) => node.id === selectedId ? 11 : connectedNodeIds.has(node.id) ? 9 : 8)
+      .attr('fill', (node) => colorScale.current(node.node_type || 'Unknown'))
+      .attr('stroke', (node) => node.id === selectedId ? '#edf9c8' : connectedNodeIds.has(node.id) ? '#c8ee76' : '#0d1219')
+      .attr('stroke-width', (node) => node.id === selectedId ? 3 : 2)
     nodeSelection.append('text')
       .text((node) => shortLabel(node.label))
       .attr('x', 12)
@@ -165,7 +192,7 @@ export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
     })
     svg.on('click', () => setSelectedNode(null))
     return () => { simulation.stop() }
-  }, [graph, viewport])
+  }, [graph, selectedNode, viewport])
 
   const visibleLabel = graph ? `${graph.nodes.length} shown` : 'No nodes'
   return <section className="knowledge-explorer">
@@ -175,7 +202,7 @@ export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
     </header>
     <div className="knowledge-controls">
       <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter people, projects, or types" aria-label="Filter graph nodes" />
-      <div className="knowledge-summary"><span>{visibleLabel}</span><span>{graph?.edges.length ?? 0} links</span>{graph?.isLimited && <span>Refine search to see more</span>}</div>
+      <div className="knowledge-summary"><span>{visibleLabel}</span><span>{graph?.edges.length ?? 0} links</span>{graph?.expandedNodeCount ? <span>{graph.expandedNodeCount} connected nodes expanded</span> : null}{graph?.isLimited && <span>Refine search to see more</span>}</div>
     </div>
     <div className="knowledge-workspace">
       <div className="knowledge-map-wrap">
@@ -184,7 +211,7 @@ export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
           {loading && <div className="knowledge-empty">Loading graph memory…</div>}
           {error && <div className="knowledge-empty error">{error}</div>}
           {!loading && !error && graph?.nodes.length === 0 && <div className="knowledge-empty">No entities match this filter.</div>}
-          {!loading && !error && graph?.nodes.length && graph.nodes.length > 45 ? <div className="knowledge-map-note">Select a node to inspect it. Zoom and drag to explore.</div> : null}
+          {!loading && !error && graph?.nodes.length && graph.nodes.length > 45 ? <div className="knowledge-map-note">Select a node to expand and highlight its direct connections. Zoom and drag to explore.</div> : null}
         </div>
       </div>
       <aside className="knowledge-inspector">
