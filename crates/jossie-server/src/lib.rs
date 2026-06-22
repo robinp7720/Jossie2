@@ -22,23 +22,25 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 pub fn router(state: Arc<AppState>) -> Router {
-    let allow_origin = if state.cors_origins.is_empty() {
-        AllowOrigin::any()
+    let cors = if state.cors_origins.is_empty() {
+        CorsLayer::new()
+            .allow_methods([Method::GET, Method::POST, Method::DELETE])
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
     } else {
-        AllowOrigin::list(
-            state
-                .cors_origins
-                .iter()
-                .filter_map(|o| o.parse::<HeaderValue>().ok()),
-        )
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(
+                state
+                    .cors_origins
+                    .iter()
+                    .filter_map(|o| o.parse::<HeaderValue>().ok()),
+            ))
+            .allow_methods([Method::GET, Method::POST, Method::DELETE])
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+            .allow_credentials(true)
     };
 
-    let cors = CorsLayer::new()
-        .allow_origin(allow_origin)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
-
     let api = Router::new()
+        .route("/api/auth/logout", post(handlers::auth::logout_handler))
         // Chat
         .route("/api/chat", post(handlers::chat::chat_handler))
         .route("/api/chat/stream", get(handlers::chat::ws_handler))
@@ -59,6 +61,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Files
         .route("/api/files", post(handlers::files::upload_file))
         .route("/api/graph", get(handlers::graph::graph_handler))
+        .route(
+            "/api/dashboard",
+            get(handlers::dashboard::dashboard_handler),
+        )
+        .route("/api/memories", get(handlers::dashboard::memories_handler))
+        .route("/api/activity", get(handlers::dashboard::activity_handler))
         // Config / Onboarding
         .route(
             "/api/onboarding",
@@ -92,6 +100,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         ));
 
     let public = Router::new()
+        .route("/api/auth/login", post(handlers::auth::login_handler))
+        .route("/api/auth/session", get(handlers::auth::session_handler))
         .route(
             "/oauth/callback",
             get(handlers::integrations::oauth_callback_handler),

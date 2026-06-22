@@ -136,6 +136,35 @@ CREATE TABLE IF NOT EXISTS out_of_band_messages (
 CREATE INDEX IF NOT EXISTS idx_oob_messages_status
     ON out_of_band_messages(status, created_at);
 
+-- Browser login sessions. Only a SHA-256 digest of the opaque cookie value is
+-- persisted so a database read does not grant an active browser session.
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at);
+
+-- Curated, user-visible agent activity. This intentionally excludes model
+-- prompts, hidden reasoning, raw tool input, and raw tool output.
+CREATE TABLE IF NOT EXISTS activity_events (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+    run_id TEXT,
+    category TEXT NOT NULL,
+    title TEXT NOT NULL,
+    detail TEXT,
+    tone TEXT NOT NULL DEFAULT 'normal',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_events_created_at
+    ON activity_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_events_conversation
+    ON activity_events(conversation_id, created_at DESC);
+
 -- Conversation summaries for context compression
 CREATE TABLE IF NOT EXISTS conversation_summaries (
     conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,

@@ -25,6 +25,16 @@ port = 3000
 # Generate a secure token with: openssl rand -hex 32
 auth_token = "changeme-use-a-secure-random-token"
 
+# Password login for the web dashboard. Store an Argon2 PHC hash here or set
+# JOSSIE_SERVER_AUTH_PASSWORD_HASH. Generate one with your password manager or
+# an Argon2-compatible tool; never put a plaintext password in this file.
+auth_password_hash = ""
+
+# Optional override for deployments behind TLS termination. By default, Jossie
+# marks session cookies Secure for an https public_base_url and leaves local
+# HTTP development usable.
+# session_cookie_secure = true
+
 # Optional: Public base URL used for OAuth callbacks.
 # Set this in production instead of relying on request Host headers.
 # Example: "https://jossie.example.com"

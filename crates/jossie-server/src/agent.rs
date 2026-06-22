@@ -766,9 +766,11 @@ fn inject_goal_tracking_message(messages: &mut Vec<Message>, goal_tracker: &Goal
 }
 
 async fn emit_stream_event(
+    state: &AppState,
     event_tx: Option<&tokio::sync::mpsc::Sender<ServerEvent>>,
     event: ServerEvent,
 ) {
+    crate::events::persist_activity_event(&state.db, &event).await;
     if let Some(tx) = event_tx {
         let _ = tx.send(event).await;
     }
@@ -782,6 +784,7 @@ async fn ensure_run_not_cancelled(
 ) -> anyhow::Result<()> {
     if state.is_cancel_requested(conv_id).await {
         emit_stream_event(
+            state,
             event_tx,
             ServerEvent::RunCancelled {
                 conversation_id: conv_id,
@@ -1004,13 +1007,16 @@ pub async fn run_agent_loop_streaming(
     event_tx: tokio::sync::mpsc::Sender<ServerEvent>,
 ) {
     if let Err(e) = claim_conversation(state, conv_id).await {
-        let _ = event_tx
-            .send(ServerEvent::Error {
+        emit_stream_event(
+            state,
+            Some(&event_tx),
+            ServerEvent::Error {
                 conversation_id: conv_id,
                 run_id: None,
                 error: e.to_string(),
-            })
-            .await;
+            },
+        )
+        .await;
         return;
     }
 
@@ -1024,13 +1030,16 @@ pub async fn run_agent_loop_streaming(
         tracing::error!(
             "Streaming agent loop panicked for conversation {conv_id}: {panic_message}"
         );
-        let _ = event_tx_for_error
-            .send(ServerEvent::Error {
+        emit_stream_event(
+            state,
+            Some(&event_tx_for_error),
+            ServerEvent::Error {
                 conversation_id: conv_id,
                 run_id: None,
                 error: format!("Agent loop panicked: {panic_message}"),
-            })
-            .await;
+            },
+        )
+        .await;
     }
 }
 
@@ -1045,18 +1054,22 @@ async fn run_agent_loop_streaming_inner(
         match prepare_run_context(state, conv_id, &options).await {
             Ok(ctx) => ctx,
             Err(e) => {
-                let _ = event_tx
-                    .send(ServerEvent::Error {
+                emit_stream_event(
+                    state,
+                    Some(&event_tx),
+                    ServerEvent::Error {
                         conversation_id: conv_id,
                         run_id: Some(run_id.clone()),
                         error: e.to_string(),
-                    })
-                    .await;
+                    },
+                )
+                .await;
                 return;
             }
         };
 
     emit_stream_event(
+        state,
         Some(&event_tx),
         ServerEvent::RunStarted {
             conversation_id: conv_id,
@@ -1078,6 +1091,7 @@ async fn run_agent_loop_streaming_inner(
         }
 
         emit_stream_event(
+            state,
             Some(&event_tx),
             ServerEvent::AssistantThinking {
                 conversation_id: conv_id,
@@ -1113,6 +1127,7 @@ async fn run_agent_loop_streaming_inner(
                         Some(jossie_llm::StreamEvent::Delta(delta)) => {
                             full_content.push_str(&delta);
                             emit_stream_event(
+                                state,
                                 Some(&event_tx),
                                 ServerEvent::AssistantDelta {
                                     conversation_id: conv_id,
@@ -1132,6 +1147,7 @@ async fn run_agent_loop_streaming_inner(
                             stream_failed = true;
                             done_received = true;
                             emit_stream_event(
+                                state,
                                 Some(&event_tx),
                                 ServerEvent::Error {
                                     conversation_id: conv_id,
@@ -1164,6 +1180,7 @@ async fn run_agent_loop_streaming_inner(
         if !tool_calls.is_empty() {
             if iteration + 1 >= state.max_agent_iterations {
                 emit_stream_event(
+                    state,
                     Some(&event_tx),
                     ServerEvent::Error {
                         conversation_id: conv_id,
@@ -1185,6 +1202,7 @@ async fn run_agent_loop_streaming_inner(
                     "Streaming loop guard triggered for conversation {conv_id}: {loop_warning}"
                 );
                 emit_stream_event(
+                    state,
                     Some(&event_tx),
                     ServerEvent::AssistantReset {
                         conversation_id: conv_id,
@@ -1197,6 +1215,7 @@ async fn run_agent_loop_streaming_inner(
                 if goal_tracker.should_stop_for_repetition() {
                     let fallback = goal_tracker.build_stuck_message();
                     emit_stream_event(
+                        state,
                         Some(&event_tx),
                         ServerEvent::AssistantDelta {
                             conversation_id: conv_id,
@@ -1208,6 +1227,7 @@ async fn run_agent_loop_streaming_inner(
                     let assistant_msg = Message::new(conv_id, Role::Assistant, fallback);
                     let _ = persist_message(state, &assistant_msg).await;
                     emit_stream_event(
+                        state,
                         Some(&event_tx),
                         ServerEvent::RunCompleted {
                             conversation_id: conv_id,
@@ -1239,6 +1259,7 @@ async fn run_agent_loop_streaming_inner(
             let mut join_set = tokio::task::JoinSet::new();
             for (idx, call) in prepared_calls.into_iter().enumerate() {
                 emit_stream_event(
+                    state,
                     Some(&event_tx),
                     ServerEvent::ToolCalled {
                         conversation_id: conv_id,
@@ -1256,7 +1277,7 @@ async fn run_agent_loop_streaming_inner(
                     call_id: call.id.clone(),
                     tool: call.name.clone(),
                 };
-                emit_stream_event(Some(&event_tx), started_event).await;
+                emit_stream_event(state, Some(&event_tx), started_event).await;
                 join_set.spawn(async move {
                     let result = registry.execute(&call).await;
                     (idx, call, result)
@@ -1281,6 +1302,7 @@ async fn run_agent_loop_streaming_inner(
 
             for (_, call, result) in results {
                 emit_stream_event(
+                    state,
                     Some(&event_tx),
                     ServerEvent::ToolFinished {
                         conversation_id: conv_id,
@@ -1309,6 +1331,7 @@ async fn run_agent_loop_streaming_inner(
             {
                 reflection_retries_remaining -= 1;
                 emit_stream_event(
+                    state,
                     Some(&event_tx),
                     ServerEvent::ReflectionRetry {
                         conversation_id: conv_id,
@@ -1318,6 +1341,7 @@ async fn run_agent_loop_streaming_inner(
                 )
                 .await;
                 emit_stream_event(
+                    state,
                     Some(&event_tx),
                     ServerEvent::AssistantReset {
                         conversation_id: conv_id,
@@ -1350,6 +1374,7 @@ async fn run_agent_loop_streaming_inner(
         });
 
         emit_stream_event(
+            state,
             Some(&event_tx),
             ServerEvent::RunCompleted {
                 conversation_id: conv_id,
@@ -1361,6 +1386,7 @@ async fn run_agent_loop_streaming_inner(
     }
 
     emit_stream_event(
+        state,
         Some(&event_tx),
         ServerEvent::Error {
             conversation_id: conv_id,

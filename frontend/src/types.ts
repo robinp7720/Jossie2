@@ -72,3 +72,49 @@ export type GraphResponse = {
   nodes: GraphNode[]
   edges: GraphEdge[]
 }
+
+export type Memory = {
+  key: string
+  content: string
+  tags: string
+  created_at: string
+  updated_at: string
+  prompt_scope: string
+  importance: number
+}
+
+export type ActivityEvent = {
+  id: string
+  conversation_id: string | null
+  run_id: string | null
+  category: string
+  title: string
+  detail: string | null
+  tone: 'normal' | 'success' | 'warn' | string
+  created_at: string
+}
+
+export type ScheduledTask = {
+  id: string
+  conversation_id: string
+  task_type: string
+  schedule_type: string
+  schedule_value: string
+  status: string
+  next_run_at: string | null
+}
+
+export type Dashboard = {
+  stats: {
+    memories: number
+    prompt_ready_memories: number
+    knowledge_nodes: number
+    knowledge_edges: number
+    pending_tasks: number
+  }
+  recent_memories: Memory[]
+  recent_activity: ActivityEvent[]
+  recent_conversations: Conversation[]
+  upcoming_tasks: ScheduledTask[]
+  graph_highlights: Array<{ node: GraphNode; connections: number }>
+}

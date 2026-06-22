@@ -129,6 +129,14 @@ async fn main() -> Result<()> {
         kg_llm,
         registry: Arc::new(registry),
         auth_token: config.server.auth_token.clone(),
+        auth_password_hash: config.server.auth_password_hash.clone(),
+        session_cookie_secure: config.server.session_cookie_secure.unwrap_or_else(|| {
+            config
+                .server
+                .public_base_url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("https://"))
+        }),
         public_base_url: config.server.public_base_url.clone(),
         system_prompt: config.llm.system_prompt.clone(),
         max_agent_iterations,
@@ -208,6 +216,9 @@ fn override_config_from_env(config: &mut AppConfig) {
 
     if let Ok(val) = env::var("JOSSIE_SERVER_AUTH_TOKEN") {
         config.server.auth_token = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_SERVER_AUTH_PASSWORD_HASH") {
+        config.server.auth_password_hash = val;
     }
     if let Ok(val) = env::var("JOSSIE_SERVER_PUBLIC_BASE_URL") {
         let trimmed = val.trim();

@@ -1,13 +1,296 @@
-import React from 'react';
-import { AppProvider } from './context/AppContext';
-import { Layout } from './components/layout/Layout';
+import { FormEvent, useEffect, useMemo, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import {
+  addAccount,
+  buildWebSocketUrl,
+  cancelConversation,
+  deleteAccount,
+  fetchGraph,
+  getDashboard,
+  getMessages,
+  getSession,
+  listAccounts,
+  listActivity,
+  listConversations,
+  listMemories,
+  listOnboarding,
+  login,
+  logout,
+  uploadFile,
+} from './api'
+import type { ApiConfig } from './api'
+import type {
+  Account,
+  ActivityEvent,
+  Conversation,
+  Dashboard,
+  GraphNode,
+  Memory,
+  Message,
+  OnboardingStatus,
+} from './types'
+import { KnowledgeGraph } from './components/KnowledgeGraph'
 
-const App: React.FC = () => {
-  return (
-    <AppProvider>
-      <Layout />
-    </AppProvider>
-  );
-};
+const api: ApiConfig = { baseUrl: '', token: '' }
+type Page = 'overview' | 'chat' | 'memories' | 'knowledge' | 'activity' | 'connections'
 
-export default App;
+const formatDate = (value?: string | null) => {
+  if (!value) return 'Not scheduled'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+}
+
+const relativeDate = (value?: string | null) => {
+  if (!value) return 'Recently'
+  const delta = new Date(value).getTime() - Date.now()
+  const minutes = Math.round(delta / 60_000)
+  if (Math.abs(minutes) < 60) return new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(minutes, 'minute')
+  const hours = Math.round(minutes / 60)
+  if (Math.abs(hours) < 48) return new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(hours, 'hour')
+  return new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(Math.round(hours / 24), 'day')
+}
+
+const initials = (name: string) => name.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase()
+
+export default function App() {
+  const [authenticated, setAuthenticated] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    getSession(api).then((session) => setAuthenticated(session.authenticated)).catch(() => setAuthenticated(false))
+  }, [])
+
+  if (authenticated === null) return <div className="boot-screen">Loading Jossie…</div>
+  if (!authenticated) return <Login onAuthenticated={() => setAuthenticated(true)} />
+  return <Workspace onLogout={() => setAuthenticated(false)} />
+}
+
+function Login({ onAuthenticated }: { onAuthenticated: () => void }) {
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    setSubmitting(true)
+    setError(null)
+    try {
+      await login(api, password)
+      onAuthenticated()
+    } catch {
+      setError('The password was not accepted.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return <main className="login-page">
+    <section className="login-panel">
+      <div className="brand-lockup"><span className="brand-orb">J</span><span>Jossie</span></div>
+      <p className="eyebrow">PRIVATE COMPANION</p>
+      <h1>Your thinking space,<br />kept private.</h1>
+      <p className="muted-copy">Sign in to continue to Jossie’s memories, knowledge, and current work.</p>
+      <form onSubmit={submit} className="login-form">
+        <label>Password<input autoFocus type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" /></label>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <button className="button primary full" disabled={submitting || !password}>{submitting ? 'Signing in…' : 'Enter Jossie'}</button>
+      </form>
+      <p className="login-note">This is a private, single-owner workspace.</p>
+    </section>
+    <div className="login-art" aria-hidden="true"><div className="art-ring ring-one" /><div className="art-ring ring-two" /><div className="art-core" /></div>
+  </main>
+}
+
+function Workspace({ onLogout }: { onLogout: () => void }) {
+  const [page, setPage] = useState<Page>('overview')
+  const [dashboard, setDashboard] = useState<Dashboard | null>(null)
+  const [conversations, setConversations] = useState<Conversation[]>([])
+  const [error, setError] = useState<string | null>(null)
+
+  const refresh = async () => {
+    try {
+      const [nextDashboard, nextConversations] = await Promise.all([getDashboard(api), listConversations(api)])
+      setDashboard(nextDashboard)
+      setConversations(nextConversations)
+      setError(null)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Unable to load the workspace.')
+    }
+  }
+
+  useEffect(() => { void refresh() }, [])
+  useEffect(() => {
+    const socket = new WebSocket(buildWebSocketUrl(api, '/api/events'))
+    socket.onmessage = () => { void refresh() }
+    return () => socket.close()
+  }, [])
+
+  const signOut = async () => {
+    try { await logout(api) } finally { onLogout() }
+  }
+
+  const navigation: Array<[Page, string, string]> = [
+    ['overview', 'Overview', '◌'], ['chat', 'Chat', '✦'], ['memories', 'Memories', '◫'],
+    ['knowledge', 'Knowledge', '⌘'], ['activity', 'Activity', '↗'], ['connections', 'Connections', '◎'],
+  ]
+
+  return <div className="app-frame">
+    <aside className="sidebar-new">
+      <button className="brand-lockup brand-button" onClick={() => setPage('overview')}><span className="brand-orb">J</span><span>Jossie</span></button>
+      <nav className="nav-list" aria-label="Workspace navigation">
+        {navigation.map(([id, label, icon]) => <button key={id} onClick={() => setPage(id)} className={page === id ? 'nav-item selected' : 'nav-item'}><span>{icon}</span>{label}</button>)}
+      </nav>
+      <div className="sidebar-foot">
+        <div className="status-line"><i />Private workspace</div>
+        <button className="text-button" onClick={signOut}>Sign out</button>
+      </div>
+    </aside>
+    <main className="main-stage">
+      {error && <div className="toast-error">{error}<button onClick={() => setError(null)}>×</button></div>}
+      {page === 'overview' && <Overview dashboard={dashboard} onNavigate={setPage} />}
+      {page === 'chat' && <Chat conversations={conversations} onRefresh={refresh} />}
+      {page === 'memories' && <Memories />}
+      {page === 'knowledge' && <Knowledge />}
+      {page === 'activity' && <Activity />}
+      {page === 'connections' && <Connections />}
+    </main>
+  </div>
+}
+
+function Overview({ dashboard, onNavigate }: { dashboard: Dashboard | null; onNavigate: (page: Page) => void }) {
+  const hour = new Date().getHours()
+  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
+  if (!dashboard) return <PageLoading title={`${greeting}.`} />
+  return <section className="page overview-page">
+    <header className="page-head overview-head"><div><p className="eyebrow">YOUR PRIVATE COMPANION</p><h1>{greeting}.</h1><p className="muted-copy">Here’s the shape of your world in Jossie right now.</p></div><button className="button primary" onClick={() => onNavigate('chat')}>Ask Jossie <span>→</span></button></header>
+    <section className="metric-grid">
+      <Metric label="Memories" value={dashboard.stats.memories} detail={`${dashboard.stats.prompt_ready_memories} in active context`} mark="◫" />
+      <Metric label="Knowledge" value={dashboard.stats.knowledge_nodes} detail={`${dashboard.stats.knowledge_edges} relationships`} mark="⌘" />
+      <Metric label="Current work" value={dashboard.stats.pending_tasks} detail="scheduled items" mark="◌" />
+      <Metric label="Recent activity" value={dashboard.recent_activity.length} detail="latest moments" mark="↗" />
+    </section>
+    <div className="overview-grid">
+      <Panel title="What Jossie remembers" action="Browse memories" onAction={() => onNavigate('memories')} className="wide-panel">
+        <div className="memory-preview-grid">{dashboard.recent_memories.length ? dashboard.recent_memories.map((memory) => <MemoryCard key={memory.key} memory={memory} compact />) : <Empty copy="No memories yet. The details that matter will begin to appear here." />}</div>
+      </Panel>
+      <Panel title="Recent activity" action="View timeline" onAction={() => onNavigate('activity')}>
+        <ActivityList events={dashboard.recent_activity} />
+      </Panel>
+      <Panel title="Knowledge highlights" action="Open knowledge" onAction={() => onNavigate('knowledge')}>
+        <div className="highlight-list">{dashboard.graph_highlights.length ? dashboard.graph_highlights.map(({ node, connections }) => <div className="highlight-row" key={node.id}><span className="node-avatar">{initials(node.label)}</span><div><strong>{node.label}</strong><small>{node.node_type}</small></div><span>{connections}</span></div>) : <Empty copy="The knowledge graph will grow as Jossie learns durable relationships." />}</div>
+      </Panel>
+      <Panel title="Coming up">
+        <div className="task-list">{dashboard.upcoming_tasks.length ? dashboard.upcoming_tasks.map((task) => <div className="task-row" key={task.id}><span className="task-dot" /><div><strong>{task.task_type.replace(/_/g, ' ')}</strong><small>{task.schedule_type} · {formatDate(task.next_run_at)}</small></div></div>) : <Empty copy="No scheduled work is waiting." />}</div>
+      </Panel>
+    </div>
+  </section>
+}
+
+function Metric({ label, value, detail, mark }: { label: string; value: number; detail: string; mark: string }) {
+  return <article className="metric-card"><span className="metric-mark">{mark}</span><p>{label}</p><strong>{value}</strong><small>{detail}</small></article>
+}
+
+function Chat({ conversations, onRefresh }: { conversations: Conversation[]; onRefresh: () => Promise<void> }) {
+  const [activeId, setActiveId] = useState<string | null>(conversations[0]?.id ?? null)
+  const [messages, setMessages] = useState<Message[]>([])
+  const [input, setInput] = useState('')
+  const [sending, setSending] = useState(false)
+  const [files, setFiles] = useState<Array<{ id: string; name: string }>>([])
+  const [activity, setActivity] = useState<string | null>(null)
+
+  useEffect(() => { if (activeId) getMessages(api, activeId, 100).then(setMessages).catch(() => setMessages([])); else setMessages([]) }, [activeId])
+
+  const attach = async (file?: File) => {
+    if (!file) return
+    const uploaded = await uploadFile(api, file)
+    setFiles((prev) => [...prev, { id: uploaded.file_id, name: uploaded.name }])
+  }
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    const content = input.trim()
+    if (!content || sending) return
+    setInput(''); setSending(true); setActivity('Jossie is working…')
+    setMessages((prev) => [...prev, { id: `local-${Date.now()}`, role: 'user', content, created_at: new Date().toISOString() }])
+    const socket = new WebSocket(buildWebSocketUrl(api, '/api/chat/stream'))
+    let conversationId = activeId
+    socket.onopen = () => socket.send(JSON.stringify({ message: content, ...(conversationId ? { conversation_id: conversationId } : {}), ...(files.length ? { file_ids: files.map((file) => file.id) } : {}) }))
+    socket.onmessage = (event) => {
+      const payload = JSON.parse(event.data) as Record<string, string | number | boolean | undefined>
+      if (payload.type === 'run_started' && typeof payload.conversation_id === 'string') { conversationId = payload.conversation_id; setActiveId(conversationId) }
+      if (payload.type === 'assistant_thinking') setActivity('Jossie is considering the next step…')
+      if (payload.type === 'tool_started') setActivity(`Using ${payload.tool ?? 'a capability'}…`)
+      const delta = payload.content
+      if (payload.type === 'assistant_delta' && typeof delta === 'string') setMessages((prev) => {
+        const last = prev[prev.length - 1]
+        if (last?.id === 'streaming') return [...prev.slice(0, -1), { ...last, content: last.content + delta }]
+        return [...prev, { id: 'streaming', role: 'assistant', content: delta, created_at: new Date().toISOString() }]
+      })
+      if (payload.type === 'run_completed' || payload.type === 'error' || payload.type === 'run_cancelled') { setSending(false); setActivity(null); socket.close(); setFiles([]); void onRefresh(); if (conversationId) void getMessages(api, conversationId, 100).then(setMessages) }
+    }
+    socket.onerror = () => { setSending(false); setActivity('Connection lost. Try again.'); socket.close() }
+  }
+
+  return <section className="page chat-page">
+    <header className="page-head"><div><p className="eyebrow">CONVERSATION</p><h1>Talk with Jossie.</h1></div><button className="button secondary" onClick={() => setActiveId(null)}>New conversation</button></header>
+    <div className="chat-layout">
+      <aside className="thread-list"><p className="list-label">RECENT CONVERSATIONS</p>{conversations.map((conversation) => <button key={conversation.id} className={conversation.id === activeId ? 'thread selected' : 'thread'} onClick={() => setActiveId(conversation.id)}><strong>{conversation.title || 'Untitled conversation'}</strong><small>{relativeDate(conversation.updated_at)}</small></button>)}</aside>
+      <div className="chat-panel">
+        <div className="message-feed">{messages.length ? messages.map((message) => <article key={message.id} className={`message ${message.role}`}><span className="message-author">{message.role === 'user' ? 'You' : 'Jossie'}</span><div className="message-body"><ReactMarkdown>{message.content}</ReactMarkdown></div></article>) : <div className="chat-empty"><span className="brand-orb">J</span><h2>What’s on your mind?</h2><p>Jossie keeps the thread, the context, and the useful details together.</p></div>}</div>
+        <form className="composer-new" onSubmit={submit}><div className="attachment-row">{files.map((file) => <span key={file.id} className="attachment">{file.name}<button type="button" onClick={() => setFiles((prev) => prev.filter((item) => item.id !== file.id))}>×</button></span>)}</div><textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder="Message Jossie…" rows={2} /><div className="composer-foot"><label className="attach-control">Attach<input type="file" onChange={(e) => void attach(e.target.files?.[0])} /></label><span>{activity}</span><button className="button primary" disabled={sending || !input.trim()}>{sending ? 'Working…' : 'Send'}</button></div></form>
+        {sending && activeId && <button className="cancel-run" onClick={() => void cancelConversation(api, activeId)}>Stop current run</button>}
+      </div>
+    </div>
+  </section>
+}
+
+function Memories() {
+  const [memories, setMemories] = useState<Memory[]>([])
+  const [query, setQuery] = useState('')
+  const [scope, setScope] = useState('all')
+  useEffect(() => { const timer = window.setTimeout(() => { void listMemories(api, query, scope).then(setMemories) }, 180); return () => clearTimeout(timer) }, [query, scope])
+  return <section className="page"><header className="page-head"><div><p className="eyebrow">LONG-TERM CONTEXT</p><h1>Memories.</h1><p className="muted-copy">The durable details Jossie can bring forward when they matter.</p></div></header><div className="toolbar"><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search memories" /><select value={scope} onChange={(e) => setScope(e.target.value)}><option value="all">All memories</option><option value="chat">Chat context</option><option value="event">Event context</option><option value="both">Chat + event</option><option value="none">Archive only</option></select></div><div className="memory-list">{memories.map((memory) => <MemoryCard key={memory.key} memory={memory} />)}{!memories.length && <Empty copy="No memories match this view." />}</div></section>
+}
+
+function MemoryCard({ memory, compact = false }: { memory: Memory; compact?: boolean }) {
+  const tags = memory.tags.split(',').map((tag) => tag.trim()).filter(Boolean)
+  return <article className={compact ? 'memory-card compact' : 'memory-card'}><div className="memory-card-head"><div><p className="memory-key">{memory.key}</p><div className="tag-row">{tags.slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div></div><span className="scope-badge">{memory.prompt_scope}</span></div><p>{memory.content}</p><footer><span>Importance {memory.importance}</span><span>{relativeDate(memory.updated_at)}</span></footer></article>
+}
+
+function Knowledge() {
+  const [nodes, setNodes] = useState<GraphNode[]>([])
+  useEffect(() => { void fetchGraph(api, 500).then((data) => setNodes(data.nodes)) }, [])
+  const types = useMemo(() => new Set(nodes.map((node) => node.node_type)).size, [nodes])
+  return <section className="page knowledge-page"><header className="page-head"><div><p className="eyebrow">CONNECTED CONTEXT</p><h1>Knowledge.</h1><p className="muted-copy">The people, projects, and relationships that give Jossie better context.</p></div><div className="knowledge-stats"><span>{nodes.length} entities</span><span>{types} types</span></div></header><div className="knowledge-canvas"><KnowledgeGraph apiConfig={api} /></div></section>
+}
+
+function Activity() {
+  const [events, setEvents] = useState<ActivityEvent[]>([])
+  const [cursor, setCursor] = useState<string | null>(null)
+  const load = async (before?: string) => { const response = await listActivity(api, before); setEvents((previous) => before ? [...previous, ...response.items] : response.items); setCursor(response.next_cursor) }
+  useEffect(() => { void load() }, [])
+  return <section className="page"><header className="page-head"><div><p className="eyebrow">JOSSIE AT WORK</p><h1>Activity.</h1><p className="muted-copy">A clear record of completed work and meaningful updates, without exposing private reasoning.</p></div></header><div className="activity-page"><ActivityList events={events} expanded />{cursor && <button className="button secondary" onClick={() => void load(cursor)}>Load more</button>}</div></section>
+}
+
+function Connections() {
+  const [accounts, setAccounts] = useState<Account[]>([])
+  const [onboarding, setOnboarding] = useState<OnboardingStatus[]>([])
+  const [form, setForm] = useState({ integration: 'email', name: '', json: '{}' })
+  const refresh = () => Promise.all([listAccounts(api).then(setAccounts), listOnboarding(api).then(setOnboarding)])
+  useEffect(() => { void refresh() }, [])
+  const submit = async (event: FormEvent) => { event.preventDefault(); await addAccount(api, { integration: form.integration, name: form.name || `${form.integration} account`, config: JSON.parse(form.json) }); setForm({ integration: 'email', name: '', json: '{}' }); await refresh() }
+  return <section className="page"><header className="page-head"><div><p className="eyebrow">CONNECTED SERVICES</p><h1>Connections.</h1><p className="muted-copy">Manage the services that let Jossie do useful work beyond the conversation.</p></div><button className="button primary" onClick={() => window.open('/setup/google', '_blank')}>Connect Google</button></header><div className="connections-grid"><Panel title="Connection status"><div className="integration-list">{onboarding.map((item) => <div key={item.name} className="integration-row"><span className={item.status === 'ready' ? 'ready-dot' : 'idle-dot'} /><div><strong>{item.name}</strong><small>{item.status}</small></div></div>)}</div></Panel><Panel title="Saved accounts"><div className="account-list">{accounts.length ? accounts.map((account) => <div className="account-row" key={account.id}><div><strong>{account.name}</strong><small>{account.integration}</small></div><button className="text-button danger" onClick={async () => { await deleteAccount(api, account.id); await refresh() }}>Remove</button></div>) : <Empty copy="No accounts configured." />}</div></Panel><Panel title="Add account" className="add-account"><form className="connection-form" onSubmit={submit}><label>Integration<select value={form.integration} onChange={(e) => setForm({ ...form, integration: e.target.value })}><option value="email">Email</option><option value="google">Google</option></select></label><label>Name<input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Work inbox" /></label><label>Configuration JSON<textarea value={form.json} onChange={(e) => setForm({ ...form, json: e.target.value })} rows={5} /></label><button className="button secondary">Save connection</button></form></Panel></div></section>
+}
+
+function Panel({ title, action, onAction, children, className = '' }: { title: string; action?: string; onAction?: () => void; children: React.ReactNode; className?: string }) {
+  return <section className={`panel-new ${className}`}><div className="panel-head"><h2>{title}</h2>{action && <button className="text-button" onClick={onAction}>{action} →</button>}</div>{children}</section>
+}
+
+function ActivityList({ events, expanded = false }: { events: ActivityEvent[]; expanded?: boolean }) {
+  if (!events.length) return <Empty copy="Nothing has been recorded yet." />
+  return <div className={expanded ? 'activity-list expanded' : 'activity-list'}>{events.map((event) => <article className="activity-row" key={event.id}><span className={`activity-symbol ${event.tone}`}>{event.category === 'tool' ? '✦' : event.category === 'background' ? '◌' : event.category === 'reflection' ? '↻' : '·'}</span><div><strong>{event.title}</strong>{event.detail && <p>{event.detail}</p>}</div><time>{relativeDate(event.created_at)}</time></article>)}</div>
+}
+
+function Empty({ copy }: { copy: string }) { return <div className="empty-copy">{copy}</div> }
+function PageLoading({ title }: { title: string }) { return <section className="page"><header className="page-head"><div><p className="eyebrow">YOUR PRIVATE COMPANION</p><h1>{title}</h1></div></header><div className="loading-lines"><i /><i /><i /></div></section> }

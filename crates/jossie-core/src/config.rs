@@ -26,6 +26,14 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub auth_token: String,
+    /// Argon2 PHC password hash used by the browser login flow. The legacy
+    /// bearer token remains available for automation and backwards compatibility.
+    #[serde(default)]
+    pub auth_password_hash: String,
+    /// Override the Secure flag on the browser session cookie. When omitted,
+    /// HTTPS public URLs use secure cookies and local HTTP development does not.
+    #[serde(default)]
+    pub session_cookie_secure: Option<bool>,
     // Public external base URL used for OAuth callback generation.
     #[serde(default)]
     pub public_base_url: Option<String>,

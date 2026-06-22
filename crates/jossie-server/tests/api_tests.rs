@@ -1,3 +1,4 @@
+use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -24,6 +25,8 @@ async fn setup_app() -> axum::Router {
         kg_llm: LlmClient::new("http://localhost:8080", "key", "model"),
         registry: Arc::new(IntegrationRegistry::new()),
         auth_token: "test-token".to_string(),
+        auth_password_hash: test_password_hash(),
+        session_cookie_secure: false,
         public_base_url: None,
         system_prompt: "test prompt".to_string(),
         max_agent_iterations: 5,
@@ -47,6 +50,14 @@ async fn setup_app() -> axum::Router {
     });
 
     router(state)
+}
+
+fn test_password_hash() -> String {
+    let salt = SaltString::encode_b64(b"jossie-test-salt").unwrap();
+    Argon2::default()
+        .hash_password(b"correct-horse", &salt)
+        .unwrap()
+        .to_string()
 }
 
 #[tokio::test]
@@ -122,6 +133,65 @@ async fn test_auth_middleware_query_token() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn login_creates_a_cookie_session_for_protected_routes() {
+    let app = setup_app().await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"password":"correct-horse"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(cookie.contains("HttpOnly"));
+    let cookie_pair = cookie.split(';').next().unwrap().to_string();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/conversations")
+                .header("Cookie", cookie_pair)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn dashboard_is_available_to_authenticated_clients() {
+    let app = setup_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/dashboard")
+                .header("Authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["stats"]["memories"], 0);
 }
 
 #[tokio::test]

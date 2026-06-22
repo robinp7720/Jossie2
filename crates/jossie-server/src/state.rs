@@ -19,6 +19,8 @@ pub struct AppState {
     pub kg_llm: LlmClient,
     pub registry: Arc<IntegrationRegistry>,
     pub auth_token: String,
+    pub auth_password_hash: String,
+    pub session_cookie_secure: bool,
     pub public_base_url: Option<String>,
     pub system_prompt: String,
     pub max_agent_iterations: usize,
@@ -38,7 +40,12 @@ pub struct AppState {
 
 impl AppState {
     pub fn publish_event(&self, event: ServerEvent) {
+        let activity_db = self.db.clone();
+        let activity_event = event.clone();
         let _ = self.event_tx.send(event);
+        tokio::spawn(async move {
+            crate::events::persist_activity_event(&activity_db, &activity_event).await;
+        });
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<ServerEvent> {

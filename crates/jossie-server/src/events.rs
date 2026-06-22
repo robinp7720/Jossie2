@@ -145,6 +145,136 @@ pub fn preview_text(content: &str, max_len: usize) -> String {
     }
 }
 
+/// Persist a compact, owner-visible activity record without leaking private
+/// prompts, chain-of-thought, raw tool arguments, or raw tool output.
+pub async fn persist_activity_event(db: &jossie_db::Database, event: &ServerEvent) {
+    let summary = match event {
+        ServerEvent::RunStarted {
+            conversation_id,
+            run_id,
+            scheduled,
+        } => Some((
+            Some(*conversation_id),
+            Some(run_id.as_str()),
+            "run",
+            if *scheduled {
+                "Started scheduled work"
+            } else {
+                "Started a conversation"
+            },
+            None,
+            "normal",
+        )),
+        ServerEvent::ToolCalled {
+            conversation_id,
+            run_id,
+            tool,
+            ..
+        } => Some((
+            Some(*conversation_id),
+            Some(run_id.as_str()),
+            "tool",
+            "Used a capability",
+            Some(tool.as_str()),
+            "normal",
+        )),
+        ServerEvent::ToolFinished {
+            conversation_id,
+            run_id,
+            tool,
+            is_error,
+            ..
+        } => Some((
+            Some(*conversation_id),
+            Some(run_id.as_str()),
+            "tool",
+            if *is_error {
+                "A capability needs attention"
+            } else {
+                "Completed a capability"
+            },
+            Some(tool.as_str()),
+            if *is_error { "warn" } else { "success" },
+        )),
+        ServerEvent::ReflectionRetry {
+            conversation_id,
+            run_id,
+            ..
+        } => Some((
+            Some(*conversation_id),
+            Some(run_id.as_str()),
+            "reflection",
+            "Refined a response",
+            None,
+            "normal",
+        )),
+        ServerEvent::RunCompleted {
+            conversation_id,
+            run_id,
+        } => Some((
+            Some(*conversation_id),
+            Some(run_id.as_str()),
+            "run",
+            "Finished a conversation",
+            None,
+            "success",
+        )),
+        ServerEvent::RunCancelled {
+            conversation_id,
+            run_id,
+        } => Some((
+            Some(*conversation_id),
+            Some(run_id.as_str()),
+            "run",
+            "Cancelled a conversation",
+            None,
+            "warn",
+        )),
+        ServerEvent::CancelRequested { conversation_id } => Some((
+            Some(*conversation_id),
+            None,
+            "run",
+            "Cancellation requested",
+            None,
+            "warn",
+        )),
+        ServerEvent::BackgroundNotification {
+            conversation_id,
+            source,
+            ..
+        } => Some((
+            Some(*conversation_id),
+            None,
+            "background",
+            "New background update",
+            Some(source.as_str()),
+            "success",
+        )),
+        ServerEvent::Error {
+            conversation_id,
+            run_id,
+            ..
+        } => Some((
+            Some(*conversation_id),
+            run_id.as_deref(),
+            "error",
+            "A run needs attention",
+            None,
+            "warn",
+        )),
+        _ => None,
+    };
+
+    if let Some((conversation_id, run_id, category, title, detail, tone)) = summary {
+        if let Err(error) = db
+            .record_activity_event(conversation_id, run_id, category, title, detail, tone)
+            .await
+        {
+            tracing::warn!("Failed to persist dashboard activity: {error}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::preview_text;

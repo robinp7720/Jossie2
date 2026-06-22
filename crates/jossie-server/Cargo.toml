@@ -26,3 +26,5 @@ urlencoding = { workspace = true }
 url = { workspace = true }
 regex = { workspace = true }
 subtle = { workspace = true }
+argon2 = { workspace = true }
+sha2 = { workspace = true }

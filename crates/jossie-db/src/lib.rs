@@ -1,5 +1,5 @@
 use anyhow::Context;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use jossie_core::types::{Conversation, Message, Role};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::collections::{HashMap, HashSet};
@@ -562,7 +562,9 @@ impl Database {
     ) -> anyhow::Result<Vec<MemoryEntryWithMetadata>> {
         let limit = limit.max(1).min(500);
         let rows = sqlx::query_as::<_, MemoryEntryMetadataRow>(
-            "SELECT m.key, m.content, m.tags, mm.created_at, mm.updated_at 
+            "SELECT m.key, m.content, m.tags, mm.created_at, mm.updated_at,
+                    COALESCE(mm.prompt_scope, 'none') AS prompt_scope,
+                    COALESCE(mm.importance, 0) AS importance
              FROM memory m 
              LEFT JOIN memory_metadata mm ON m.key = mm.key 
              ORDER BY mm.updated_at DESC
@@ -580,8 +582,195 @@ impl Database {
                 tags: r.tags,
                 created_at: r.created_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
                 updated_at: r.updated_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
+                prompt_scope: r.prompt_scope,
+                importance: r.importance,
             })
             .collect())
+    }
+
+    pub async fn memory_list_for_dashboard(
+        &self,
+        query: Option<&str>,
+        prompt_scope: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemoryEntryWithMetadata>> {
+        let limit = limit.max(1).min(100);
+        let query = query.unwrap_or("").trim();
+        let prompt_scope = prompt_scope.unwrap_or("").trim();
+        let has_query = !query.is_empty();
+        let has_scope = !prompt_scope.is_empty() && prompt_scope != "all";
+        let search = format!("%{query}%");
+
+        let rows = sqlx::query_as::<_, MemoryEntryMetadataRow>(
+            "SELECT m.key, m.content, m.tags, mm.created_at, mm.updated_at,
+                    COALESCE(mm.prompt_scope, 'none') AS prompt_scope,
+                    COALESCE(mm.importance, 0) AS importance
+             FROM memory m
+             LEFT JOIN memory_metadata mm ON m.key = mm.key
+             WHERE (? = 0 OR m.key LIKE ? OR m.content LIKE ? OR m.tags LIKE ?)
+               AND (? = 0 OR COALESCE(mm.prompt_scope, 'none') = ?)
+             ORDER BY mm.updated_at DESC
+             LIMIT ?",
+        )
+        .bind(if has_query { 1 } else { 0 })
+        .bind(&search)
+        .bind(&search)
+        .bind(&search)
+        .bind(if has_scope { 1 } else { 0 })
+        .bind(prompt_scope)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| MemoryEntryWithMetadata {
+                key: r.key,
+                content: r.content,
+                tags: r.tags,
+                created_at: r.created_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
+                updated_at: r.updated_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
+                prompt_scope: r.prompt_scope,
+                importance: r.importance,
+            })
+            .collect())
+    }
+
+    pub async fn memory_stats(&self) -> anyhow::Result<MemoryStats> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            total: i64,
+            prompt_ready: i64,
+        }
+
+        let row = sqlx::query_as::<_, Row>(
+            "SELECT COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN COALESCE(mm.prompt_scope, 'none') != 'none' THEN 1 ELSE 0 END), 0) AS prompt_ready
+             FROM memory m
+             LEFT JOIN memory_metadata mm ON m.key = mm.key",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(MemoryStats {
+            total: row.total,
+            prompt_ready: row.prompt_ready,
+        })
+    }
+
+    pub async fn create_auth_session(&self, token_hash: &str) -> anyhow::Result<AuthSession> {
+        let session = AuthSession {
+            id: Uuid::new_v4().to_string(),
+            token_hash: token_hash.to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            expires_at: (Utc::now() + Duration::days(30)).to_rfc3339(),
+        };
+        sqlx::query(
+            "INSERT INTO auth_sessions (id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&session.id)
+        .bind(&session.token_hash)
+        .bind(&session.expires_at)
+        .bind(&session.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(session)
+    }
+
+    pub async fn has_valid_auth_session(&self, token_hash: &str) -> anyhow::Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let found = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM auth_sessions WHERE token_hash = ? AND expires_at > ? LIMIT 1",
+        )
+        .bind(token_hash)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(found.is_some())
+    }
+
+    pub async fn revoke_auth_session(&self, token_hash: &str) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM auth_sessions WHERE token_hash = ?")
+            .bind(token_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn prune_expired_auth_sessions(&self) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM auth_sessions WHERE expires_at <= ?")
+            .bind(Utc::now().to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn record_activity_event(
+        &self,
+        conversation_id: Option<Uuid>,
+        run_id: Option<&str>,
+        category: &str,
+        title: &str,
+        detail: Option<&str>,
+        tone: &str,
+    ) -> anyhow::Result<ActivityEvent> {
+        let event = ActivityEvent {
+            id: Uuid::new_v4().to_string(),
+            conversation_id,
+            run_id: run_id.map(ToOwned::to_owned),
+            category: category.to_string(),
+            title: title.to_string(),
+            detail: detail.map(ToOwned::to_owned),
+            tone: tone.to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        sqlx::query(
+            "INSERT INTO activity_events (id, conversation_id, run_id, category, title, detail, tone, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&event.id)
+        .bind(event.conversation_id.map(|id| id.to_string()))
+        .bind(&event.run_id)
+        .bind(&event.category)
+        .bind(&event.title)
+        .bind(&event.detail)
+        .bind(&event.tone)
+        .bind(&event.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(event)
+    }
+
+    pub async fn list_activity_events(
+        &self,
+        limit: usize,
+        before: Option<&str>,
+    ) -> anyhow::Result<Vec<ActivityEvent>> {
+        let limit = limit.max(1).min(100);
+        let before = before.unwrap_or("");
+        let rows = sqlx::query_as::<_, ActivityEventRow>(
+            "SELECT id, conversation_id, run_id, category, title, detail, tone, created_at
+             FROM activity_events
+             WHERE (? = '' OR created_at < ?)
+             ORDER BY created_at DESC
+             LIMIT ?",
+        )
+        .bind(before)
+        .bind(before)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn graph_counts(&self) -> anyhow::Result<(i64, i64)> {
+        let nodes = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM graph_nodes")
+            .fetch_one(&self.pool)
+            .await?;
+        let edges = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM graph_edges")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok((nodes, edges))
     }
 
     pub async fn memory_prompt_context(
@@ -1316,6 +1505,23 @@ impl Database {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    pub async fn list_upcoming_scheduled_tasks(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ScheduledTask>> {
+        let rows = sqlx::query_as::<_, ScheduledTaskRow>(
+            "SELECT id, conversation_id, task_type, task_data, schedule_type, schedule_value, status, next_run_at, last_run_at, run_count, max_runs, created_at, updated_at, last_error
+             FROM scheduled_tasks
+             WHERE status = 'pending'
+             ORDER BY next_run_at IS NULL, next_run_at ASC
+             LIMIT ?",
+        )
+        .bind(limit.max(1).min(20) as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
     pub async fn mark_task_running_if_pending(&self, id: &str) -> anyhow::Result<bool> {
         let now_str = Utc::now().to_rfc3339();
         let result = sqlx::query(
@@ -1959,6 +2165,34 @@ pub struct MemoryEntryWithMetadata {
     pub tags: String,
     pub created_at: String,
     pub updated_at: String,
+    pub prompt_scope: String,
+    pub importance: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemoryStats {
+    pub total: i64,
+    pub prompt_ready: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthSession {
+    pub id: String,
+    pub token_hash: String,
+    pub created_at: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActivityEvent {
+    pub id: String,
+    pub conversation_id: Option<Uuid>,
+    pub run_id: Option<String>,
+    pub category: String,
+    pub title: String,
+    pub detail: Option<String>,
+    pub tone: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1985,6 +2219,35 @@ struct MemoryEntryMetadataRow {
     tags: String,
     created_at: Option<String>,
     updated_at: Option<String>,
+    prompt_scope: String,
+    importance: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct ActivityEventRow {
+    id: String,
+    conversation_id: Option<String>,
+    run_id: Option<String>,
+    category: String,
+    title: String,
+    detail: Option<String>,
+    tone: String,
+    created_at: String,
+}
+
+impl From<ActivityEventRow> for ActivityEvent {
+    fn from(row: ActivityEventRow) -> Self {
+        Self {
+            id: row.id,
+            conversation_id: row.conversation_id.and_then(|id| id.parse().ok()),
+            run_id: row.run_id,
+            category: row.category,
+            title: row.title,
+            detail: row.detail,
+            tone: row.tone,
+            created_at: row.created_at,
+        }
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -2729,6 +2992,49 @@ mod tests {
                 .iter()
                 .any(|n| n.node.id == "robin" && n.direction == "incoming")
         );
+    }
+
+    #[tokio::test]
+    async fn auth_sessions_can_be_created_and_revoked() {
+        let db = test_db().await;
+        db.create_auth_session("token-digest").await.unwrap();
+        assert!(db.has_valid_auth_session("token-digest").await.unwrap());
+        db.revoke_auth_session("token-digest").await.unwrap();
+        assert!(!db.has_valid_auth_session("token-digest").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn activity_and_memory_dashboard_queries_return_metadata() {
+        let db = test_db().await;
+        let conversation = db.create_conversation(Some("Dashboard")).await.unwrap();
+        db.memory_save_with_prompt_metadata(
+            "project.alpha",
+            "Alpha context",
+            "project",
+            Some("chat"),
+            Some(80),
+        )
+        .await
+        .unwrap();
+        db.record_activity_event(
+            Some(conversation.id),
+            Some("run-1"),
+            "run",
+            "Finished a conversation",
+            None,
+            "success",
+        )
+        .await
+        .unwrap();
+
+        let memories = db
+            .memory_list_for_dashboard(Some("alpha"), Some("chat"), 10)
+            .await
+            .unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].importance, 80);
+        assert_eq!(db.memory_stats().await.unwrap().prompt_ready, 1);
+        assert_eq!(db.list_activity_events(10, None).await.unwrap().len(), 1);
     }
 }
 

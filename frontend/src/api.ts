@@ -1,4 +1,4 @@
-import type { Account, Conversation, Message, OnboardingStatus } from './types'
+import type { Account, ActivityEvent, Conversation, Dashboard, Memory, Message, OnboardingStatus } from './types'
 
 export type ApiConfig = {
   baseUrl: string
@@ -33,6 +33,7 @@ export const request = async <T>(
 ): Promise<T> => {
   const response = await fetch(buildUrl(config, path), {
     ...options,
+    credentials: 'include',
     headers: {
       ...Object.fromEntries(buildHeaders(config, options).entries()),
       ...(options.headers ?? {}),
@@ -133,7 +134,7 @@ export const cancelConversation = (config: ApiConfig, conversationId: string) =>
   )
 
 export const buildWebSocketUrl = (config: ApiConfig, path: string) => {
-  const base = stripTrailingSlash(config.baseUrl)
+  const base = stripTrailingSlash(config.baseUrl || window.location.origin)
   const wsBase = base.startsWith('https://')
     ? base.replace('https://', 'wss://')
     : base.replace('http://', 'ws://')
@@ -146,4 +147,31 @@ export const fetchGraph = (config: ApiConfig, limit = 500) =>
   request<{ nodes: import('./types').GraphNode[]; edges: import('./types').GraphEdge[] }>(
     config,
     `/api/graph?limit=${limit}`,
+  )
+
+export const getSession = (config: ApiConfig) =>
+  request<{ authenticated: boolean }>(config, '/api/auth/session')
+
+export const login = (config: ApiConfig, password: string) =>
+  request<{ authenticated: boolean }>(config, '/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  })
+
+export const logout = (config: ApiConfig) =>
+  request<{ authenticated: boolean }>(config, '/api/auth/logout', { method: 'POST' })
+
+export const getDashboard = (config: ApiConfig) =>
+  request<Dashboard>(config, '/api/dashboard')
+
+export const listMemories = (config: ApiConfig, query = '', scope = 'all', limit = 50) =>
+  request<Memory[]>(
+    config,
+    `/api/memories?query=${encodeURIComponent(query)}&scope=${encodeURIComponent(scope)}&limit=${limit}`,
+  )
+
+export const listActivity = (config: ApiConfig, before?: string, limit = 30) =>
+  request<{ items: ActivityEvent[]; next_cursor: string | null }>(
+    config,
+    `/api/activity?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`,
   )

@@ -1,6 +1,8 @@
+pub mod auth;
 pub mod chat;
 pub mod config;
 pub mod conversations;
+pub mod dashboard;
 pub mod files;
 pub mod graph;
 pub mod health;
