@@ -233,6 +233,19 @@ impl Integration for MemoryIntegration {
                 }),
             },
             ToolDefinition {
+                name: "memory_delete".to_string(),
+                description: "Permanently delete one long-term memory by its exact key. Use only when the user explicitly asks to forget it."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string", "description": "Exact key of the memory to permanently delete"}
+                    },
+                    "required": ["key"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
                 name: "memory_generate_totp".to_string(),
                 description: "Generate the current TOTP code from a stored memory entry. The memory content can be a raw Base32 secret, an `otpauth://` URL, or structured JSON with fields such as `totp_secret`, `otpauth_url`, `totp_algorithm`, `totp_digits`, and `totp_period`."
                     .to_string(),
@@ -329,6 +342,18 @@ impl Integration for MemoryIntegration {
                     tags: entry.tags,
                 })?)
             }
+            "memory_delete" => {
+                #[derive(Deserialize)]
+                struct Args {
+                    key: String,
+                }
+                let args: Args = serde_json::from_str(arguments)?;
+                if self.db.memory_delete(&args.key).await? {
+                    Ok(format!("Deleted memory with key '{}'", args.key))
+                } else {
+                    anyhow::bail!("No memory found for key '{}'", args.key)
+                }
+            }
             "memory_generate_totp" => {
                 #[derive(Deserialize)]
                 struct Args {
@@ -414,9 +439,10 @@ mod tests {
     async fn tools_are_defined() {
         let mem = test_memory().await;
         let tools = mem.tools();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
         assert!(tools.iter().any(|t| t.name == "memory_save"));
         assert!(tools.iter().any(|t| t.name == "memory_get"));
+        assert!(tools.iter().any(|t| t.name == "memory_delete"));
         assert!(tools.iter().any(|t| t.name == "memory_generate_totp"));
         assert!(tools.iter().any(|t| t.name == "memory_search"));
         assert!(tools.iter().any(|t| t.name == "memory_list_keys"));
@@ -447,6 +473,33 @@ mod tests {
             .await
             .unwrap();
         assert!(search_result.contains("important info"));
+    }
+
+    #[tokio::test]
+    async fn deletes_memory_by_exact_key() {
+        let mem = test_memory().await;
+        mem.execute(
+            "memory_save",
+            r#"{"key":"obsolete","content":"remove me","tags":"test"}"#,
+        )
+        .await
+        .unwrap();
+
+        let result = mem
+            .execute("memory_delete", r#"{"key":"obsolete"}"#)
+            .await
+            .unwrap();
+        assert!(result.contains("Deleted memory"));
+        assert!(
+            mem.execute("memory_get", r#"{"key":"obsolete"}"#)
+                .await
+                .is_err()
+        );
+        assert!(
+            mem.execute("memory_delete", r#"{"key":"obsolete"}"#)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

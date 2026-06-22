@@ -462,6 +462,26 @@ impl Database {
         Ok(())
     }
 
+    /// Delete a memory entry and all metadata associated with its key.
+    ///
+    /// Returns `true` when a memory entry existed and was deleted.
+    pub async fn memory_delete(&self, key: &str) -> anyhow::Result<bool> {
+        let mut tx = self.pool.begin().await?;
+
+        let result = sqlx::query("DELETE FROM memory WHERE key = ?")
+            .bind(key)
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("DELETE FROM memory_metadata WHERE key = ?")
+            .bind(key)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn memory_prompt_metadata(
         &self,
         key: &str,
@@ -2564,6 +2584,31 @@ mod tests {
         let results = db.memory_search("updated").await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content, "updated content");
+    }
+
+    #[tokio::test]
+    async fn memory_delete_removes_entry_and_metadata() {
+        let db = test_db().await;
+        db.memory_save_with_prompt_metadata(
+            "obsolete",
+            "Remove this memory",
+            "test",
+            Some("chat"),
+            Some(50),
+        )
+        .await
+        .unwrap();
+
+        assert!(db.memory_delete("obsolete").await.unwrap());
+        assert!(db.get_memory("obsolete").await.unwrap().is_none());
+        assert!(
+            db.memory_prompt_metadata("obsolete")
+                .await
+                .unwrap()
+                .0
+                .is_none()
+        );
+        assert!(!db.memory_delete("obsolete").await.unwrap());
     }
 
     #[tokio::test]
