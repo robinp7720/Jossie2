@@ -7,6 +7,11 @@ import type { GraphEdge, GraphNode } from '../types'
 type KnowledgeGraphProps = { apiConfig: ApiConfig }
 type SimulationNode = GraphNode & d3.SimulationNodeDatum
 type SimulationLink = GraphEdge & d3.SimulationLinkDatum<SimulationNode>
+type GraphConnection = {
+  edge: GraphEdge
+  node: GraphNode
+  direction: 'outgoing' | 'incoming'
+}
 
 const INITIAL_NODE_LIMIT = 90
 const FILTERED_NODE_LIMIT = 150
@@ -14,6 +19,13 @@ const palette = ['#c8ee76', '#8fc7c3', '#b7a5f5', '#e7b773', '#e88886', '#7eaae5
 
 const shortLabel = (value: string, max = 24) =>
   value.length > max ? `${value.slice(0, max - 1)}…` : value
+
+const readableRelation = (relation: string) => relation
+  .trim()
+  .replace(/[_-]+/g, ' ')
+  .replace(/\s+/g, ' ')
+  .toLowerCase()
+  .replace(/^./, (letter) => letter.toUpperCase()) || 'Related to'
 
 export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
   const graphRef = useRef<HTMLDivElement>(null)
@@ -72,6 +84,22 @@ export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
     return Array.from(new Set(graph.nodes.map((node) => node.node_type || 'Unknown'))).slice(0, 8)
   }, [graph])
 
+  const selectedConnections = useMemo<GraphConnection[]>(() => {
+    if (!data || !selectedNode) return []
+    const nodesById = new Map(data.nodes.map((node) => [node.id, node]))
+    return data.edges.flatMap((edge) => {
+      if (edge.source_id === selectedNode.id) {
+        const node = nodesById.get(edge.target_id)
+        return node ? [{ edge, node, direction: 'outgoing' as const }] : []
+      }
+      if (edge.target_id === selectedNode.id) {
+        const node = nodesById.get(edge.source_id)
+        return node ? [{ edge, node, direction: 'incoming' as const }] : []
+      }
+      return []
+    }).sort((left, right) => left.node.label.localeCompare(right.node.label))
+  }, [data, selectedNode])
+
   useEffect(() => {
     if (!graphRef.current || !graph || viewport.width < 1 || viewport.height < 1) return
     const container = d3.select(graphRef.current)
@@ -92,7 +120,23 @@ export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
       .force('center', d3.forceCenter(width / 2, height / 2))
       .force('collide', d3.forceCollide().radius(20))
 
-    const linksSelection = root.append('g').attr('stroke', 'rgba(151, 169, 192, .28)').selectAll('line').data(links).join('line').attr('stroke-width', (edge) => Math.max(1, Math.sqrt(edge.weight || 1)))
+    const linksSelection = root.append('g')
+      .attr('stroke', 'rgba(151, 169, 192, .32)')
+      .selectAll('line')
+      .data(links)
+      .join('line')
+      .attr('stroke-width', (edge) => Math.max(1, Math.sqrt(edge.weight || 1)))
+    const linkLabels = root.append('g')
+      .attr('class', 'knowledge-link-labels')
+      .selectAll<SVGTextElement, SimulationLink>('text')
+      .data(links)
+      .join('text')
+      .text((edge) => shortLabel(readableRelation(edge.relation), 18))
+      .attr('text-anchor', 'middle')
+      .attr('dy', -5)
+      .attr('fill', '#aebbc8')
+      .attr('font-size', 8)
+      .attr('pointer-events', 'none')
     const nodeSelection = root.append('g').selectAll<SVGGElement, SimulationNode>('g').data(nodes).join('g').attr('class', 'knowledge-node').attr('tabindex', 0)
       .on('click', (event, node) => { event.stopPropagation(); setSelectedNode(node) })
       .on('keydown', (event, node) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedNode(node) } })
@@ -102,12 +146,21 @@ export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
         .on('end', (event, node) => { if (!event.active) simulation.alphaTarget(0); node.fx = null; node.fy = null }))
 
     nodeSelection.append('circle').attr('r', 8).attr('fill', (node) => colorScale.current(node.node_type || 'Unknown')).attr('stroke', '#0d1219').attr('stroke-width', 2)
-    if (nodes.length <= 45) {
-      nodeSelection.append('text').text((node) => shortLabel(node.label)).attr('x', 12).attr('y', 4).attr('fill', '#dce4d6').attr('font-size', 10).attr('pointer-events', 'none')
-    }
+    nodeSelection.append('text')
+      .text((node) => shortLabel(node.label))
+      .attr('x', 12)
+      .attr('y', 4)
+      .attr('fill', '#dce4d6')
+      .attr('font-size', 10)
+      .attr('paint-order', 'stroke')
+      .attr('stroke', '#111720')
+      .attr('stroke-width', 3)
+      .attr('stroke-linejoin', 'round')
+      .attr('pointer-events', 'none')
 
     simulation.on('tick', () => {
       linksSelection.attr('x1', (edge) => (edge.source as SimulationNode).x ?? 0).attr('y1', (edge) => (edge.source as SimulationNode).y ?? 0).attr('x2', (edge) => (edge.target as SimulationNode).x ?? 0).attr('y2', (edge) => (edge.target as SimulationNode).y ?? 0)
+      linkLabels.attr('x', (edge) => (((edge.source as SimulationNode).x ?? 0) + ((edge.target as SimulationNode).x ?? 0)) / 2).attr('y', (edge) => (((edge.source as SimulationNode).y ?? 0) + ((edge.target as SimulationNode).y ?? 0)) / 2)
       nodeSelection.attr('transform', (node) => `translate(${node.x ?? 0},${node.y ?? 0})`)
     })
     svg.on('click', () => setSelectedNode(null))
@@ -137,7 +190,22 @@ export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
       <aside className="knowledge-inspector">
         {selectedNode ? <>
           <div className="inspector-title"><div><p className="eyebrow">SELECTED ENTITY</p><h3>{selectedNode.label}</h3></div><span>{selectedNode.node_type}</span></div>
-          <pre>{JSON.stringify(selectedNode.properties, null, 2)}</pre>
+          <section className="inspector-connections" aria-label={`Connections for ${selectedNode.label}`}>
+            <p className="inspector-section-label">CONNECTED ENTITIES ({selectedConnections.length})</p>
+            {selectedConnections.length ? <ul>
+              {selectedConnections.map(({ edge, node, direction }) => <li key={edge.id}>
+                <button type="button" onClick={() => setSelectedNode(node)}>
+                  <strong>{node.label}</strong>
+                  <span>{direction === 'outgoing' ? '→' : '←'} {readableRelation(edge.relation)}</span>
+                  <small>{node.node_type}</small>
+                </button>
+              </li>)}
+            </ul> : <p className="inspector-empty">No connected entities are stored for this node.</p>}
+          </section>
+          {Object.keys(selectedNode.properties).length > 0 && <details className="inspector-properties">
+            <summary>Stored properties</summary>
+            <pre>{JSON.stringify(selectedNode.properties, null, 2)}</pre>
+          </details>}
           <button className="text-button" onClick={() => setSelectedNode(null)}>Clear selection</button>
         </> : <div className="inspector-placeholder"><p className="eyebrow">INSPECTOR</p><h3>Select an entity</h3><p>Tap a node to view its type and stored properties.</p></div>}
       </aside>
