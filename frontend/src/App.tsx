@@ -289,8 +289,8 @@ function Memories() {
 }
 
 function MemoryCard({ memory, compact = false }: { memory: Memory; compact?: boolean }) {
-  const tags = memory.tags.split(',').map((tag) => tag.trim()).filter(Boolean)
-  return <article className={compact ? 'memory-card compact' : 'memory-card'}><div className="memory-card-head"><div><p className="memory-key">{memory.key}</p><div className="tag-row">{tags.slice(0, 3).map((tag) => <span key={tag}>{tag}</span>)}</div></div><span className="scope-badge">{memory.prompt_scope}</span></div><p>{memory.content}</p><footer><span>Importance {memory.importance}</span><span>{relativeDate(memory.updated_at)}</span></footer></article>
+  const tags = Array.from(new Set(memory.tags.split(/[\s,]+/).filter(Boolean)))
+  return <article className={compact ? 'memory-card compact' : 'memory-card'}><div className="memory-card-head"><div><p className="memory-key">{memory.key}</p>{tags.length > 0 && <div className="tag-row">{tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}</div><span className="scope-badge">{memory.prompt_scope}</span></div><p>{memory.content}</p><footer><span>Importance {memory.importance}</span><span>{relativeDate(memory.updated_at)}</span></footer></article>
 }
 
 function Knowledge() {
