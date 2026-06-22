@@ -59,6 +59,81 @@ fn sanitize_account_details(raw: &str) -> serde_json::Value {
         .unwrap_or_else(|_| serde_json::json!({}))
 }
 
+fn is_secret_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    lower.contains("password")
+        || lower.contains("refresh_token")
+        || lower.contains("access_token")
+        || lower.contains("client_secret")
+        || lower == "token"
+        || lower.ends_with("_token")
+        || lower.contains("api_key")
+}
+
+fn merge_account_config(
+    existing: serde_json::Value,
+    update: serde_json::Value,
+) -> serde_json::Value {
+    let mut merged = existing.as_object().cloned().unwrap_or_default();
+    let Some(update) = update.as_object() else {
+        return serde_json::Value::Object(merged);
+    };
+
+    for (key, value) in update {
+        let retain_existing_secret =
+            is_secret_key(key) && value.as_str().is_some_and(|value| value.trim().is_empty());
+        if !retain_existing_secret {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(merged)
+}
+
+fn validate_account_config(
+    integration: &str,
+    config: &serde_json::Value,
+    require_secret: bool,
+) -> Result<(), AppError> {
+    let config = config.as_object().ok_or_else(|| {
+        AppError::bad_request(anyhow::anyhow!("Account configuration must be an object"))
+    })?;
+    let required: &[&str] = match integration {
+        "email" => &["username", "imap_host", "smtp_host"],
+        "google" => &[],
+        _ => {
+            return Err(AppError::bad_request(anyhow::anyhow!(
+                "Unsupported integration type: {integration}"
+            )));
+        }
+    };
+    for key in required {
+        if config
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(AppError::bad_request(anyhow::anyhow!("{key} is required")));
+        }
+    }
+    if require_secret {
+        let secret = if integration == "email" {
+            "password"
+        } else {
+            "refresh_token"
+        };
+        if config
+            .get(secret)
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(AppError::bad_request(anyhow::anyhow!(
+                "{secret} is required when adding an account"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub async fn list_accounts(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<AccountConfig>>, AppError> {
@@ -93,20 +168,43 @@ pub async fn add_account(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AddAccountRequest>,
 ) -> Result<Json<String>, AppError> {
-    // Basic validation
-    if req.integration != "google" && req.integration != "email" {
-        return Err(AppError::bad_request(anyhow::anyhow!(
-            "Unsupported integration type: {}",
-            req.integration
-        )));
-    }
-
-    // For email, we could validate fields here, but for now just pass through
+    validate_account_config(&req.integration, &req.config, true)?;
     let id = state
         .db
         .add_integration_account(&req.integration, &req.name, &req.config)
         .await?;
     Ok(Json(id))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateAccountRequest {
+    pub name: String,
+    pub config: serde_json::Value,
+}
+
+pub async fn update_account(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateAccountRequest>,
+) -> Result<Json<()>, AppError> {
+    let account = state
+        .db
+        .get_integration_account(&id)
+        .await?
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("Account not found")))?;
+    let existing = serde_json::from_str(&account.data).map_err(|_| {
+        AppError::bad_request(anyhow::anyhow!("Stored account configuration is invalid"))
+    })?;
+    let merged = merge_account_config(existing, req.config);
+    validate_account_config(&account.integration, &merged, false)?;
+    if !state
+        .db
+        .update_integration_account(&id, req.name.trim(), &merged)
+        .await?
+    {
+        return Err(AppError::not_found(anyhow::anyhow!("Account not found")));
+    }
+    Ok(Json(()))
 }
 
 pub async fn delete_account(
@@ -119,7 +217,7 @@ pub async fn delete_account(
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_account_details;
+    use super::{merge_account_config, sanitize_account_details};
 
     #[test]
     fn sanitize_account_details_redacts_common_secrets() {
@@ -137,5 +235,15 @@ mod tests {
         assert_eq!(value["nested"]["refresh_token"], "[REDACTED]");
         assert_eq!(value["nested"]["access_token"], "[REDACTED]");
         assert_eq!(value["items"][0]["client_secret"], "[REDACTED]");
+    }
+
+    #[test]
+    fn empty_secret_updates_preserve_existing_credentials() {
+        let merged = merge_account_config(
+            serde_json::json!({"username": "me@example.com", "password": "secret"}),
+            serde_json::json!({"username": "new@example.com", "password": ""}),
+        );
+        assert_eq!(merged["username"], "new@example.com");
+        assert_eq!(merged["password"], "secret");
     }
 }

@@ -124,6 +124,16 @@ export const deleteAccount = (config: ApiConfig, accountId: string) =>
     method: 'DELETE',
   })
 
+export const updateAccount = (
+  config: ApiConfig,
+  accountId: string,
+  payload: { name: string; config: Record<string, unknown> },
+) =>
+  request<void>(config, `/api/config/accounts/${accountId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+
 export const cancelConversation = (config: ApiConfig, conversationId: string) =>
   request<{ conversation_id: string; status: string }>(
     config,

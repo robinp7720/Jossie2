@@ -11,7 +11,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{HeaderValue, Method, header},
     middleware as axum_middleware,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 pub use events::ServerEvent;
 pub use state::AppState;
@@ -24,7 +24,7 @@ use tower_http::trace::TraceLayer;
 pub fn router(state: Arc<AppState>) -> Router {
     let cors = if state.cors_origins.is_empty() {
         CorsLayer::new()
-            .allow_methods([Method::GET, Method::POST, Method::DELETE])
+            .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
             .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
     } else {
         CorsLayer::new()
@@ -34,7 +34,7 @@ pub fn router(state: Arc<AppState>) -> Router {
                     .iter()
                     .filter_map(|o| o.parse::<HeaderValue>().ok()),
             ))
-            .allow_methods([Method::GET, Method::POST, Method::DELETE])
+            .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
             .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
             .allow_credentials(true)
     };
@@ -78,7 +78,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/config/accounts/{id}",
-            delete(handlers::config::delete_account),
+            patch(handlers::config::update_account).delete(handlers::config::delete_account),
         )
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),

@@ -62,3 +62,23 @@ input:focus,textarea:focus,select:focus { border-color: #bde76d; box-shadow: 0 0
 .memory-key,
 .memory-card p:not(.memory-key) { overflow-wrap: anywhere; word-break: break-word; }
 .scope-badge { flex: 0 0 auto; }
+
+/* Markdown content is untrusted in shape: keep long links, code, and media in chat bubbles. */
+.message { min-width: 0; }
+.message-body { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.message-body pre,
+.message-body table { display: block; max-width: 100%; overflow-x: auto; }
+.message-body code { overflow-wrap: anywhere; }
+.message-body img { display: block; max-width: 100%; height: auto; }
+
+.typed-account-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.typed-account-form .form-span { grid-column: 1 / -1; }
+.optional-label { color: #788291; font-size: .64rem; font-weight: 500; }
+.form-hint { margin: -.3rem 0 0; color: #7b8695; font-size: .7rem; line-height: 1.5; }
+.form-actions { display: flex; align-items: center; gap: 1rem; }
+.account-actions { display: flex; gap: .85rem; margin-left: auto; }
+
+@media (max-width: 760px) {
+  .typed-account-form { grid-template-columns: 1fr; }
+  .typed-account-form .form-span { grid-column: auto; }
+}

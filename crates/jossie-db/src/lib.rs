@@ -1030,6 +1030,22 @@ impl Database {
         Ok(())
     }
 
+    pub async fn update_integration_account(
+        &self,
+        id: &str,
+        name: &str,
+        data: &serde_json::Value,
+    ) -> anyhow::Result<bool> {
+        let data_str = serde_json::to_string(data)?;
+        let result = sqlx::query("UPDATE integration_accounts SET name = ?, data = ? WHERE id = ?")
+            .bind(name)
+            .bind(data_str)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn get_integration_account(
         &self,
         id: &str,
@@ -2858,6 +2874,22 @@ mod tests {
         let list = db.list_integration_accounts("test_int").await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, id);
+
+        assert!(
+            db.update_integration_account(
+                &id,
+                "Renamed Account",
+                &serde_json::json!({"foo": "updated"})
+            )
+            .await
+            .unwrap()
+        );
+        let updated = db.get_integration_account(&id).await.unwrap().unwrap();
+        assert_eq!(updated.name, "Renamed Account");
+        assert_eq!(
+            updated.data,
+            serde_json::json!({"foo": "updated"}).to_string()
+        );
 
         db.delete_integration_account(&id).await.unwrap();
         let list = db.list_integration_accounts("test_int").await.unwrap();
