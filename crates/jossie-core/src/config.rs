@@ -56,6 +56,8 @@ pub struct LlmConfig {
     pub kg_model: Option<String>,
     #[serde(default)]
     pub enable_web_search: bool,
+    #[serde(default = "default_service_tier")]
+    pub service_tier: Option<String>,
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
     #[serde(default = "default_max_iterations")]
@@ -76,6 +78,10 @@ fn default_max_context_messages() -> usize {
 
 fn default_event_max_context_messages() -> usize {
     12
+}
+
+fn default_service_tier() -> Option<String> {
+    Some("flex".to_string())
 }
 
 fn default_system_prompt() -> String {

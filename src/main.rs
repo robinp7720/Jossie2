@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
     let mut llm = LlmClient::new(&config.llm.api_url, &config.llm.api_key, &config.llm.model);
     llm.set_reasoning_effort(config.llm.reasoning_effort.clone());
     llm.set_enable_web_search(config.llm.enable_web_search);
+    llm.set_service_tier(config.llm.service_tier.clone());
 
     // Initialize KG LLM client - use cheaper model if configured, otherwise use primary model
     let kg_llm = if let Some(kg_model) = &config.llm.kg_model {
@@ -54,6 +55,7 @@ async fn main() -> Result<()> {
         );
         let mut client = LlmClient::new(&config.llm.api_url, &config.llm.api_key, kg_model);
         client.set_reasoning_effort(config.llm.reasoning_effort.clone());
+        client.set_service_tier(config.llm.service_tier.clone());
         client
     } else {
         tracing::info!("Using primary model for knowledge graph extraction");
@@ -209,6 +211,15 @@ fn validate_llm_config(config: &mut AppConfig) {
         );
         config.llm.event_max_context_messages = MIN_EVENT_CONTEXT_MESSAGES;
     }
+
+    if let Some(service_tier) = &mut config.llm.service_tier {
+        let normalized = service_tier.trim().to_string();
+        if normalized.is_empty() {
+            config.llm.service_tier = None;
+        } else if normalized != *service_tier {
+            *service_tier = normalized;
+        }
+    }
 }
 
 fn override_config_from_env(config: &mut AppConfig) {
@@ -238,6 +249,9 @@ fn override_config_from_env(config: &mut AppConfig) {
         if let Some(parsed) = parse_env_bool(&val) {
             config.llm.enable_web_search = parsed;
         }
+    }
+    if let Ok(val) = env::var("JOSSIE_LLM_SERVICE_TIER") {
+        config.llm.service_tier = Some(val);
     }
     if let Ok(val) = env::var("JOSSIE_LLM_MAX_CONTEXT_MESSAGES") {
         if let Ok(parsed) = val.parse::<usize>() {

@@ -14,6 +14,7 @@ pub struct LlmClient {
     model: String,
     reasoning_effort: Option<String>,
     enable_web_search: bool,
+    service_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -27,6 +28,8 @@ struct ResponsesRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ResponseReasoningConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -181,6 +184,7 @@ impl LlmClient {
             model: model.to_string(),
             reasoning_effort: None,
             enable_web_search: false,
+            service_tier: Some("flex".to_string()),
         }
     }
 
@@ -190,6 +194,10 @@ impl LlmClient {
 
     pub fn set_enable_web_search(&mut self, enabled: bool) {
         self.enable_web_search = enabled;
+    }
+
+    pub fn set_service_tier(&mut self, service_tier: Option<String>) {
+        self.service_tier = service_tier;
     }
 
     fn build_input(messages: &[Message]) -> Vec<ResponseInputItem> {
@@ -297,6 +305,7 @@ impl LlmClient {
                 .reasoning_effort
                 .clone()
                 .map(|effort| ResponseReasoningConfig { effort }),
+            service_tier: self.service_tier.clone(),
         }
     }
 
@@ -633,6 +642,27 @@ mod tests {
 
         assert_eq!(json["tool_choice"], "auto");
         assert_eq!(json["tools"][0]["type"], "web_search");
+    }
+
+    #[test]
+    fn build_request_defaults_to_flex_service_tier() {
+        let client = LlmClient::new("https://api.openai.com/v1", "test-key", "gpt-4.1");
+
+        let request = client.build_request(&[make_message(Role::User, "Hi")], &[], false);
+        let json = serde_json::to_value(request).unwrap();
+
+        assert_eq!(json["service_tier"], "flex");
+    }
+
+    #[test]
+    fn build_request_can_omit_service_tier() {
+        let mut client = LlmClient::new("https://api.openai.com/v1", "test-key", "gpt-4.1");
+        client.set_service_tier(None);
+
+        let request = client.build_request(&[make_message(Role::User, "Hi")], &[], false);
+        let json = serde_json::to_value(request).unwrap();
+
+        assert!(json.get("service_tier").is_none());
     }
 
     #[test]
