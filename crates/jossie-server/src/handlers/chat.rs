@@ -49,11 +49,89 @@ async fn get_or_create_conversation_id(
     }
 }
 
+#[derive(Clone, Copy)]
+enum PendingReply {
+    Approve,
+    Reject,
+}
+
+fn pending_reply(message: &str, action_count: usize) -> Option<PendingReply> {
+    let normalized = message
+        .trim()
+        .to_lowercase()
+        .trim_matches(|ch: char| ch.is_ascii_punctuation())
+        .to_string();
+    let approve = [
+        "yes",
+        "yes do it",
+        "approve",
+        "approve it",
+        "go ahead",
+        "do it",
+    ];
+    let reject = [
+        "no",
+        "no thanks",
+        "reject",
+        "reject it",
+        "don't do it",
+        "cancel it",
+    ];
+    if action_count == 1 && approve.contains(&normalized.as_str()) || normalized == "approve all" {
+        Some(PendingReply::Approve)
+    } else if action_count == 1 && reject.contains(&normalized.as_str())
+        || normalized == "reject all"
+    {
+        Some(PendingReply::Reject)
+    } else {
+        None
+    }
+}
+
+async fn resolve_pending_reply(
+    state: &Arc<AppState>,
+    conversation_id: Uuid,
+    message: &str,
+) -> Result<Option<String>, AppError> {
+    let actions = state.db.list_pending_actions(Some(conversation_id)).await?;
+    let actionable = actions
+        .into_iter()
+        .filter(|action| action.status == "pending")
+        .collect::<Vec<_>>();
+    if actionable.is_empty() {
+        return Ok(None);
+    }
+    let Some(decision) = pending_reply(message, actionable.len()) else {
+        return Err(AppError::conflict(anyhow::anyhow!(
+            "This conversation has a pending action. Approve or reject it before sending another request."
+        )));
+    };
+    for action in actionable {
+        crate::handlers::actions::decide_action(
+            state.clone(),
+            action.id,
+            matches!(decision, PendingReply::Approve),
+        )
+        .await?;
+    }
+    Ok(Some(match decision {
+        PendingReply::Approve => "Approved. Jossie is continuing the run.".to_string(),
+        PendingReply::Reject => "Rejected. Jossie is continuing without that action.".to_string(),
+    }))
+}
+
 pub async fn chat_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, AppError> {
     let conv_id = get_or_create_conversation_id(&state, req.conversation_id).await?;
+
+    if let Some(message) = resolve_pending_reply(&state, conv_id, &req.message).await? {
+        return Ok(Json(ChatResponse {
+            conversation_id: conv_id,
+            message,
+        }));
+    }
 
     let mut user_msg = Message::new(conv_id, Role::User, req.message);
     if let Some(ref fids) = req.file_ids {
@@ -175,6 +253,32 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
         };
 
         tracing::info!("Processing message for conversation {}", conv_id);
+
+        match resolve_pending_reply(&state, conv_id, &req.message).await {
+            Ok(Some(message)) => {
+                let payload = serde_json::json!({
+                    "type": "action_decision_received",
+                    "conversation_id": conv_id,
+                    "message": message,
+                });
+                let _ = socket
+                    .send(ws::Message::Text(payload.to_string().into()))
+                    .await;
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let payload = serde_json::json!({
+                    "type": "pending_action",
+                    "conversation_id": conv_id,
+                    "error": error.to_string(),
+                });
+                let _ = socket
+                    .send(ws::Message::Text(payload.to_string().into()))
+                    .await;
+                continue;
+            }
+        }
 
         let mut user_msg = Message::new(conv_id, Role::User, req.message);
         if let Some(ref fids) = req.file_ids {

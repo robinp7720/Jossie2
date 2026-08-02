@@ -165,6 +165,31 @@ CREATE INDEX IF NOT EXISTS idx_activity_events_created_at
 CREATE INDEX IF NOT EXISTS idx_activity_events_conversation
     ON activity_events(conversation_id, created_at DESC);
 
+-- Consequential tool calls waiting for owner authorization. Tool arguments are
+-- retained server-side so an approved action can execute exactly once.
+CREATE TABLE IF NOT EXISTS pending_actions (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL,
+    call_id TEXT NOT NULL UNIQUE,
+    tool_name TEXT NOT NULL,
+    arguments TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    effect TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    result_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_actions_conversation
+    ON pending_actions(conversation_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_pending_actions_batch
+    ON pending_actions(batch_id, status);
+
 -- Conversation summaries for context compression
 CREATE TABLE IF NOT EXISTS conversation_summaries (
     conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,

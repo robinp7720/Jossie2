@@ -1883,6 +1883,184 @@ impl Database {
         .await?;
         Ok(rows.into_iter().map(Into::into).collect())
     }
+
+    pub async fn create_pending_action(
+        &self,
+        action: &NewPendingAction,
+    ) -> anyhow::Result<PendingAction> {
+        let now = Utc::now().to_rfc3339();
+        let id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO pending_actions
+             (id, batch_id, conversation_id, run_id, call_id, tool_name, arguments, title, summary, effect, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+        )
+        .bind(&id)
+        .bind(&action.batch_id)
+        .bind(action.conversation_id.to_string())
+        .bind(&action.run_id)
+        .bind(&action.call_id)
+        .bind(&action.tool_name)
+        .bind(&action.arguments)
+        .bind(&action.title)
+        .bind(&action.summary)
+        .bind(&action.effect)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        self.get_pending_action(&id)
+            .await?
+            .context("Pending action disappeared after insert")
+    }
+
+    pub async fn get_pending_action(&self, id: &str) -> anyhow::Result<Option<PendingAction>> {
+        let row = sqlx::query_as::<_, PendingActionRow>(
+            "SELECT id, batch_id, conversation_id, run_id, call_id, tool_name, arguments,
+                    title, summary, effect, status, result_error, created_at, updated_at, resolved_at
+             FROM pending_actions WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Into::into))
+    }
+
+    pub async fn list_pending_actions(
+        &self,
+        conversation_id: Option<Uuid>,
+    ) -> anyhow::Result<Vec<PendingAction>> {
+        let rows = if let Some(conversation_id) = conversation_id {
+            sqlx::query_as::<_, PendingActionRow>(
+                "SELECT id, batch_id, conversation_id, run_id, call_id, tool_name, arguments,
+                        title, summary, effect, status, result_error, created_at, updated_at, resolved_at
+                 FROM pending_actions
+                 WHERE conversation_id = ? AND status IN ('pending', 'executing', 'uncertain')
+                 ORDER BY created_at ASC",
+            )
+            .bind(conversation_id.to_string())
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, PendingActionRow>(
+                "SELECT id, batch_id, conversation_id, run_id, call_id, tool_name, arguments,
+                        title, summary, effect, status, result_error, created_at, updated_at, resolved_at
+                 FROM pending_actions
+                 WHERE status IN ('pending', 'executing', 'uncertain')
+                 ORDER BY created_at ASC",
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn claim_pending_action(&self, id: &str) -> anyhow::Result<Option<PendingAction>> {
+        let now = Utc::now().to_rfc3339();
+        let changed = sqlx::query(
+            "UPDATE pending_actions SET status = 'executing', updated_at = ?
+             WHERE id = ? AND status = 'pending'",
+        )
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_pending_action(id).await
+    }
+
+    pub async fn resolve_pending_action(
+        &self,
+        id: &str,
+        status: &str,
+        result_error: Option<&str>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            matches!(status, "completed" | "failed" | "rejected" | "uncertain"),
+            "Invalid pending action terminal status"
+        );
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE pending_actions
+             SET status = ?, result_error = ?, updated_at = ?, resolved_at = ?
+             WHERE id = ?",
+        )
+        .bind(status)
+        .bind(result_error)
+        .bind(&now)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn pending_action_batch_is_resolved(&self, batch_id: &str) -> anyhow::Result<bool> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pending_actions
+             WHERE batch_id = ? AND status IN ('pending', 'executing')",
+        )
+        .bind(batch_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count == 0)
+    }
+
+    pub async fn has_blocking_pending_actions(
+        &self,
+        conversation_id: Uuid,
+    ) -> anyhow::Result<bool> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pending_actions
+             WHERE conversation_id = ? AND status IN ('pending', 'executing')",
+        )
+        .bind(conversation_id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count > 0)
+    }
+
+    pub async fn mark_interrupted_actions_uncertain(&self) -> anyhow::Result<u64> {
+        let now = Utc::now().to_rfc3339();
+        let warning = "The server stopped while this action was executing. Its outcome is uncertain. Verify the external system before trying again.";
+        let interrupted = sqlx::query_as::<_, PendingActionRow>(
+            "SELECT id, batch_id, conversation_id, run_id, call_id, tool_name, arguments,
+                    title, summary, effect, status, result_error, created_at, updated_at, resolved_at
+             FROM pending_actions WHERE status = 'executing'",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut tx = self.pool.begin().await?;
+        for action in &interrupted {
+            sqlx::query(
+                "INSERT INTO messages
+                 (id, conversation_id, role, content, tool_call_id, name, created_at)
+                 VALUES (?, ?, 'tool', ?, ?, ?, ?)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(&action.conversation_id)
+            .bind(warning)
+            .bind(&action.call_id)
+            .bind(&action.tool_name)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query(
+            "UPDATE pending_actions
+             SET status = 'uncertain', result_error = 'The server stopped while this action was executing. Verify the external system before trying again.', updated_at = ?, resolved_at = ?
+             WHERE status = 'executing'",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(interrupted.len() as u64)
+    }
 }
 
 fn backup_path_for(path: &Path) -> PathBuf {
@@ -2262,6 +2440,80 @@ pub struct ActivityEvent {
     pub detail: Option<String>,
     pub tone: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewPendingAction {
+    pub batch_id: String,
+    pub conversation_id: Uuid,
+    pub run_id: String,
+    pub call_id: String,
+    pub tool_name: String,
+    pub arguments: String,
+    pub title: String,
+    pub summary: String,
+    pub effect: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingAction {
+    pub id: String,
+    pub batch_id: String,
+    pub conversation_id: Uuid,
+    pub run_id: String,
+    pub call_id: String,
+    pub tool_name: String,
+    #[serde(skip_serializing)]
+    pub arguments: String,
+    pub title: String,
+    pub summary: String,
+    pub effect: String,
+    pub status: String,
+    pub result_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub resolved_at: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct PendingActionRow {
+    id: String,
+    batch_id: String,
+    conversation_id: String,
+    run_id: String,
+    call_id: String,
+    tool_name: String,
+    arguments: String,
+    title: String,
+    summary: String,
+    effect: String,
+    status: String,
+    result_error: Option<String>,
+    created_at: String,
+    updated_at: String,
+    resolved_at: Option<String>,
+}
+
+impl From<PendingActionRow> for PendingAction {
+    fn from(row: PendingActionRow) -> Self {
+        Self {
+            id: row.id,
+            batch_id: row.batch_id,
+            conversation_id: row.conversation_id.parse().unwrap_or_default(),
+            run_id: row.run_id,
+            call_id: row.call_id,
+            tool_name: row.tool_name,
+            arguments: row.arguments,
+            title: row.title,
+            summary: row.summary,
+            effect: row.effect,
+            status: row.status,
+            result_error: row.result_error,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            resolved_at: row.resolved_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -3203,6 +3455,80 @@ mod tests {
         assert_eq!(memories[0].importance, 80);
         assert_eq!(db.memory_stats().await.unwrap().prompt_ready, 1);
         assert_eq!(db.list_activity_events(10, None).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_action_lifecycle_is_atomic_and_private() {
+        let db = test_db().await;
+        let conversation = db.create_conversation(None).await.unwrap();
+        let action = db
+            .create_pending_action(&NewPendingAction {
+                batch_id: "batch-1".to_string(),
+                conversation_id: conversation.id,
+                run_id: "run-1".to_string(),
+                call_id: "call-1".to_string(),
+                tool_name: "mail_send".to_string(),
+                arguments: r#"{"to":"owner@example.com","body":"private"}"#.to_string(),
+                title: "Send email".to_string(),
+                summary: "To owner@example.com".to_string(),
+                effect: "external_write".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let public = serde_json::to_value(&action).unwrap();
+        assert!(public.get("arguments").is_none());
+        assert!(
+            db.has_blocking_pending_actions(conversation.id)
+                .await
+                .unwrap()
+        );
+        assert!(db.claim_pending_action(&action.id).await.unwrap().is_some());
+        assert!(db.claim_pending_action(&action.id).await.unwrap().is_none());
+        db.resolve_pending_action(&action.id, "completed", None)
+            .await
+            .unwrap();
+        assert!(
+            db.pending_action_batch_is_resolved("batch-1")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !db.has_blocking_pending_actions(conversation.id)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupted_actions_become_uncertain_without_retrying() {
+        let db = test_db().await;
+        let conversation = db.create_conversation(None).await.unwrap();
+        let action = db
+            .create_pending_action(&NewPendingAction {
+                batch_id: "batch-2".to_string(),
+                conversation_id: conversation.id,
+                run_id: "run-2".to_string(),
+                call_id: "call-2".to_string(),
+                tool_name: "mail_send".to_string(),
+                arguments: "{}".to_string(),
+                title: "Send email".to_string(),
+                summary: "External action".to_string(),
+                effect: "external_write".to_string(),
+            })
+            .await
+            .unwrap();
+        db.claim_pending_action(&action.id).await.unwrap();
+
+        assert_eq!(db.mark_interrupted_actions_uncertain().await.unwrap(), 1);
+        let recovered = db.get_pending_action(&action.id).await.unwrap().unwrap();
+        assert_eq!(recovered.status, "uncertain");
+        let messages = db.get_messages(conversation.id, None).await.unwrap();
+        assert_eq!(
+            messages.last().unwrap().tool_call_id.as_deref(),
+            Some("call-2")
+        );
+        assert!(messages.last().unwrap().content.contains("uncertain"));
     }
 }
 

@@ -94,6 +94,23 @@ export type ActivityEvent = {
   created_at: string
 }
 
+export type PendingAction = {
+  id: string
+  batch_id: string
+  conversation_id: string
+  run_id: string
+  call_id: string
+  tool_name: string
+  title: string
+  summary: string
+  effect: 'external_write' | 'destructive' | string
+  status: 'pending' | 'executing' | 'uncertain' | string
+  result_error?: string | null
+  created_at: string
+  updated_at: string
+  resolved_at?: string | null
+}
+
 export type ScheduledTask = {
   id: string
   conversation_id: string

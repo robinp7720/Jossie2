@@ -11,7 +11,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{HeaderValue, Method, header},
     middleware as axum_middleware,
-    routing::{delete, get, patch, post},
+    routing::{get, patch, post},
 };
 pub use events::ServerEvent;
 pub use state::AppState;
@@ -67,6 +67,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/memories", get(handlers::dashboard::memories_handler))
         .route("/api/activity", get(handlers::dashboard::activity_handler))
+        .route(
+            "/api/actions/pending",
+            get(handlers::actions::list_pending_actions),
+        )
+        .route(
+            "/api/actions/{id}/approve",
+            post(handlers::actions::approve_action),
+        )
+        .route(
+            "/api/actions/{id}/reject",
+            post(handlers::actions::reject_action),
+        )
         // Config / Onboarding
         .route(
             "/api/onboarding",

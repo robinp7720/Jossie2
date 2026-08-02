@@ -941,6 +941,11 @@ async fn execute_scheduled_task(
                     allow_schedule_management: false,
                     allow_oob_messages: false,
                     scheduled_execution: true,
+                    authorization_context: task
+                        .task_data
+                        .get("authorization_context")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string),
                 },
             )
             .await

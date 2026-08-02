@@ -119,6 +119,46 @@ async fn test_auth_middleware_authorized() {
 }
 
 #[tokio::test]
+async fn pending_actions_are_authenticated_and_empty_by_default() {
+    let app = setup_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/actions/pending")
+                .header("Authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
+async fn approving_an_unknown_action_is_not_found() {
+    let app = setup_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/actions/not-pending/approve")
+                .header("Authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn test_auth_middleware_query_token() {
     let app = setup_app().await;
 

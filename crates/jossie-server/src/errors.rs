@@ -32,6 +32,10 @@ impl AppError {
     pub fn not_found(error: impl Into<anyhow::Error>) -> Self {
         Self::new(StatusCode::NOT_FOUND, error)
     }
+
+    pub fn conflict(error: impl Into<anyhow::Error>) -> Self {
+        Self::new(StatusCode::CONFLICT, error)
+    }
 }
 
 impl From<anyhow::Error> for AppError {

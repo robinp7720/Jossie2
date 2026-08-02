@@ -1,4 +1,4 @@
-import type { Account, ActivityEvent, Conversation, Dashboard, Memory, Message, OnboardingStatus } from './types'
+import type { Account, ActivityEvent, Conversation, Dashboard, Memory, Message, OnboardingStatus, PendingAction } from './types'
 
 export type ApiConfig = {
   baseUrl: string
@@ -149,7 +149,9 @@ export const buildWebSocketUrl = (config: ApiConfig, path: string) => {
     ? base.replace('https://', 'wss://')
     : base.replace('http://', 'ws://')
 
-  const token = config.token ? `?token=${encodeURIComponent(config.token)}` : ''
+  const token = config.token
+    ? `${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(config.token)}`
+    : ''
   return `${wsBase}${path}${token}`
 }
 
@@ -185,3 +187,19 @@ export const listActivity = (config: ApiConfig, before?: string, limit = 30) =>
     config,
     `/api/activity?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`,
   )
+
+export const listPendingActions = (config: ApiConfig, conversationId?: string) =>
+  request<PendingAction[]>(
+    config,
+    `/api/actions/pending${conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : ''}`,
+  )
+
+export const approveAction = (config: ApiConfig, actionId: string) =>
+  request<{ action_id: string; status: string }>(config, `/api/actions/${actionId}/approve`, {
+    method: 'POST',
+  })
+
+export const rejectAction = (config: ApiConfig, actionId: string) =>
+  request<{ action_id: string; status: string }>(config, `/api/actions/${actionId}/reject`, {
+    method: 'POST',
+  })

@@ -26,6 +26,28 @@ pub enum ServerEvent {
         run_id: String,
         reason: String,
     },
+    CapabilitiesActivated {
+        conversation_id: Uuid,
+        run_id: String,
+        capabilities: Vec<String>,
+    },
+    ActionApprovalRequired {
+        conversation_id: Uuid,
+        run_id: String,
+        action: jossie_db::PendingAction,
+    },
+    ActionResolved {
+        conversation_id: Uuid,
+        run_id: String,
+        action_id: String,
+        status: String,
+        title: String,
+    },
+    RunWaitingForApproval {
+        conversation_id: Uuid,
+        run_id: String,
+        batch_id: String,
+    },
     ToolCalled {
         conversation_id: Uuid,
         run_id: String,
@@ -97,6 +119,18 @@ impl ServerEvent {
                 conversation_id, ..
             }
             | ServerEvent::AssistantReset {
+                conversation_id, ..
+            }
+            | ServerEvent::CapabilitiesActivated {
+                conversation_id, ..
+            }
+            | ServerEvent::ActionApprovalRequired {
+                conversation_id, ..
+            }
+            | ServerEvent::ActionResolved {
+                conversation_id, ..
+            }
+            | ServerEvent::RunWaitingForApproval {
                 conversation_id, ..
             }
             | ServerEvent::ToolCalled {
@@ -177,6 +211,54 @@ pub async fn persist_activity_event(db: &jossie_db::Database, event: &ServerEven
             "Used a capability",
             Some(tool.as_str()),
             "normal",
+        )),
+        ServerEvent::CapabilitiesActivated {
+            conversation_id,
+            run_id,
+            capabilities: _,
+        } => Some((
+            Some(*conversation_id),
+            Some(run_id.as_str()),
+            "capability",
+            "Prepared capabilities",
+            None,
+            "normal",
+        )),
+        ServerEvent::ActionApprovalRequired {
+            conversation_id,
+            run_id,
+            action,
+        } => Some((
+            Some(*conversation_id),
+            Some(run_id.as_str()),
+            "approval",
+            "Waiting for approval",
+            Some(action.title.as_str()),
+            "warn",
+        )),
+        ServerEvent::ActionResolved {
+            conversation_id,
+            run_id,
+            status,
+            title,
+            ..
+        } => Some((
+            Some(*conversation_id),
+            Some(run_id.as_str()),
+            "approval",
+            if status == "completed" {
+                "Approved action completed"
+            } else if status == "rejected" {
+                "Action declined"
+            } else {
+                "Action needs attention"
+            },
+            Some(title.as_str()),
+            if status == "completed" {
+                "success"
+            } else {
+                "warn"
+            },
         )),
         ServerEvent::ToolFinished {
             conversation_id,

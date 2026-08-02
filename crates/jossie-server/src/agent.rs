@@ -1,8 +1,9 @@
 use crate::events::{ServerEvent, persist_message, preview_text};
 use crate::state::AppState;
 use futures::FutureExt;
+use jossie_core::integration::{CapabilityGroup, ToolEffect};
 use jossie_core::types::{Message, Role};
-use jossie_db::{IntegrationEvent, MemoryKeyInfo, MemoryPromptEntry};
+use jossie_db::{IntegrationEvent, MemoryKeyInfo, MemoryPromptEntry, NewPendingAction};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -410,6 +411,7 @@ pub struct AgentRunOptions {
     pub allow_schedule_management: bool,
     pub allow_oob_messages: bool,
     pub scheduled_execution: bool,
+    pub authorization_context: Option<String>,
 }
 
 impl Default for AgentRunOptions {
@@ -418,6 +420,7 @@ impl Default for AgentRunOptions {
             allow_schedule_management: true,
             allow_oob_messages: true,
             scheduled_execution: false,
+            authorization_context: None,
         }
     }
 }
@@ -695,33 +698,127 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-fn build_tools_for_options(
-    state: &AppState,
-    options: &AgentRunOptions,
-) -> Vec<jossie_core::ToolDefinition> {
-    let mut tools = state.registry.all_agent_tool_definitions();
-    if !options.allow_schedule_management {
-        tools.retain(|tool| tool.name != "schedule_task" && tool.name != "schedule_recurring_task");
+struct RunToolset {
+    active: HashSet<CapabilityGroup>,
+    allow_schedule_management: bool,
+    allow_oob_messages: bool,
+}
+
+impl RunToolset {
+    fn new(options: &AgentRunOptions, has_attachments: bool) -> Self {
+        let mut active = HashSet::from([CapabilityGroup::Memory]);
+        if has_attachments {
+            active.insert(CapabilityGroup::Files);
+        }
+        Self {
+            active,
+            allow_schedule_management: options.allow_schedule_management,
+            allow_oob_messages: options.allow_oob_messages,
+        }
     }
-    if !options.allow_oob_messages {
-        tools.retain(|tool| tool.name != "send_user_message");
+
+    fn definitions(&self, state: &AppState) -> Vec<jossie_core::ToolDefinition> {
+        let mut tools = state.registry.agent_tool_definitions_for(&self.active);
+        if !self.allow_schedule_management {
+            tools.retain(|tool| {
+                tool.name != "schedule_task" && tool.name != "schedule_recurring_task"
+            });
+        }
+        if !self.allow_oob_messages {
+            tools.retain(|tool| tool.name != "send_user_message");
+        }
+        tools.push(capability_activation_tool());
+        tools
     }
-    tools
+
+    fn activate(
+        &mut self,
+        state: &AppState,
+        call: &jossie_core::ToolCall,
+    ) -> (jossie_core::ToolResult, Vec<String>) {
+        #[derive(Deserialize)]
+        struct Args {
+            capabilities: Vec<String>,
+        }
+
+        let args = match serde_json::from_str::<Args>(&call.arguments) {
+            Ok(args) => args,
+            Err(error) => {
+                return (
+                    jossie_core::ToolResult {
+                        tool_call_id: call.id.clone(),
+                        content: format!("Invalid capability request: {error}"),
+                        is_error: true,
+                    },
+                    Vec::new(),
+                );
+            }
+        };
+
+        let mut activated = Vec::new();
+        let mut unavailable = Vec::new();
+        for name in args.capabilities {
+            match name.parse::<CapabilityGroup>() {
+                Ok(capability)
+                    if CapabilityGroup::ACTIVATABLE.contains(&capability)
+                        && state.registry.has_agent_tools_for(capability) =>
+                {
+                    if self.active.insert(capability) {
+                        activated.push(capability.as_str().to_string());
+                    }
+                }
+                _ => unavailable.push(name),
+            }
+        }
+
+        let mut content = if activated.is_empty() {
+            "No new capabilities were activated.".to_string()
+        } else {
+            format!("Activated capabilities: {}.", activated.join(", "))
+        };
+        if !unavailable.is_empty() {
+            content.push_str(&format!(
+                " Unavailable or unconfigured: {}. Check Connections before relying on them.",
+                unavailable.join(", ")
+            ));
+        }
+        (
+            jossie_core::ToolResult {
+                tool_call_id: call.id.clone(),
+                content,
+                is_error: !unavailable.is_empty() && activated.is_empty(),
+            },
+            activated,
+        )
+    }
+}
+
+fn capability_activation_tool() -> jossie_core::ToolDefinition {
+    jossie_core::ToolDefinition {
+        name: "activate_capabilities".to_string(),
+        description: "Enable only the capability groups needed for the current task. Activate groups before attempting their tools; activation is cumulative for this run.".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "capabilities": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["knowledge", "files", "mail", "calendar", "drive", "web", "scheduler"]
+                    }
+                }
+            },
+            "required": ["capabilities"],
+            "additionalProperties": false
+        }),
+    }
 }
 
 async fn prepare_run_context(
     state: &AppState,
     conv_id: Uuid,
     options: &AgentRunOptions,
-) -> anyhow::Result<(
-    Vec<jossie_core::ToolDefinition>,
-    Vec<Message>,
-    String,
-    GoalTracker,
-    usize,
-)> {
-    let tools = build_tools_for_options(state, options);
-
+) -> anyhow::Result<(RunToolset, Vec<Message>, String, GoalTracker, usize)> {
     let mut messages = state
         .db
         .get_messages(conv_id, Some(state.max_context_messages))
@@ -733,6 +830,13 @@ async fn prepare_run_context(
         .find(|m| m.role == Role::User)
         .map(|m| m.content.clone())
         .unwrap_or_default();
+    let has_attachments = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::User)
+        .and_then(|message| message.attachments.as_ref())
+        .is_some_and(|attachments| !attachments.is_empty());
+    let toolset = RunToolset::new(options, has_attachments);
 
     sanitize_context_window(&mut messages);
     maybe_summarize_context(state, conv_id, &mut messages).await;
@@ -746,7 +850,7 @@ async fn prepare_run_context(
     }
 
     Ok((
-        tools,
+        toolset,
         messages,
         last_user_msg.clone(),
         GoalTracker::new(&last_user_msg),
@@ -771,6 +875,7 @@ async fn emit_stream_event(
     event: ServerEvent,
 ) {
     crate::events::persist_activity_event(&state.db, &event).await;
+    let _ = state.event_tx.send(event.clone());
     if let Some(tx) = event_tx {
         let _ = tx.send(event).await;
     }
@@ -800,6 +905,7 @@ async fn ensure_run_not_cancelled(
 fn prepare_tool_calls_for_execution(
     tool_calls: &[jossie_core::ToolCall],
     conv_id: Uuid,
+    authorization_context: &str,
 ) -> Vec<jossie_core::ToolCall> {
     tool_calls
         .iter()
@@ -816,6 +922,12 @@ fn prepare_tool_calls_for_execution(
                             "__conversation_id".to_string(),
                             serde_json::Value::String(conv_id.to_string()),
                         );
+                        if call.name.starts_with("schedule_") {
+                            obj.insert(
+                                "__authorization_context".to_string(),
+                                serde_json::Value::String(authorization_context.to_string()),
+                            );
+                        }
                         if let Ok(json_str) = serde_json::to_string(&args) {
                             call_with_context.arguments = json_str;
                         }
@@ -825,6 +937,308 @@ fn prepare_tool_calls_for_execution(
             call_with_context
         })
         .collect()
+}
+
+async fn execute_tool_batch(
+    state: &AppState,
+    calls: Vec<jossie_core::ToolCall>,
+) -> Vec<(usize, jossie_core::ToolCall, jossie_core::ToolResult)> {
+    let mut join_set = tokio::task::JoinSet::new();
+    let mut serial = Vec::new();
+
+    for (idx, call) in calls.into_iter().enumerate() {
+        if state.registry.metadata_for(&call).concurrent {
+            let registry = state.registry.clone();
+            join_set.spawn(async move {
+                let result = registry.execute(&call).await;
+                (idx, call, result)
+            });
+        } else {
+            serial.push((idx, call));
+        }
+    }
+
+    let mut results = Vec::new();
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok(tuple) => results.push(tuple),
+            Err(error) => tracing::error!("Concurrent tool task panicked: {error}"),
+        }
+    }
+    for (idx, call) in serial {
+        let result = state.registry.execute(&call).await;
+        results.push((idx, call, result));
+    }
+    results.sort_by_key(|(idx, _, _)| *idx);
+    results
+}
+
+async fn process_capability_activation(
+    state: &AppState,
+    conv_id: Uuid,
+    run_id: &str,
+    event_tx: Option<&tokio::sync::mpsc::Sender<ServerEvent>>,
+    toolset: &mut RunToolset,
+    tool_calls: &[jossie_core::ToolCall],
+    messages: &mut Vec<Message>,
+    goal_tracker: &mut GoalTracker,
+) -> anyhow::Result<bool> {
+    if !tool_calls
+        .iter()
+        .any(|call| call.name == "activate_capabilities")
+    {
+        return Ok(false);
+    }
+
+    for call in tool_calls {
+        let (result, activated) = if call.name == "activate_capabilities" {
+            toolset.activate(state, call)
+        } else {
+            (
+                jossie_core::ToolResult {
+                    tool_call_id: call.id.clone(),
+                    content: "Activate capabilities in a separate step before calling their tools."
+                        .to_string(),
+                    is_error: true,
+                },
+                Vec::new(),
+            )
+        };
+
+        if !activated.is_empty() {
+            emit_stream_event(
+                state,
+                event_tx,
+                ServerEvent::CapabilitiesActivated {
+                    conversation_id: conv_id,
+                    run_id: run_id.to_string(),
+                    capabilities: activated,
+                },
+            )
+            .await;
+        }
+        goal_tracker.record_tool_result(call, &result);
+        let tool_msg = Message::new(conv_id, Role::Tool, result.content)
+            .with_tool_call_id(call.id.clone())
+            .with_name(call.name.clone());
+        persist_message(state, &tool_msg).await?;
+        messages.push(tool_msg);
+    }
+    goal_tracker.record_tool_calls(tool_calls);
+    Ok(true)
+}
+
+fn contains_action_term(text: &str, terms: &[&str]) -> bool {
+    terms.iter().any(|term| text.contains(term))
+}
+
+fn action_is_explicitly_authorized(
+    call: &jossie_core::ToolCall,
+    latest_user_message: &str,
+    messages: &[Message],
+) -> bool {
+    let user = latest_user_message.to_lowercase();
+    let previous_assistant = messages
+        .iter()
+        .rev()
+        .skip(1)
+        .find(|message| message.role == Role::Assistant && message.tool_calls.is_none())
+        .map(|message| message.content.to_lowercase())
+        .unwrap_or_default();
+
+    match call.name.as_str() {
+        "mail_send" | "email_send" | "gmail_send" => {
+            let asks_to_send =
+                contains_action_term(&user, &["send", "email", "e-mail", "mail this", "forward"]);
+            if !asks_to_send {
+                return false;
+            }
+            let recipient = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                .ok()
+                .and_then(|value| value.get("to")?.as_str().map(str::to_lowercase));
+            recipient.is_none_or(|recipient| {
+                user.contains(&recipient)
+                    || recipient
+                        .split('@')
+                        .next()
+                        .into_iter()
+                        .flat_map(|local| local.split(|ch: char| !ch.is_ascii_alphanumeric()))
+                        .filter(|part| part.len() >= 3)
+                        .any(|part| user.contains(part))
+                    || user.contains("send me")
+                    || (contains_action_term(&user, &["send it", "send that", "send this"])
+                        && previous_assistant.contains(&recipient))
+            })
+        }
+        "calendar_create_event" => {
+            contains_action_term(
+                &user,
+                &["schedule", "book", "add", "create", "put on my calendar"],
+            ) && contains_action_term(&user, &["calendar", "meeting", "event", "appointment"])
+        }
+        "calendar_update_event" => {
+            contains_action_term(&user, &["reschedule", "move", "update", "change", "edit"])
+        }
+        "schedule_task" | "schedule_recurring_task" => contains_action_term(
+            &user,
+            &["remind", "schedule", "every ", "each day", "recurring"],
+        ),
+        "send_user_message" => {
+            contains_action_term(&user, &["notify", "message me", "tell me", "remind me"])
+        }
+        "cancel_scheduled_task" => {
+            contains_action_term(&user, &["cancel", "delete", "remove", "stop"])
+        }
+        "memory_delete" | "graph_delete_node" | "graph_delete_relation" => {
+            contains_action_term(&user, &["delete", "remove", "forget"])
+        }
+        "browser_fill_input" | "browser_click" | "browser_select_option" => contains_action_term(
+            &user,
+            &[
+                "click", "fill", "select", "choose", "submit", "log in", "sign in", "buy",
+                "purchase",
+            ],
+        ),
+        "http_request" => contains_action_term(
+            &user,
+            &[
+                "post", "submit", "send", "create", "update", "delete", "request",
+            ],
+        ),
+        _ => false,
+    }
+}
+
+fn action_summary(call: &jossie_core::ToolCall) -> (String, String) {
+    let args = serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap_or_default();
+    let value = |key: &str| {
+        args.get(key)
+            .and_then(|value| value.as_str())
+            .map(|value| preview_text(value, 180))
+    };
+    match call.name.as_str() {
+        "mail_send" | "email_send" | "gmail_send" => (
+            "Send email".to_string(),
+            format!(
+                "To {} — {}\n{}",
+                value("to").unwrap_or_else(|| "the selected recipient".to_string()),
+                value("subject").unwrap_or_else(|| "No subject".to_string()),
+                value("body").unwrap_or_else(|| "No body".to_string())
+            ),
+        ),
+        "calendar_create_event" => (
+            "Create calendar event".to_string(),
+            format!(
+                "{} at {}",
+                value("summary").unwrap_or_else(|| "New event".to_string()),
+                value("start_time").unwrap_or_else(|| "the selected time".to_string())
+            ),
+        ),
+        "calendar_update_event" => (
+            "Update calendar event".to_string(),
+            value("summary")
+                .or_else(|| value("event_id"))
+                .unwrap_or_else(|| "Change the selected event".to_string()),
+        ),
+        "schedule_task" | "schedule_recurring_task" => (
+            "Create scheduled work".to_string(),
+            value("prompt").unwrap_or_else(|| "Run the requested task later".to_string()),
+        ),
+        "cancel_scheduled_task" => (
+            "Cancel scheduled work".to_string(),
+            value("task_id").unwrap_or_else(|| "Cancel the selected task".to_string()),
+        ),
+        "memory_delete" | "graph_delete_node" | "graph_delete_relation" => (
+            "Delete saved context".to_string(),
+            value("key")
+                .or_else(|| value("id"))
+                .or_else(|| value("node_id"))
+                .or_else(|| value("edge_id"))
+                .map(|target| format!("Permanently remove {target}"))
+                .unwrap_or_else(|| "Permanently remove the selected private data".to_string()),
+        ),
+        "browser_fill_input" | "browser_click" | "browser_select_option" => (
+            "Interact with a website".to_string(),
+            [value("selector"), value("value"), value("text")]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" — "),
+        ),
+        "http_request" => (
+            "Send an external request".to_string(),
+            format!(
+                "{} {}",
+                value("method").unwrap_or_else(|| "REQUEST".to_string()),
+                value("url").unwrap_or_else(|| "the selected URL".to_string())
+            ),
+        ),
+        _ => (
+            call.name.replace('_', " "),
+            "Perform the proposed consequential action".to_string(),
+        ),
+    }
+}
+
+fn effect_name(effect: ToolEffect) -> &'static str {
+    match effect {
+        ToolEffect::Read => "read",
+        ToolEffect::LocalWrite => "local_write",
+        ToolEffect::ExternalWrite => "external_write",
+        ToolEffect::Destructive => "destructive",
+    }
+}
+
+async fn partition_authorized_calls(
+    state: &AppState,
+    conv_id: Uuid,
+    run_id: &str,
+    event_tx: Option<&tokio::sync::mpsc::Sender<ServerEvent>>,
+    calls: Vec<jossie_core::ToolCall>,
+    latest_user_message: &str,
+    messages: &[Message],
+) -> anyhow::Result<(Vec<jossie_core::ToolCall>, Vec<jossie_db::PendingAction>)> {
+    let batch_id = Uuid::new_v4().to_string();
+    let mut executable = Vec::new();
+    let mut pending = Vec::new();
+
+    for call in calls {
+        let metadata = state.registry.metadata_for(&call);
+        if !metadata.effect.requires_explicit_authorization()
+            || action_is_explicitly_authorized(&call, latest_user_message, messages)
+        {
+            executable.push(call);
+            continue;
+        }
+
+        let (title, summary) = action_summary(&call);
+        let action = state
+            .db
+            .create_pending_action(&NewPendingAction {
+                batch_id: batch_id.clone(),
+                conversation_id: conv_id,
+                run_id: run_id.to_string(),
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                title,
+                summary,
+                effect: effect_name(metadata.effect).to_string(),
+            })
+            .await?;
+        emit_stream_event(
+            state,
+            event_tx,
+            ServerEvent::ActionApprovalRequired {
+                conversation_id: conv_id,
+                run_id: run_id.to_string(),
+                action: action.clone(),
+            },
+        )
+        .await;
+        pending.push(action);
+    }
+    Ok((executable, pending))
 }
 
 pub async fn run_agent_loop_with_options(
@@ -858,8 +1272,17 @@ async fn run_agent_loop_inner(
     options: &AgentRunOptions,
 ) -> anyhow::Result<String> {
     let run_id = Uuid::new_v4().to_string();
-    let (tools, mut messages, last_user_msg, mut goal_tracker, mut reflection_retries_remaining) =
-        prepare_run_context(state, conv_id, options).await?;
+    let authorization_context = options
+        .authorization_context
+        .as_deref()
+        .filter(|context| !context.trim().is_empty());
+    let (
+        mut toolset,
+        mut messages,
+        last_user_msg,
+        mut goal_tracker,
+        mut reflection_retries_remaining,
+    ) = prepare_run_context(state, conv_id, options).await?;
 
     for _iteration in 0..state.max_agent_iterations {
         ensure_run_not_cancelled(state, conv_id, &run_id, None).await?;
@@ -890,6 +1313,7 @@ async fn run_agent_loop_inner(
             }
         }
 
+        let tools = toolset.definitions(state);
         let output = state.llm.complete(&messages, &tools).await?;
         let content = output.content;
         let tool_calls = output.tool_calls;
@@ -958,32 +1382,42 @@ async fn run_agent_loop_inner(
         persist_message(state, &assistant_msg).await?;
         messages.push(assistant_msg);
 
-        let prepared_calls = prepare_tool_calls_for_execution(&tool_calls, conv_id);
+        if process_capability_activation(
+            state,
+            conv_id,
+            &run_id,
+            None,
+            &mut toolset,
+            &tool_calls,
+            &mut messages,
+            &mut goal_tracker,
+        )
+        .await?
+        {
+            continue;
+        }
 
-        let mut join_set = tokio::task::JoinSet::new();
-        for (idx, call) in prepared_calls.into_iter().enumerate() {
-            let registry = state.registry.clone();
+        let prepared_calls = prepare_tool_calls_for_execution(&tool_calls, conv_id, &last_user_msg);
+        let (prepared_calls, pending_actions) = partition_authorized_calls(
+            state,
+            conv_id,
+            &run_id,
+            None,
+            prepared_calls,
+            authorization_context.unwrap_or(&last_user_msg),
+            &messages,
+        )
+        .await?;
+
+        for call in &prepared_calls {
             tracing::info!(
                 "Executing tool: {} with args: {}",
                 call.name,
                 call.arguments
             );
-            join_set.spawn(async move {
-                let result = registry.execute(&call).await;
-                (idx, call, result)
-            });
         }
-
-        let mut results: Vec<(usize, jossie_core::ToolCall, jossie_core::ToolResult)> =
-            Vec::with_capacity(tool_calls.len());
-        while let Some(res) = join_set.join_next().await {
-            ensure_run_not_cancelled(state, conv_id, &run_id, None).await?;
-            match res {
-                Ok(tuple) => results.push(tuple),
-                Err(e) => tracing::error!("Tool task panicked: {e}"),
-            }
-        }
-        results.sort_by_key(|(idx, _, _)| *idx);
+        let results = execute_tool_batch(state, prepared_calls).await;
+        ensure_run_not_cancelled(state, conv_id, &run_id, None).await?;
 
         for (_, call, result) in results {
             tracing::info!(
@@ -997,6 +1431,22 @@ async fn run_agent_loop_inner(
                 .with_name(call.name.clone());
             persist_message(state, &tool_msg).await?;
             messages.push(tool_msg);
+        }
+        if let Some(action) = pending_actions.first() {
+            emit_stream_event(
+                state,
+                None,
+                ServerEvent::RunWaitingForApproval {
+                    conversation_id: conv_id,
+                    run_id: run_id.clone(),
+                    batch_id: action.batch_id.clone(),
+                },
+            )
+            .await;
+            return Ok(format!(
+                "I need your approval before I {}. Review the pending action to continue.",
+                action.title.to_lowercase()
+            ));
         }
     }
 
@@ -1057,23 +1507,28 @@ async fn run_agent_loop_streaming_inner(
 ) {
     let run_id = Uuid::new_v4().to_string();
     let options = AgentRunOptions::default();
-    let (tools, mut messages, last_user_msg, mut goal_tracker, mut reflection_retries_remaining) =
-        match prepare_run_context(state, conv_id, &options).await {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                emit_stream_event(
-                    state,
-                    Some(&event_tx),
-                    ServerEvent::Error {
-                        conversation_id: conv_id,
-                        run_id: Some(run_id.clone()),
-                        error: e.to_string(),
-                    },
-                )
-                .await;
-                return;
-            }
-        };
+    let (
+        mut toolset,
+        mut messages,
+        last_user_msg,
+        mut goal_tracker,
+        mut reflection_retries_remaining,
+    ) = match prepare_run_context(state, conv_id, &options).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            emit_stream_event(
+                state,
+                Some(&event_tx),
+                ServerEvent::Error {
+                    conversation_id: conv_id,
+                    run_id: Some(run_id.clone()),
+                    error: e.to_string(),
+                },
+            )
+            .await;
+            return;
+        }
+    };
 
     emit_stream_event(
         state,
@@ -1111,7 +1566,7 @@ async fn run_agent_loop_streaming_inner(
         let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(200);
         let llm = state.llm.clone();
         let messages_clone = messages.clone();
-        let tools_clone = tools.clone();
+        let tools_clone = toolset.definitions(state);
 
         let stream_task = tokio::spawn(async move {
             if let Err(e) = llm
@@ -1264,10 +1719,65 @@ async fn run_agent_loop_streaming_inner(
             let _ = persist_message(state, &assistant_msg).await;
             messages.push(assistant_msg);
 
-            let prepared_calls = prepare_tool_calls_for_execution(&tool_calls, conv_id);
+            match process_capability_activation(
+                state,
+                conv_id,
+                &run_id,
+                Some(&event_tx),
+                &mut toolset,
+                &tool_calls,
+                &mut messages,
+                &mut goal_tracker,
+            )
+            .await
+            {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    emit_stream_event(
+                        state,
+                        Some(&event_tx),
+                        ServerEvent::Error {
+                            conversation_id: conv_id,
+                            run_id: Some(run_id.clone()),
+                            error: error.to_string(),
+                        },
+                    )
+                    .await;
+                    return;
+                }
+            }
 
-            let mut join_set = tokio::task::JoinSet::new();
-            for (idx, call) in prepared_calls.into_iter().enumerate() {
+            let prepared_calls =
+                prepare_tool_calls_for_execution(&tool_calls, conv_id, &last_user_msg);
+            let (prepared_calls, pending_actions) = match partition_authorized_calls(
+                state,
+                conv_id,
+                &run_id,
+                Some(&event_tx),
+                prepared_calls,
+                &last_user_msg,
+                &messages,
+            )
+            .await
+            {
+                Ok(partition) => partition,
+                Err(error) => {
+                    emit_stream_event(
+                        state,
+                        Some(&event_tx),
+                        ServerEvent::Error {
+                            conversation_id: conv_id,
+                            run_id: Some(run_id.clone()),
+                            error: error.to_string(),
+                        },
+                    )
+                    .await;
+                    return;
+                }
+            };
+
+            for call in &prepared_calls {
                 emit_stream_event(
                     state,
                     Some(&event_tx),
@@ -1280,7 +1790,6 @@ async fn run_agent_loop_streaming_inner(
                     },
                 )
                 .await;
-                let registry = state.registry.clone();
                 let started_event = ServerEvent::ToolStarted {
                     conversation_id: conv_id,
                     run_id: run_id.clone(),
@@ -1288,27 +1797,14 @@ async fn run_agent_loop_streaming_inner(
                     tool: call.name.clone(),
                 };
                 emit_stream_event(state, Some(&event_tx), started_event).await;
-                join_set.spawn(async move {
-                    let result = registry.execute(&call).await;
-                    (idx, call, result)
-                });
             }
-
-            let mut results: Vec<(usize, jossie_core::ToolCall, jossie_core::ToolResult)> =
-                Vec::with_capacity(tool_calls.len());
-            while let Some(res) = join_set.join_next().await {
-                if state.is_cancel_requested(conv_id).await {
-                    join_set.abort_all();
-                    let _ =
-                        ensure_run_not_cancelled(state, conv_id, &run_id, Some(&event_tx)).await;
-                    return;
-                }
-                match res {
-                    Ok(tuple) => results.push(tuple),
-                    Err(e) => tracing::error!("Tool task panicked: {e}"),
-                }
+            let results = execute_tool_batch(state, prepared_calls).await;
+            if ensure_run_not_cancelled(state, conv_id, &run_id, Some(&event_tx))
+                .await
+                .is_err()
+            {
+                return;
             }
-            results.sort_by_key(|(idx, _, _)| *idx);
 
             for (_, call, result) in results {
                 emit_stream_event(
@@ -1330,6 +1826,19 @@ async fn run_agent_loop_streaming_inner(
                     .with_name(call.name.clone());
                 let _ = persist_message(state, &tool_msg).await;
                 messages.push(tool_msg);
+            }
+            if let Some(action) = pending_actions.first() {
+                emit_stream_event(
+                    state,
+                    Some(&event_tx),
+                    ServerEvent::RunWaitingForApproval {
+                        conversation_id: conv_id,
+                        run_id: run_id.clone(),
+                        batch_id: action.batch_id.clone(),
+                    },
+                )
+                .await;
+                return;
             }
             goal_tracker.record_tool_calls(&tool_calls);
             continue;
@@ -1881,14 +2390,22 @@ fn build_event_mode_tools(
     state: &AppState,
     event: &IntegrationEvent,
 ) -> Vec<jossie_core::ToolDefinition> {
-    let mut tools = build_tools_for_options(
-        state,
-        &AgentRunOptions {
-            allow_schedule_management: false,
-            allow_oob_messages: false,
-            scheduled_execution: false,
-        },
-    );
+    let mut tools: Vec<jossie_core::ToolDefinition> = state
+        .registry
+        .all_agent_tool_definitions()
+        .into_iter()
+        .filter(|tool| {
+            state
+                .registry
+                .metadata_for(&jossie_core::ToolCall {
+                    id: String::new(),
+                    name: tool.name.clone(),
+                    arguments: "{}".to_string(),
+                })
+                .effect
+                == jossie_core::integration::ToolEffect::Read
+        })
+        .collect();
     if event_supports_trigger_email_read(event) {
         tools.push(jossie_core::ToolDefinition {
             name: EVENT_TOOL_READ_TRIGGER_EMAIL.to_string(),
@@ -3093,7 +3610,7 @@ mod tests {
             },
         ];
 
-        let prepared = prepare_tool_calls_for_execution(&calls, conv_id);
+        let prepared = prepare_tool_calls_for_execution(&calls, conv_id, "remind me to check in");
         let scheduler_args: serde_json::Value =
             serde_json::from_str(&prepared[0].arguments).expect("scheduler args should be JSON");
 
@@ -3101,7 +3618,66 @@ mod tests {
             scheduler_args["__conversation_id"],
             serde_json::Value::String(conv_id.to_string())
         );
+        assert_eq!(
+            scheduler_args["__authorization_context"],
+            "remind me to check in"
+        );
         assert_eq!(prepared[1].arguments, calls[1].arguments);
+    }
+
+    #[test]
+    fn explicit_mail_request_authorizes_only_a_matching_recipient() {
+        let conv_id = Uuid::new_v4();
+        let messages = vec![
+            Message::new(
+                conv_id,
+                Role::Assistant,
+                "Draft to ada@example.com: Hello Ada".to_string(),
+            ),
+            Message::new(conv_id, Role::User, "Send it".to_string()),
+        ];
+        let matching = jossie_core::ToolCall {
+            id: "call_1".to_string(),
+            name: "mail_send".to_string(),
+            arguments: r#"{"to":"ada@example.com","subject":"Hello","body":"Hello Ada"}"#
+                .to_string(),
+        };
+        let changed = jossie_core::ToolCall {
+            arguments: r#"{"to":"eve@example.com","subject":"Hello","body":"Hello Ada"}"#
+                .to_string(),
+            ..matching.clone()
+        };
+
+        assert!(action_is_explicitly_authorized(
+            &matching, "Send it", &messages
+        ));
+        assert!(!action_is_explicitly_authorized(
+            &changed, "Send it", &messages
+        ));
+        assert!(!action_is_explicitly_authorized(
+            &matching,
+            "That draft looks good",
+            &messages
+        ));
+    }
+
+    #[test]
+    fn inferred_destructive_actions_are_not_authorized() {
+        let call = jossie_core::ToolCall {
+            id: "call_1".to_string(),
+            name: "memory_delete".to_string(),
+            arguments: r#"{"key":"old"}"#.to_string(),
+        };
+        assert!(action_is_explicitly_authorized(
+            &call,
+            "Forget that old memory",
+            &[]
+        ));
+        assert!(!action_is_explicitly_authorized(
+            &call,
+            "Clean up my context",
+            &[]
+        ));
     }
 }
 

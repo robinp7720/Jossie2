@@ -40,6 +40,12 @@ async fn main() -> Result<()> {
     tracing::info!("Connecting to database...");
     let db = Database::new(&config.database.url).await?;
     db.migrate().await?;
+    let interrupted_actions = db.mark_interrupted_actions_uncertain().await?;
+    if interrupted_actions > 0 {
+        tracing::warn!(
+            "Marked {interrupted_actions} interrupted external actions as uncertain; they will not be retried"
+        );
+    }
     let db = Arc::new(db);
 
     let mut llm = LlmClient::new(&config.llm.api_url, &config.llm.api_key, &config.llm.model);
@@ -112,6 +118,13 @@ async fn main() -> Result<()> {
     // Scheduler Integration
     registry.register(Arc::new(SchedulerIntegration::new(db.clone())));
     tracing::info!("Registered scheduler integration");
+
+    let unclassified_tools = registry.unclassified_agent_tools();
+    anyhow::ensure!(
+        unclassified_tools.is_empty(),
+        "Agent-visible tools are missing capability policy: {}",
+        unclassified_tools.join(", ")
+    );
 
     tracing::info!(
         "Registered {} tool(s)",

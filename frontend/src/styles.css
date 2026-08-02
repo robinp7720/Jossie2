@@ -76,6 +76,15 @@ input:focus,textarea:focus,select:focus { border-color: #bde76d; box-shadow: 0 0
 .chat-context ul { display: flex; flex-wrap: wrap; gap: .35rem; margin: .65rem 0 0; padding: .65rem .85rem; border-top: 1px solid #293440; list-style: none; }
 .chat-context li { border: 1px solid #35414e; border-radius: 999px; padding: .2rem .45rem; color: #9eabb9; font: .6rem 'DM Mono', monospace; }
 .message .chat-context { margin: .55rem 0 0; }
+.run-timeline,.approval-stack { margin:0 1rem .75rem;padding:.8rem;border:1px solid #2c3541;border-radius:.8rem;background:#131923; }
+.run-timeline > p { margin:0 0 .55rem;color:#91a06f;font:600 .62rem 'DM Mono',monospace;text-transform:uppercase;letter-spacing:.09em; }
+.run-step { display:grid;grid-template-columns:.65rem minmax(0,1fr) auto;gap:.5rem;align-items:center;padding:.34rem 0;color:#aab4c1;font-size:.68rem; }
+.run-step i { width:.4rem;height:.4rem;border-radius:50%;background:#778291; }.run-step.running i { background:#bce56c;box-shadow:0 0 0 .22rem #bce56c20; }.run-step.error i { background:#ef8f81; }.run-step span { color:#697584;font-size:.6rem; }
+.approval-stack { border-color:#4b4531;background:#191a17; }.approval-stack > .list-label { margin:0 0 .55rem; }
+.approval-card { padding:.8rem;border:1px solid #444535;border-radius:.65rem;background:#202019; }.approval-card + .approval-card { margin-top:.6rem; }.approval-card.destructive { border-color:#633f3a;background:#241b1b; }
+.approval-card > div { display:flex;align-items:center;justify-content:space-between;gap:.75rem; }.approval-card strong { color:#edf1e8;font-size:.78rem; }.approval-card > div span { color:#d4bb73;font:500 .58rem 'DM Mono',monospace;text-transform:uppercase; }.approval-card.destructive > div span { color:#f0a397; }
+.approval-card p { margin:.55rem 0;color:#aeb7c0;font-size:.72rem;line-height:1.5;white-space:pre-wrap; }.approval-card small { display:block;color:#e4a49a;font-size:.65rem;line-height:1.45; }.approval-card footer { display:flex;justify-content:flex-end;gap:.5rem;margin-top:.65rem; }.approval-card footer span { color:#8995a3;font-size:.65rem; }
+.chat-action-error { margin:0 1rem .6rem;padding:.65rem .75rem;border:1px solid #653d39;border-radius:.6rem;background:#2a1c1c;color:#f0a59b;font-size:.7rem; }
 
 .typed-account-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .typed-account-form .form-span { grid-column: 1 / -1; }

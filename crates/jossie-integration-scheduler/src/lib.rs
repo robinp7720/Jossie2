@@ -61,6 +61,8 @@ impl SchedulerIntegration {
         struct Args {
             prompt: String,
             run_at: String,
+            #[serde(default, rename = "__authorization_context")]
+            authorization_context: String,
         }
         let args: Args = serde_json::from_str(args)?;
 
@@ -87,6 +89,7 @@ impl SchedulerIntegration {
 
         let task_data = serde_json::json!({
             "prompt": args.prompt,
+            "authorization_context": args.authorization_context,
         });
 
         let task_id = self
@@ -120,6 +123,8 @@ impl SchedulerIntegration {
             interval_seconds: i64,
             #[serde(default)]
             max_runs: Option<i64>,
+            #[serde(default, rename = "__authorization_context")]
+            authorization_context: String,
         }
         let args: Args = serde_json::from_str(args)?;
 
@@ -129,6 +134,7 @@ impl SchedulerIntegration {
 
         let task_data = serde_json::json!({
             "prompt": args.prompt,
+            "authorization_context": args.authorization_context,
         });
 
         // Calculate first run time

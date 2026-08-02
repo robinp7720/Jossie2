@@ -2,6 +2,201 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityGroup {
+    Core,
+    Memory,
+    Knowledge,
+    Files,
+    Mail,
+    Calendar,
+    Drive,
+    Web,
+    Scheduler,
+}
+
+impl CapabilityGroup {
+    pub const ACTIVATABLE: [Self; 7] = [
+        Self::Knowledge,
+        Self::Files,
+        Self::Mail,
+        Self::Calendar,
+        Self::Drive,
+        Self::Web,
+        Self::Scheduler,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Memory => "memory",
+            Self::Knowledge => "knowledge",
+            Self::Files => "files",
+            Self::Mail => "mail",
+            Self::Calendar => "calendar",
+            Self::Drive => "drive",
+            Self::Web => "web",
+            Self::Scheduler => "scheduler",
+        }
+    }
+}
+
+impl std::str::FromStr for CapabilityGroup {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "core" => Ok(Self::Core),
+            "memory" => Ok(Self::Memory),
+            "knowledge" => Ok(Self::Knowledge),
+            "files" => Ok(Self::Files),
+            "mail" => Ok(Self::Mail),
+            "calendar" => Ok(Self::Calendar),
+            "drive" => Ok(Self::Drive),
+            "web" => Ok(Self::Web),
+            "scheduler" => Ok(Self::Scheduler),
+            _ => Err(format!("Unknown capability group: {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEffect {
+    Read,
+    LocalWrite,
+    ExternalWrite,
+    Destructive,
+}
+
+impl ToolEffect {
+    pub fn requires_explicit_authorization(self) -> bool {
+        matches!(self, Self::ExternalWrite | Self::Destructive)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolMetadata {
+    pub capability: CapabilityGroup,
+    pub effect: ToolEffect,
+    pub concurrent: bool,
+    pub retry_transient: bool,
+}
+
+impl ToolMetadata {
+    const fn read(capability: CapabilityGroup) -> Self {
+        Self {
+            capability,
+            effect: ToolEffect::Read,
+            concurrent: true,
+            retry_transient: true,
+        }
+    }
+
+    const fn local_write(capability: CapabilityGroup) -> Self {
+        Self {
+            capability,
+            effect: ToolEffect::LocalWrite,
+            concurrent: false,
+            retry_transient: false,
+        }
+    }
+
+    const fn action(capability: CapabilityGroup, effect: ToolEffect) -> Self {
+        Self {
+            capability,
+            effect,
+            concurrent: false,
+            retry_transient: false,
+        }
+    }
+}
+
+/// Central policy for the current built-in tool set. Unknown tools fail safe as
+/// serial external writes until their policy is added here.
+pub fn tool_metadata(tool_name: &str, arguments: &str) -> ToolMetadata {
+    let read = match tool_name {
+        "memory_get"
+        | "memory_generate_totp"
+        | "memory_search"
+        | "memory_list_keys"
+        | "memory_list_all" => Some(CapabilityGroup::Memory),
+        "graph_search" | "graph_list_by_type" | "graph_explore_connections" => {
+            Some(CapabilityGroup::Knowledge)
+        }
+        "list_files" | "read_file" => Some(CapabilityGroup::Files),
+        "mail_list_accounts"
+        | "mail_search"
+        | "mail_read"
+        | "mail_list_mailboxes"
+        | "email_list_accounts"
+        | "email_search"
+        | "email_read"
+        | "email_list_folders"
+        | "gmail_search"
+        | "gmail_read"
+        | "gmail_list_labels" => Some(CapabilityGroup::Mail),
+        "google_list_accounts" | "calendar_list_calendars" | "calendar_list_events" => {
+            Some(CapabilityGroup::Calendar)
+        }
+        "drive_search" | "drive_read" | "drive_list_files" => Some(CapabilityGroup::Drive),
+        "browser_read_page"
+        | "browser_session_snapshot"
+        | "browser_navigate"
+        | "browser_search" => Some(CapabilityGroup::Web),
+        "list_scheduled_tasks" => Some(CapabilityGroup::Scheduler),
+        _ => None,
+    };
+    if let Some(capability) = read {
+        return ToolMetadata::read(capability);
+    }
+
+    match tool_name {
+        "memory_save" => ToolMetadata::local_write(CapabilityGroup::Memory),
+        "graph_upsert_node" | "graph_add_relation" => {
+            ToolMetadata::local_write(CapabilityGroup::Knowledge)
+        }
+        "ingest_chat_export" => ToolMetadata::local_write(CapabilityGroup::Files),
+        "browser_open_session" | "browser_close_session" => {
+            ToolMetadata::local_write(CapabilityGroup::Web)
+        }
+        "memory_delete" => ToolMetadata::action(CapabilityGroup::Memory, ToolEffect::Destructive),
+        "graph_delete_node" | "graph_delete_relation" => {
+            ToolMetadata::action(CapabilityGroup::Knowledge, ToolEffect::Destructive)
+        }
+        "mail_send" | "email_send" | "gmail_send" => {
+            ToolMetadata::action(CapabilityGroup::Mail, ToolEffect::ExternalWrite)
+        }
+        "calendar_create_event" | "calendar_update_event" => {
+            ToolMetadata::action(CapabilityGroup::Calendar, ToolEffect::ExternalWrite)
+        }
+        "browser_fill_input" | "browser_click" | "browser_select_option" => {
+            ToolMetadata::action(CapabilityGroup::Web, ToolEffect::ExternalWrite)
+        }
+        "schedule_task" | "schedule_recurring_task" | "send_user_message" => {
+            ToolMetadata::action(CapabilityGroup::Scheduler, ToolEffect::ExternalWrite)
+        }
+        "cancel_scheduled_task" => {
+            ToolMetadata::action(CapabilityGroup::Scheduler, ToolEffect::Destructive)
+        }
+        "http_request" => {
+            let method = serde_json::from_str::<serde_json::Value>(arguments)
+                .ok()
+                .and_then(|value| value.get("method")?.as_str().map(str::to_uppercase))
+                .unwrap_or_else(|| "GET".to_string());
+            if matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS") {
+                ToolMetadata::read(CapabilityGroup::Web)
+            } else if method == "DELETE" {
+                ToolMetadata::action(CapabilityGroup::Web, ToolEffect::Destructive)
+            } else {
+                ToolMetadata::action(CapabilityGroup::Web, ToolEffect::ExternalWrite)
+            }
+        }
+        _ => ToolMetadata::action(CapabilityGroup::Core, ToolEffect::ExternalWrite),
+    }
+}
+
 // --- Tool Result Validation (#2) ---
 
 #[derive(Debug, Clone, PartialEq)]
@@ -221,6 +416,38 @@ impl IntegrationRegistry {
             .collect()
     }
 
+    pub fn agent_tool_definitions_for(
+        &self,
+        capabilities: &std::collections::HashSet<CapabilityGroup>,
+    ) -> Vec<ToolDefinition> {
+        self.all_agent_tool_definitions()
+            .into_iter()
+            .filter(|tool| {
+                capabilities.contains(&tool_metadata(&tool.name, "{}").capability)
+                    || (tool.name == "google_list_accounts"
+                        && capabilities.contains(&CapabilityGroup::Drive))
+            })
+            .collect()
+    }
+
+    pub fn has_agent_tools_for(&self, capability: CapabilityGroup) -> bool {
+        self.all_agent_tool_definitions()
+            .iter()
+            .any(|tool| tool_metadata(&tool.name, "{}").capability == capability)
+    }
+
+    pub fn metadata_for(&self, call: &ToolCall) -> ToolMetadata {
+        tool_metadata(&call.name, &call.arguments)
+    }
+
+    pub fn unclassified_agent_tools(&self) -> Vec<String> {
+        self.all_agent_tool_definitions()
+            .into_iter()
+            .filter(|tool| tool_metadata(&tool.name, "{}").capability == CapabilityGroup::Core)
+            .map(|tool| tool.name)
+            .collect()
+    }
+
     pub fn get_integrations(&self) -> &[Arc<dyn Integration>] {
         &self.integrations
     }
@@ -240,7 +467,13 @@ impl IntegrationRegistry {
 
         let mut last_error = String::new();
 
-        for attempt in 0..=MAX_RETRIES {
+        let retry_limit = if self.metadata_for(call).retry_transient {
+            MAX_RETRIES
+        } else {
+            0
+        };
+
+        for attempt in 0..=retry_limit {
             match self.integrations[idx]
                 .execute(&call.name, &call.arguments)
                 .await
@@ -283,13 +516,13 @@ impl IntegrationRegistry {
                     let error_kind = classify_error(&last_error);
 
                     match error_kind {
-                        ToolErrorKind::Transient if attempt < MAX_RETRIES => {
-                            let delay = backoff_ms[attempt];
+                        ToolErrorKind::Transient if attempt < retry_limit => {
+                            let delay = backoff_ms.get(attempt).copied().unwrap_or(1000);
                             tracing::warn!(
                                 "Tool '{}' transient error (attempt {}/{}): {}. Retrying in {}ms...",
                                 call.name,
                                 attempt + 1,
-                                MAX_RETRIES + 1,
+                                retry_limit + 1,
                                 last_error,
                                 delay
                             );
@@ -401,6 +634,41 @@ mod tests {
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].name, "mock_tool");
         assert_eq!(tools[1].name, "mock_echo");
+    }
+
+    #[test]
+    fn built_in_tool_metadata_separates_reads_from_actions() {
+        let search = tool_metadata("mail_search", r#"{"query":"status"}"#);
+        assert_eq!(search.capability, CapabilityGroup::Mail);
+        assert_eq!(search.effect, ToolEffect::Read);
+        assert!(search.concurrent);
+        assert!(search.retry_transient);
+
+        let send = tool_metadata("mail_send", r#"{"to":"owner@example.com"}"#);
+        assert_eq!(send.capability, CapabilityGroup::Mail);
+        assert_eq!(send.effect, ToolEffect::ExternalWrite);
+        assert!(!send.concurrent);
+        assert!(!send.retry_transient);
+
+        let delete = tool_metadata("memory_delete", r#"{"key":"old"}"#);
+        assert_eq!(delete.effect, ToolEffect::Destructive);
+        assert!(delete.effect.requires_explicit_authorization());
+    }
+
+    #[test]
+    fn http_effect_depends_on_method() {
+        assert_eq!(
+            tool_metadata("http_request", r#"{"method":"GET"}"#).effect,
+            ToolEffect::Read
+        );
+        assert_eq!(
+            tool_metadata("http_request", r#"{"method":"POST"}"#).effect,
+            ToolEffect::ExternalWrite
+        );
+        assert_eq!(
+            tool_metadata("http_request", r#"{"method":"DELETE"}"#).effect,
+            ToolEffect::Destructive
+        );
     }
 
     #[tokio::test]
