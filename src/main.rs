@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
 
     let mut llm = LlmClient::new(&config.llm.api_url, &config.llm.api_key, &config.llm.model);
     llm.set_reasoning_effort(config.llm.reasoning_effort.clone());
+    llm.set_reasoning_context(config.llm.reasoning_context.clone());
     llm.set_enable_web_search(config.llm.enable_web_search);
     llm.set_service_tier(config.llm.service_tier.clone());
 
@@ -55,6 +56,7 @@ async fn main() -> Result<()> {
         );
         let mut client = LlmClient::new(&config.llm.api_url, &config.llm.api_key, kg_model);
         client.set_reasoning_effort(config.llm.reasoning_effort.clone());
+        client.set_reasoning_context(config.llm.reasoning_context.clone());
         client.set_service_tier(config.llm.service_tier.clone());
         client
     } else {
@@ -218,6 +220,15 @@ fn validate_llm_config(config: &mut AppConfig) {
             config.llm.service_tier = None;
         } else if normalized != *service_tier {
             *service_tier = normalized;
+        }
+    }
+
+    if let Some(reasoning_context) = &mut config.llm.reasoning_context {
+        let normalized = reasoning_context.trim().to_string();
+        if normalized.is_empty() {
+            config.llm.reasoning_context = None;
+        } else if normalized != *reasoning_context {
+            *reasoning_context = normalized;
         }
     }
 }

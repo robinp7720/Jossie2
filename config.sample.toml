@@ -54,18 +54,24 @@ api_url = "https://api.openai.com/v1"
 api_key = "sk-your-openai-api-key-here"
 
 # Primary model to use for conversations
-# GPT-5.5 is the recommended default for tool-heavy, proactive assistant workflows.
+# GPT-5.6 Sol is the flagship model for tool-heavy, proactive assistant workflows.
 # For local models: Use whatever model name your API expects
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
 
 # Optional: Use a cheaper/faster model for background knowledge graph extraction
 # This can save API costs since KG extraction happens after every conversation turn
 # If not specified, uses the primary model
-# kg_model = "gpt-5-nano"
+# kg_model = "gpt-5.6-luna"
 
-# Optional: Control reasoning effort for GPT-5.5 ("low", "medium", "high", "xhigh").
-# Leave unset to use the API default, currently "medium".
+# Optional: Control reasoning effort for GPT-5.6
+# ("none", "low", "medium", "high", "xhigh", or "max").
+# Leave unset to use the GPT-5.6 API default, currently "medium".
 # reasoning_effort = "medium"
+
+# Preserve reasoning only within the current user turn. This matches the earlier
+# Jossie behavior while still allowing reasoning items to continue across tool calls.
+# Set to "" for OpenAI-compatible backends that do not support reasoning.context.
+reasoning_context = "current_turn"
 
 # Optional: OpenAI service tier for model requests ("flex", "default", "auto", or "priority").
 # Flex is cheaper but can be slower or temporarily unavailable. Set to "" to omit

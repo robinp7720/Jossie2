@@ -70,6 +70,8 @@ pub struct LlmConfig {
     pub enable_self_reflection: bool,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub reasoning_context: Option<String>,
 }
 
 fn default_max_context_messages() -> usize {

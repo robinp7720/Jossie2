@@ -95,6 +95,7 @@ impl TelegramBot {
                     tool_call_id: None,
                     name: None,
                     attachments: None,
+                    response_items: None,
                     created_at: Utc::now(),
                 };
 

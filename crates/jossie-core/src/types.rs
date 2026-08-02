@@ -63,6 +63,10 @@ pub struct Message {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<Attachment>>,
+    /// Exact Responses API output items needed for an in-flight continuation.
+    /// These may include hidden reasoning and must never be exposed or persisted.
+    #[serde(skip)]
+    pub response_items: Option<Vec<serde_json::Value>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -78,6 +82,7 @@ impl Message {
             tool_call_id: None,
             name: None,
             attachments: None,
+            response_items: None,
             created_at: Utc::now(),
         }
     }
@@ -93,6 +98,7 @@ impl Message {
             tool_call_id: None,
             name: None,
             attachments: None,
+            response_items: None,
             created_at: Utc::now(),
         }
     }
@@ -118,6 +124,14 @@ impl Message {
     /// Set the attachments field.
     pub fn with_attachments(mut self, attachments: Vec<Attachment>) -> Self {
         self.attachments = Some(attachments);
+        self
+    }
+
+    /// Preserve Responses API output items for the next call in the same run.
+    pub fn with_response_items(mut self, response_items: Vec<serde_json::Value>) -> Self {
+        if !response_items.is_empty() {
+            self.response_items = Some(response_items);
+        }
         self
     }
 }
@@ -163,5 +177,17 @@ mod tests {
     #[test]
     fn role_from_str_invalid() {
         assert!("invalid".parse::<Role>().is_err());
+    }
+
+    #[test]
+    fn response_items_are_not_publicly_serialized() {
+        let message = Message::transient(Role::Assistant, "Working".to_string())
+            .with_response_items(vec![serde_json::json!({
+                "type": "reasoning",
+                "id": "rs_private"
+            })]);
+
+        let json = serde_json::to_value(message).unwrap();
+        assert!(json.get("response_items").is_none());
     }
 }

@@ -2204,6 +2204,7 @@ impl From<MessageRow> for Message {
             tool_call_id: r.tool_call_id,
             name: r.name,
             attachments: None, // Populated separately in get_messages
+            response_items: None,
             created_at: r.created_at.parse().unwrap_or_else(|e| {
                 tracing::warn!("Failed to parse message created_at '{}': {e}", r.created_at);
                 chrono::DateTime::default()
@@ -2460,6 +2461,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            response_items: None,
             created_at: Utc::now(),
         };
         db.save_message(&msg1).await.unwrap();
@@ -2473,6 +2475,10 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            response_items: Some(vec![serde_json::json!({
+                "type": "reasoning",
+                "id": "rs_not_persisted"
+            })]),
             created_at: Utc::now(),
         };
         db.save_message(&msg2).await.unwrap();
@@ -2483,6 +2489,7 @@ mod tests {
         assert_eq!(messages[1].content, "Hi there");
         assert_eq!(messages[0].role, Role::User);
         assert_eq!(messages[1].role, Role::Assistant);
+        assert!(messages[1].response_items.is_none());
     }
 
     #[tokio::test]
@@ -2573,6 +2580,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            response_items: None,
             created_at: Utc::now(),
         };
 

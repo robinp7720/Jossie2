@@ -13,6 +13,7 @@ pub struct LlmClient {
     api_key: String,
     model: String,
     reasoning_effort: Option<String>,
+    reasoning_context: Option<String>,
     enable_web_search: bool,
     service_tier: Option<String>,
 }
@@ -35,6 +36,7 @@ struct ResponsesRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 enum ResponseInputItem {
+    Raw(Value),
     InputMessage(ResponseInputMessage),
     AssistantMessage(ResponseAssistantMessage),
     FunctionCall(ResponseFunctionCallInput),
@@ -114,13 +116,16 @@ struct ResponseFunctionCallOutputInput {
 
 #[derive(Debug, Clone, Serialize)]
 struct ResponseReasoningConfig {
-    effort: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct ResponsesResponse {
     #[serde(default)]
-    output: Vec<ResponseOutputItem>,
+    output: Vec<Value>,
     #[allow(dead_code)]
     status: Option<String>,
     #[serde(default)]
@@ -132,47 +137,21 @@ struct ResponseError {
     message: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
-enum ResponseOutputItem {
-    #[serde(rename = "message")]
-    Message(ResponseOutputMessage),
-    #[serde(rename = "function_call")]
-    FunctionCall(ResponseFunctionCall),
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ResponseOutputMessage {
-    #[serde(default)]
-    content: Vec<ResponseOutputContent>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
-enum ResponseOutputContent {
-    #[serde(rename = "output_text")]
-    OutputText { text: String },
-    #[serde(rename = "refusal")]
-    Refusal { refusal: String },
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ResponseFunctionCall {
-    call_id: String,
-    name: String,
-    arguments: String,
-}
-
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     Delta(String),
-    ToolCalls(Vec<ToolCall>),
-    Done,
+    Completed {
+        tool_calls: Vec<ToolCall>,
+        response_items: Vec<Value>,
+    },
     Error(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct LlmOutput {
+    pub content: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub response_items: Vec<Value>,
 }
 
 impl LlmClient {
@@ -183,6 +162,7 @@ impl LlmClient {
             api_key: api_key.to_string(),
             model: model.to_string(),
             reasoning_effort: None,
+            reasoning_context: None,
             enable_web_search: false,
             service_tier: Some("flex".to_string()),
         }
@@ -190,6 +170,10 @@ impl LlmClient {
 
     pub fn set_reasoning_effort(&mut self, effort: Option<String>) {
         self.reasoning_effort = effort;
+    }
+
+    pub fn set_reasoning_context(&mut self, context: Option<String>) {
+        self.reasoning_context = context;
     }
 
     pub fn set_enable_web_search(&mut self, enabled: bool) {
@@ -204,6 +188,14 @@ impl LlmClient {
         let mut items = Vec::new();
 
         for message in messages {
+            if message.role == Role::Assistant
+                && let Some(response_items) = &message.response_items
+                && !response_items.is_empty()
+            {
+                items.extend(response_items.iter().cloned().map(ResponseInputItem::Raw));
+                continue;
+            }
+
             match message.role {
                 Role::System | Role::User => {
                     items.push(ResponseInputItem::InputMessage(ResponseInputMessage {
@@ -301,10 +293,14 @@ impl LlmClient {
                 None
             },
             stream,
-            reasoning: self
-                .reasoning_effort
-                .clone()
-                .map(|effort| ResponseReasoningConfig { effort }),
+            reasoning: if self.reasoning_effort.is_some() || self.reasoning_context.is_some() {
+                Some(ResponseReasoningConfig {
+                    effort: self.reasoning_effort.clone(),
+                    context: self.reasoning_context.clone(),
+                })
+            } else {
+                None
+            },
             service_tier: self.service_tier.clone(),
         }
     }
@@ -314,7 +310,7 @@ impl LlmClient {
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> anyhow::Result<(String, Vec<ToolCall>)> {
+    ) -> anyhow::Result<LlmOutput> {
         let req = self.build_request(messages, tools, false);
 
         let resp = self
@@ -377,6 +373,7 @@ impl LlmClient {
         let mut stream = resp.bytes_stream();
         let mut buffer = String::new();
         let mut pending_calls: HashMap<i32, PendingToolCall> = HashMap::new();
+        let mut completed_items: HashMap<i32, Value> = HashMap::new();
         let mut done_received = false;
 
         while let Some(chunk) = stream.next().await {
@@ -407,7 +404,7 @@ impl LlmClient {
                     break;
                 }
 
-                handle_stream_event(data, &mut pending_calls, &tx).await;
+                handle_stream_event(data, &mut pending_calls, &mut completed_items, &tx).await;
             }
 
             if done_received {
@@ -416,10 +413,13 @@ impl LlmClient {
         }
 
         let calls = collect_tool_calls(pending_calls);
-        if !calls.is_empty() {
-            let _ = tx.send(StreamEvent::ToolCalls(calls)).await;
-        }
-        let _ = tx.send(StreamEvent::Done).await;
+        let response_items = collect_response_items(completed_items);
+        let _ = tx
+            .send(StreamEvent::Completed {
+                tool_calls: calls,
+                response_items,
+            })
+            .await;
         Ok(())
     }
 }
@@ -434,7 +434,7 @@ fn tool_calls_from_message(message: &Message) -> Option<Vec<ToolCall>> {
     }
 }
 
-fn collect_response_output(response: ResponsesResponse) -> anyhow::Result<(String, Vec<ToolCall>)> {
+fn collect_response_output(response: ResponsesResponse) -> anyhow::Result<LlmOutput> {
     if let Some(error) = response.error {
         anyhow::bail!("LLM API error: {}", error.message);
     }
@@ -442,34 +442,54 @@ fn collect_response_output(response: ResponsesResponse) -> anyhow::Result<(Strin
     let mut content = String::new();
     let mut tool_calls = Vec::new();
 
-    for item in response.output {
-        match item {
-            ResponseOutputItem::Message(message) => {
-                for part in message.content {
-                    match part {
-                        ResponseOutputContent::OutputText { text } => content.push_str(&text),
-                        ResponseOutputContent::Refusal { refusal } => content.push_str(&refusal),
-                        ResponseOutputContent::Other => {}
+    for item in &response.output {
+        match item.get("type").and_then(Value::as_str) {
+            Some("message") => {
+                if let Some(parts) = item.get("content").and_then(Value::as_array) {
+                    for part in parts {
+                        match part.get("type").and_then(Value::as_str) {
+                            Some("output_text") => {
+                                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                                    content.push_str(text);
+                                }
+                            }
+                            Some("refusal") => {
+                                if let Some(refusal) = part.get("refusal").and_then(Value::as_str) {
+                                    content.push_str(refusal);
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
-            ResponseOutputItem::FunctionCall(call) => {
+            Some("function_call") => {
+                let required = |field: &str| {
+                    item.get(field).and_then(Value::as_str).ok_or_else(|| {
+                        anyhow::anyhow!("Responses function_call is missing {field}")
+                    })
+                };
                 tool_calls.push(ToolCall {
-                    id: call.call_id,
-                    name: call.name,
-                    arguments: call.arguments,
+                    id: required("call_id")?.to_string(),
+                    name: required("name")?.to_string(),
+                    arguments: required("arguments")?.to_string(),
                 });
             }
-            ResponseOutputItem::Other => {}
+            _ => {}
         }
     }
 
-    Ok((content, tool_calls))
+    Ok(LlmOutput {
+        content,
+        tool_calls,
+        response_items: response.output,
+    })
 }
 
 async fn handle_stream_event(
     data: &str,
     pending_calls: &mut HashMap<i32, PendingToolCall>,
+    completed_items: &mut HashMap<i32, Value>,
     tx: &mpsc::Sender<StreamEvent>,
 ) {
     let Ok(value) = serde_json::from_str::<Value>(data) else {
@@ -539,6 +559,15 @@ async fn handle_stream_event(
                 entry.arguments = arguments.to_string();
             }
         }
+        "response.output_item.done" => {
+            let Some(index) = value.get("output_index").and_then(Value::as_i64) else {
+                return;
+            };
+            let Some(item) = value.get("item") else {
+                return;
+            };
+            completed_items.insert(index as i32, item.clone());
+        }
         "error" => {
             let message = value
                 .get("error")
@@ -550,6 +579,15 @@ async fn handle_stream_event(
         }
         _ => {}
     }
+}
+
+fn collect_response_items(mut items: HashMap<i32, Value>) -> Vec<Value> {
+    let mut indices: Vec<i32> = items.keys().copied().collect();
+    indices.sort_unstable();
+    indices
+        .into_iter()
+        .filter_map(|index| items.remove(&index))
+        .collect()
 }
 
 #[derive(Default)]
@@ -595,6 +633,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            response_items: None,
             created_at: Utc::now(),
         }
     }
@@ -633,6 +672,34 @@ mod tests {
     }
 
     #[test]
+    fn build_input_replays_exact_response_items_before_tool_outputs() {
+        let reasoning = json!({
+            "type": "reasoning",
+            "id": "rs_123",
+            "summary": []
+        });
+        let function_call = json!({
+            "type": "function_call",
+            "id": "fc_123",
+            "call_id": "call_123",
+            "name": "weather_lookup",
+            "arguments": "{\"city\":\"Berlin\"}",
+            "status": "completed"
+        });
+        let assistant = make_message(Role::Assistant, "Checking...")
+            .with_response_items(vec![reasoning.clone(), function_call.clone()]);
+        let mut tool = make_message(Role::Tool, "{\"temp\":12}");
+        tool.tool_call_id = Some("call_123".to_string());
+
+        let json = serde_json::to_value(LlmClient::build_input(&[assistant, tool])).unwrap();
+
+        assert_eq!(json[0], reasoning);
+        assert_eq!(json[1], function_call);
+        assert_eq!(json[2]["type"], "function_call_output");
+        assert_eq!(json[2]["call_id"], "call_123");
+    }
+
+    #[test]
     fn build_request_adds_web_search_tool_when_enabled() {
         let mut client = LlmClient::new("https://api.openai.com/v1", "test-key", "gpt-4.1");
         client.set_enable_web_search(true);
@@ -666,6 +733,29 @@ mod tests {
     }
 
     #[test]
+    fn build_request_serializes_reasoning_effort_and_context() {
+        let mut client = LlmClient::new("https://api.openai.com/v1", "test-key", "gpt-5.6-sol");
+        client.set_reasoning_effort(Some("low".to_string()));
+        client.set_reasoning_context(Some("current_turn".to_string()));
+
+        let request = client.build_request(&[make_message(Role::User, "Hi")], &[], false);
+        let json = serde_json::to_value(request).unwrap();
+
+        assert_eq!(json["reasoning"]["effort"], "low");
+        assert_eq!(json["reasoning"]["context"], "current_turn");
+    }
+
+    #[test]
+    fn build_request_omits_reasoning_when_unconfigured() {
+        let client = LlmClient::new("https://api.openai.com/v1", "test-key", "gpt-4.1");
+
+        let request = client.build_request(&[make_message(Role::User, "Hi")], &[], false);
+        let json = serde_json::to_value(request).unwrap();
+
+        assert!(json.get("reasoning").is_none());
+    }
+
+    #[test]
     fn build_request_preserves_function_tools_when_web_search_enabled() {
         let mut client = LlmClient::new("https://api.openai.com/v1", "test-key", "gpt-4.1");
         client.set_enable_web_search(true);
@@ -693,32 +783,76 @@ mod tests {
 
     #[test]
     fn collect_response_output_extracts_text_and_function_calls() {
+        let reasoning = json!({
+            "type": "reasoning",
+            "id": "rs_456",
+            "summary": []
+        });
         let response = ResponsesResponse {
             output: vec![
-                ResponseOutputItem::Message(ResponseOutputMessage {
-                    content: vec![
-                        ResponseOutputContent::OutputText {
-                            text: "Hello ".to_string(),
-                        },
-                        ResponseOutputContent::Refusal {
-                            refusal: "world".to_string(),
-                        },
-                    ],
+                reasoning.clone(),
+                json!({
+                    "type": "message",
+                    "content": [
+                        {"type": "output_text", "text": "Hello "},
+                        {"type": "refusal", "refusal": "world"}
+                    ]
                 }),
-                ResponseOutputItem::FunctionCall(ResponseFunctionCall {
-                    call_id: "call_456".to_string(),
-                    name: "lookup".to_string(),
-                    arguments: "{\"q\":\"test\"}".to_string(),
+                json!({
+                    "type": "function_call",
+                    "call_id": "call_456",
+                    "name": "lookup",
+                    "arguments": "{\"q\":\"test\"}"
                 }),
             ],
             status: Some("completed".to_string()),
             error: None,
         };
 
-        let (content, tool_calls) = collect_response_output(response).unwrap();
-        assert_eq!(content, "Hello world");
-        assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].id, "call_456");
-        assert_eq!(tool_calls[0].name, "lookup");
+        let output = collect_response_output(response).unwrap();
+        assert_eq!(output.content, "Hello world");
+        assert_eq!(output.tool_calls.len(), 1);
+        assert_eq!(output.tool_calls[0].id, "call_456");
+        assert_eq!(output.tool_calls[0].name, "lookup");
+        assert_eq!(output.response_items.len(), 3);
+        assert_eq!(output.response_items[0], reasoning);
+    }
+
+    #[tokio::test]
+    async fn stream_events_preserve_completed_items_in_output_order() {
+        let (tx, _rx) = mpsc::channel(1);
+        let mut pending_calls = HashMap::new();
+        let mut completed_items = HashMap::new();
+        let second = json!({"type": "function_call", "call_id": "call_1"});
+        let first = json!({"type": "reasoning", "id": "rs_1", "summary": []});
+
+        handle_stream_event(
+            &json!({
+                "type": "response.output_item.done",
+                "output_index": 1,
+                "item": second
+            })
+            .to_string(),
+            &mut pending_calls,
+            &mut completed_items,
+            &tx,
+        )
+        .await;
+        handle_stream_event(
+            &json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": first
+            })
+            .to_string(),
+            &mut pending_calls,
+            &mut completed_items,
+            &tx,
+        )
+        .await;
+
+        let items = collect_response_items(completed_items);
+        assert_eq!(items[0]["type"], "reasoning");
+        assert_eq!(items[1]["type"], "function_call");
     }
 }

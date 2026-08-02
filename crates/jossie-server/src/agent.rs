@@ -890,7 +890,10 @@ async fn run_agent_loop_inner(
             }
         }
 
-        let (content, tool_calls) = state.llm.complete(&messages, &tools).await?;
+        let output = state.llm.complete(&messages, &tools).await?;
+        let content = output.content;
+        let tool_calls = output.tool_calls;
+        let response_items = output.response_items;
 
         if tool_calls.is_empty() {
             if reflection_retries_remaining > 0 {
@@ -900,7 +903,10 @@ async fn run_agent_loop_inner(
                     reflection_retries_remaining -= 1;
                     tracing::info!("Self-reflection retry. Feedback: {feedback}");
                     // Add the assistant's response and feedback, then continue the loop
-                    messages.push(Message::transient(Role::Assistant, content.clone()));
+                    messages.push(
+                        Message::transient(Role::Assistant, content.clone())
+                            .with_response_items(response_items.clone()),
+                    );
                     messages.push(Message::transient(
                         Role::System,
                         format!(
@@ -946,8 +952,9 @@ async fn run_agent_loop_inner(
         goal_tracker.record_tool_calls(&tool_calls);
 
         let tc_json = serde_json::to_value(&tool_calls)?;
-        let assistant_msg =
-            Message::new(conv_id, Role::Assistant, content.clone()).with_tool_calls(tc_json);
+        let assistant_msg = Message::new(conv_id, Role::Assistant, content.clone())
+            .with_tool_calls(tc_json)
+            .with_response_items(response_items);
         persist_message(state, &assistant_msg).await?;
         messages.push(assistant_msg);
 
@@ -1117,6 +1124,7 @@ async fn run_agent_loop_streaming_inner(
 
         let mut full_content = String::new();
         let mut tool_calls = Vec::new();
+        let mut response_items = Vec::new();
         let mut stream_failed = false;
         let mut done_received = false;
 
@@ -1136,11 +1144,12 @@ async fn run_agent_loop_streaming_inner(
                                 },
                             ).await;
                         }
-                        Some(jossie_llm::StreamEvent::ToolCalls(calls)) => {
+                        Some(jossie_llm::StreamEvent::Completed {
+                            tool_calls: calls,
+                            response_items: items,
+                        }) => {
                             tool_calls = calls;
-                            done_received = true;
-                        }
-                        Some(jossie_llm::StreamEvent::Done) => {
+                            response_items = items;
                             done_received = true;
                         }
                         Some(jossie_llm::StreamEvent::Error(e)) => {
@@ -1248,7 +1257,8 @@ async fn run_agent_loop_streaming_inner(
 
             let assistant_msg = match serde_json::to_value(&tool_calls) {
                 Ok(tc_json) => Message::new(conv_id, Role::Assistant, full_content.clone())
-                    .with_tool_calls(tc_json),
+                    .with_tool_calls(tc_json)
+                    .with_response_items(response_items),
                 Err(_) => Message::new(conv_id, Role::Assistant, full_content.clone()),
             };
             let _ = persist_message(state, &assistant_msg).await;
@@ -1350,7 +1360,10 @@ async fn run_agent_loop_streaming_inner(
                     },
                 )
                 .await;
-                messages.push(Message::transient(Role::Assistant, full_content));
+                messages.push(
+                    Message::transient(Role::Assistant, full_content)
+                        .with_response_items(response_items),
+                );
                 messages.push(Message::transient(
                     Role::System,
                     format!(
@@ -1442,7 +1455,8 @@ Output only PASS or RETRY: <feedback>, nothing else."#
     let user = Message::transient(Role::User, prompt);
 
     match state.kg_llm.complete(&[sys, user], &[]).await {
-        Ok((verdict, _)) => {
+        Ok(output) => {
+            let verdict = output.content;
             let trimmed = verdict.trim();
             if trimmed.starts_with("RETRY:") {
                 let feedback = trimmed.strip_prefix("RETRY:").unwrap_or("").trim();
@@ -1535,7 +1549,8 @@ Conversation:
     let user = Message::transient(Role::User, prompt);
 
     match state.kg_llm.complete(&[sys, user], &[]).await {
-        Ok((summary, _)) => {
+        Ok(output) => {
+            let summary = output.content;
             let messages_count = keep_from as i64;
             let last_id = messages
                 .get(keep_from.saturating_sub(1))
@@ -1609,7 +1624,8 @@ If nothing to extract, output {{ "nodes": [], "edges": [] }}"#
     let user_msg = Message::transient(Role::User, prompt);
 
     match kg_llm.complete(&[sys_msg, user_msg], &[]).await {
-        Ok((response, _)) => {
+        Ok(output) => {
+            let response = output.content;
             let clean_json = response
                 .trim()
                 .trim_start_matches("```json")
@@ -1780,7 +1796,10 @@ async fn generate_event_message_inner(
     let fingerprint = event_notification_fingerprint(event);
 
     for _ in 0..EVENT_MODE_MAX_ITERATIONS {
-        let (content, tool_calls) = state.llm.complete(&messages, &tools).await?;
+        let output = state.llm.complete(&messages, &tools).await?;
+        let content = output.content;
+        let tool_calls = output.tool_calls;
+        let response_items = output.response_items;
 
         if tool_calls.is_empty() {
             if let Some(decision) = parse_event_mode_response(&content) {
@@ -1834,7 +1853,8 @@ async fn generate_event_message_inner(
         }
 
         let assistant_msg = Message::transient(Role::Assistant, content.clone())
-            .with_tool_calls(serde_json::to_value(&tool_calls)?);
+            .with_tool_calls(serde_json::to_value(&tool_calls)?)
+            .with_response_items(response_items);
         messages.push(assistant_msg);
 
         for call in tool_calls {
