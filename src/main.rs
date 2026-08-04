@@ -46,6 +46,10 @@ async fn main() -> Result<()> {
             "Marked {interrupted_actions} interrupted external actions as uncertain; they will not be retried"
         );
     }
+    let interrupted_imports = db.requeue_interrupted_chat_imports().await?;
+    if interrupted_imports > 0 {
+        tracing::warn!("Requeued {interrupted_imports} interrupted chat import(s)");
+    }
     let db = Arc::new(db);
 
     let mut llm = LlmClient::new(&config.llm.api_url, &config.llm.api_key, &config.llm.model);
@@ -70,10 +74,21 @@ async fn main() -> Result<()> {
         llm.clone()
     };
 
+    let chat_export_importer = Arc::new(jossie_integration_files::ChatExportImporter::new(
+        db.clone(),
+        kg_llm.clone(),
+        config.llm.openai_optimizations,
+    ));
+    let resumed_imports = chat_export_importer.resume_pending().await?;
+    if resumed_imports > 0 {
+        tracing::info!("Resumed {resumed_imports} queued chat import(s)");
+    }
+
     let mut registry = IntegrationRegistry::new();
     registry.register(Arc::new(MemoryIntegration::new(db.clone())));
     registry.register(Arc::new(jossie_integration_files::FilesIntegration::new(
         db.clone(),
+        chat_export_importer.clone(),
     )));
 
     // Knowledge Graph
@@ -144,6 +159,7 @@ async fn main() -> Result<()> {
         db: db.clone(),
         llm,
         kg_llm,
+        chat_export_importer,
         registry: Arc::new(registry),
         auth_token: config.server.auth_token.clone(),
         auth_password_hash: config.server.auth_password_hash.clone(),

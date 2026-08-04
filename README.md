@@ -246,6 +246,13 @@ You can override any config value with environment variables:
 - **Storage**: SQLite `memory` table
 - **Usage**: Jossie automatically saves important details and searches memory when needed
 
+### Files and Chat Imports (`jossie-integration-files`)
+- **Tools**: `list_files`, `read_file`, `ingest_chat_export`
+- **Web UI**: Open **Memories → Import a chat export**
+- **Supported formats**: WhatsApp and Signal text exports, ChatGPT `conversations.json`, generic message JSON, and `Speaker: message` transcripts
+- **Learning behavior**: Runs asynchronously in bounded chunks, makes attributed durable facts eligible for future chat and background prompts, and merges explicit entities and relationships into the knowledge graph
+- **Safeguards**: Ignores routine chatter and credentials, paraphrases rather than storing long passages, caps imports at 20 MiB, and samples across very large histories while preserving early and recent context
+
 ### Knowledge Graph (`jossie-integration-graph`)
 - **Tools**: `graph_upsert_node`, `graph_add_relation`, `graph_search`, `graph_list_by_type`, `graph_explore_connections`
 - **Description**: Entity-relationship knowledge graph

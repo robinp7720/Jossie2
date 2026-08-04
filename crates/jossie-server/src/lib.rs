@@ -60,6 +60,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         // Files
         .route("/api/files", post(handlers::files::upload_file))
+        .route(
+            "/api/chat-imports",
+            post(handlers::files::start_chat_import),
+        )
+        .route(
+            "/api/chat-imports/{id}",
+            get(handlers::files::get_chat_import),
+        )
         .route("/api/graph", get(handlers::graph::graph_handler))
         .route(
             "/api/dashboard",

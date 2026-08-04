@@ -1,4 +1,4 @@
-import type { Account, ActivityEvent, Conversation, Dashboard, Memory, Message, OnboardingStatus, PendingAction } from './types'
+import type { Account, ActivityEvent, ChatImport, Conversation, Dashboard, Memory, Message, OnboardingStatus, PendingAction } from './types'
 
 export type ApiConfig = {
   baseUrl: string
@@ -99,6 +99,18 @@ export const uploadFile = (config: ApiConfig, file: File) => {
     body: formData,
   })
 }
+
+export const startChatImport = (
+  config: ApiConfig,
+  fileId: string,
+  format: ChatImport['format'] = 'auto',
+) => request<ChatImport>(config, '/api/chat-imports', {
+  method: 'POST',
+  body: JSON.stringify({ file_id: fileId, format }),
+})
+
+export const getChatImport = (config: ApiConfig, importId: string) =>
+  request<ChatImport>(config, `/api/chat-imports/${encodeURIComponent(importId)}`)
 
 export const listOnboarding = (config: ApiConfig) =>
   request<OnboardingStatus[]>(config, '/api/onboarding')

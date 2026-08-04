@@ -17,6 +17,7 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub llm: LlmClient,
     pub kg_llm: LlmClient,
+    pub chat_export_importer: Arc<jossie_integration_files::ChatExportImporter>,
     pub registry: Arc<IntegrationRegistry>,
     pub auth_token: String,
     pub auth_password_hash: String,

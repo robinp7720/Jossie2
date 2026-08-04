@@ -2076,6 +2076,170 @@ impl Database {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    pub async fn create_chat_import(
+        &self,
+        file_id: Uuid,
+        format: &str,
+    ) -> anyhow::Result<ChatImport> {
+        if let Some(existing) = self.get_chat_import_by_file(file_id).await? {
+            if existing.status == "failed" && existing.format != format {
+                sqlx::query(
+                    "UPDATE chat_imports SET format = ?, updated_at = ?
+                     WHERE id = ? AND status = 'failed'",
+                )
+                .bind(format)
+                .bind(Utc::now().to_rfc3339())
+                .bind(&existing.id)
+                .execute(&self.pool)
+                .await?;
+                return self
+                    .get_chat_import(&existing.id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("Chat import could not be reloaded"));
+            }
+            return Ok(existing);
+        }
+
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT OR IGNORE INTO chat_imports (id, file_id, format, status, created_at, updated_at)
+             VALUES (?, ?, ?, 'queued', ?, ?)",
+        )
+        .bind(&id)
+        .bind(file_id.to_string())
+        .bind(format)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        self.get_chat_import_by_file(file_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Created chat import could not be loaded"))
+    }
+
+    pub async fn get_chat_import(&self, id: &str) -> anyhow::Result<Option<ChatImport>> {
+        Ok(sqlx::query_as::<_, ChatImport>(
+            "SELECT id, file_id, format, status, total_messages, analyzed_messages,
+                    memories_saved, nodes_saved, edges_saved, error, created_at, updated_at
+             FROM chat_imports WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn get_chat_import_by_file(
+        &self,
+        file_id: Uuid,
+    ) -> anyhow::Result<Option<ChatImport>> {
+        Ok(sqlx::query_as::<_, ChatImport>(
+            "SELECT id, file_id, format, status, total_messages, analyzed_messages,
+                    memories_saved, nodes_saved, edges_saved, error, created_at, updated_at
+             FROM chat_imports WHERE file_id = ?",
+        )
+        .bind(file_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn claim_chat_import(&self, id: &str) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE chat_imports SET status = 'processing', error = NULL, updated_at = ?
+             WHERE id = ? AND status IN ('queued', 'failed')",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn complete_chat_import(
+        &self,
+        id: &str,
+        format: &str,
+        total_messages: usize,
+        analyzed_messages: usize,
+        memories_saved: usize,
+        nodes_saved: usize,
+        edges_saved: usize,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE chat_imports
+             SET format = ?, status = 'completed', total_messages = ?, analyzed_messages = ?,
+                 memories_saved = ?, nodes_saved = ?, edges_saved = ?, error = NULL, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(format)
+        .bind(total_messages as i64)
+        .bind(analyzed_messages as i64)
+        .bind(memories_saved as i64)
+        .bind(nodes_saved as i64)
+        .bind(edges_saved as i64)
+        .bind(Utc::now().to_rfc3339())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_chat_import_progress(
+        &self,
+        id: &str,
+        format: &str,
+        total_messages: usize,
+        analyzed_messages: usize,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE chat_imports SET format = ?, total_messages = ?, analyzed_messages = ?,
+                    updated_at = ? WHERE id = ? AND status = 'processing'",
+        )
+        .bind(format)
+        .bind(total_messages as i64)
+        .bind(analyzed_messages as i64)
+        .bind(Utc::now().to_rfc3339())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn fail_chat_import(&self, id: &str, error: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE chat_imports SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(error)
+        .bind(Utc::now().to_rfc3339())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn requeue_interrupted_chat_imports(&self) -> anyhow::Result<u64> {
+        let result = sqlx::query(
+            "UPDATE chat_imports SET status = 'queued',
+                    error = 'The server restarted while this import was running; it was queued again.',
+                    updated_at = ?
+             WHERE status = 'processing'",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn list_queued_chat_imports(&self) -> anyhow::Result<Vec<ChatImport>> {
+        Ok(sqlx::query_as::<_, ChatImport>(
+            "SELECT id, file_id, format, status, total_messages, analyzed_messages,
+                    memories_saved, nodes_saved, edges_saved, error, created_at, updated_at
+             FROM chat_imports WHERE status = 'queued' ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     pub async fn create_pending_action(
         &self,
         action: &NewPendingAction,
@@ -2305,6 +2469,22 @@ pub struct FileRecord {
     pub path: String,
     pub conversation_id: Option<Uuid>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct ChatImport {
+    pub id: String,
+    pub file_id: String,
+    pub format: String,
+    pub status: String,
+    pub total_messages: i64,
+    pub analyzed_messages: i64,
+    pub memories_saved: i64,
+    pub nodes_saved: i64,
+    pub edges_saved: i64,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -3066,6 +3246,48 @@ mod tests {
                 fs::remove_file(entry.path()).ok();
             }
         }
+    }
+
+    #[tokio::test]
+    async fn chat_import_lifecycle_is_durable_and_idempotent_per_file() {
+        let db = test_db().await;
+        let file_id = Uuid::new_v4();
+        db.save_file_record(
+            &file_id,
+            "conversations.json",
+            Some("application/json"),
+            128,
+            "/tmp/conversations.json",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let import = db.create_chat_import(file_id, "auto").await.unwrap();
+        let duplicate = db.create_chat_import(file_id, "chatgpt").await.unwrap();
+        assert_eq!(duplicate.id, import.id);
+        assert!(db.claim_chat_import(&import.id).await.unwrap());
+        assert!(!db.claim_chat_import(&import.id).await.unwrap());
+        db.fail_chat_import(&import.id, "wrong format")
+            .await
+            .unwrap();
+        let retry = db.create_chat_import(file_id, "chatgpt").await.unwrap();
+        assert_eq!(retry.id, import.id);
+        assert_eq!(retry.format, "chatgpt");
+        assert!(db.claim_chat_import(&import.id).await.unwrap());
+        assert_eq!(db.requeue_interrupted_chat_imports().await.unwrap(), 1);
+        assert_eq!(db.list_queued_chat_imports().await.unwrap().len(), 1);
+        assert!(db.claim_chat_import(&import.id).await.unwrap());
+
+        db.complete_chat_import(&import.id, "chatgpt", 120, 100, 8, 4, 3)
+            .await
+            .unwrap();
+        let completed = db.get_chat_import(&import.id).await.unwrap().unwrap();
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.format, "chatgpt");
+        assert_eq!(completed.total_messages, 120);
+        assert_eq!(completed.analyzed_messages, 100);
+        assert_eq!(completed.memories_saved, 8);
     }
 
     #[tokio::test]

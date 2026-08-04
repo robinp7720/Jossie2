@@ -2,9 +2,9 @@ use crate::errors::AppError;
 use crate::state::AppState;
 use axum::{
     Json,
-    extract::{Multipart, State},
+    extract::{Multipart, Path, State},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -12,6 +12,13 @@ use uuid::Uuid;
 pub struct UploadResponse {
     pub file_id: Uuid,
     pub name: String,
+}
+
+#[derive(Deserialize)]
+pub struct StartChatImportRequest {
+    pub file_id: Uuid,
+    #[serde(default)]
+    pub format: jossie_integration_files::ChatExportFormat,
 }
 
 pub async fn upload_file(
@@ -62,4 +69,29 @@ pub async fn upload_file(
         .map_err(anyhow::Error::from)?;
 
     Ok(Json(UploadResponse { file_id, name }))
+}
+
+pub async fn start_chat_import(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<StartChatImportRequest>,
+) -> Result<Json<jossie_db::ChatImport>, AppError> {
+    let import = state
+        .chat_export_importer
+        .enqueue(request.file_id, request.format)
+        .await
+        .map_err(AppError::bad_request)?;
+    Ok(Json(import))
+}
+
+pub async fn get_chat_import(
+    State(state): State<Arc<AppState>>,
+    Path(import_id): Path<String>,
+) -> Result<Json<jossie_db::ChatImport>, AppError> {
+    let import = state
+        .db
+        .get_chat_import(&import_id)
+        .await
+        .map_err(anyhow::Error::from)?
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("Chat import not found")))?;
+    Ok(Json(import))
 }

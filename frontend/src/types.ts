@@ -83,6 +83,21 @@ export type Memory = {
   importance: number
 }
 
+export type ChatImport = {
+  id: string
+  file_id: string
+  format: 'auto' | 'whatsapp' | 'signal' | 'chatgpt' | 'generic'
+  status: 'queued' | 'processing' | 'completed' | 'failed'
+  total_messages: number
+  analyzed_messages: number
+  memories_saved: number
+  nodes_saved: number
+  edges_saved: number
+  error?: string | null
+  created_at: string
+  updated_at: string
+}
+
 export type ActivityEvent = {
   id: string
   conversation_id: string | null

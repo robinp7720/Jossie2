@@ -19,10 +19,15 @@ async fn setup_app() -> axum::Router {
 
     let (event_tx, _) = broadcast::channel(100);
 
+    let db = Arc::new(db);
+    let llm = LlmClient::new("http://localhost:8080", "key", "model");
     let state = Arc::new(AppState {
-        db: Arc::new(db),
-        llm: LlmClient::new("http://localhost:8080", "key", "model"),
-        kg_llm: LlmClient::new("http://localhost:8080", "key", "model"),
+        db: db.clone(),
+        llm: llm.clone(),
+        kg_llm: llm.clone(),
+        chat_export_importer: Arc::new(jossie_integration_files::ChatExportImporter::new(
+            db, llm, false,
+        )),
         registry: Arc::new(IntegrationRegistry::new()),
         auth_token: "test-token".to_string(),
         auth_password_hash: test_password_hash(),
@@ -160,6 +165,46 @@ async fn approving_an_unknown_action_is_not_found() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn unknown_chat_import_is_not_found() {
+    let app = setup_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/chat-imports/{}", uuid::Uuid::new_v4()))
+                .header("Authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn chat_import_rejects_an_unknown_file() {
+    let app = setup_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/chat-imports")
+                .header("Authorization", "Bearer test-token")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "file_id": uuid::Uuid::new_v4(),
+                        "format": "auto"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

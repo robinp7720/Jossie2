@@ -218,3 +218,22 @@ CREATE TABLE IF NOT EXISTS message_attachments (
     file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     PRIMARY KEY (message_id, file_id)
 );
+
+-- Asynchronous imports that turn user-provided chat exports into durable memory.
+CREATE TABLE IF NOT EXISTS chat_imports (
+    id TEXT PRIMARY KEY,
+    file_id TEXT NOT NULL UNIQUE REFERENCES files(id) ON DELETE CASCADE,
+    format TEXT NOT NULL DEFAULT 'auto',
+    status TEXT NOT NULL DEFAULT 'queued',
+    total_messages INTEGER NOT NULL DEFAULT 0,
+    analyzed_messages INTEGER NOT NULL DEFAULT 0,
+    memories_saved INTEGER NOT NULL DEFAULT 0,
+    nodes_saved INTEGER NOT NULL DEFAULT 0,
+    edges_saved INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_imports_status_updated
+    ON chat_imports(status, updated_at DESC);

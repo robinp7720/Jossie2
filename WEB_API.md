@@ -46,6 +46,31 @@ Response:
 
 If `conversation_id` is omitted, the server creates a new conversation.
 
+### Files and Chat Imports
+
+#### `POST /api/files`
+
+Upload a file as multipart form data using the `file` field. The response contains `file_id` and `name`.
+
+#### `POST /api/chat-imports`
+
+Queue an uploaded TXT or JSON chat export for background learning.
+
+```json
+{
+  "file_id": "uploaded-file-uuid",
+  "format": "auto"
+}
+```
+
+`format` may be `auto`, `whatsapp`, `signal`, `chatgpt`, or `generic`. Auto-detection is recommended.
+
+The response is a durable import record whose `status` is `queued`, `processing`, `completed`, or `failed`. Completed records include the total and analyzed message counts plus the number of memories, graph nodes, and graph edges saved.
+
+#### `GET /api/chat-imports/{id}`
+
+Fetch current import status. Large histories are analyzed in bounded chunks; when the export exceeds the analysis budget, chunks are sampled across the timeline with early and recent context retained.
+
 ### Conversations
 
 #### `GET /api/conversations`

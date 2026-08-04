@@ -4,13 +4,18 @@ use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
 
+mod importer;
+
+pub use importer::{ChatExportFormat, ChatExportImporter};
+
 pub struct FilesIntegration {
     db: Arc<Database>,
+    chat_importer: Arc<ChatExportImporter>,
 }
 
 impl FilesIntegration {
-    pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<Database>, chat_importer: Arc<ChatExportImporter>) -> Self {
+        Self { db, chat_importer }
     }
 }
 
@@ -48,14 +53,14 @@ impl Integration for FilesIntegration {
             },
             ToolDefinition {
                 name: "ingest_chat_export".to_string(),
-                description: "Proactively parse and learn from a chat export file (WhatsApp or Signal). This tool extracts entities and facts to improve long-term memory.".to_string(),
+                description: "Queue an attached chat export for background learning. Supports auto-detection, WhatsApp/Signal text exports, ChatGPT conversations.json, and generic JSON or speaker-prefixed transcripts. The importer saves only durable facts and relationships, not the raw transcript.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "file_id": {"type": "string", "description": "UUID of the export file"},
-                        "format": {"type": "string", "enum": ["whatsapp", "signal"], "description": "Format of the export"}
+                        "format": {"type": "string", "enum": ["auto", "whatsapp", "signal", "chatgpt", "generic"], "description": "Export format; auto is recommended"}
                     },
-                    "required": ["file_id", "format"],
+                    "required": ["file_id"],
                     "additionalProperties": false
                 }),
             },
@@ -97,23 +102,15 @@ impl Integration for FilesIntegration {
                 #[derive(Deserialize)]
                 struct Args {
                     file_id: Uuid,
-                    format: String,
+                    #[serde(default)]
+                    format: ChatExportFormat,
                 }
                 let args: Args = serde_json::from_str(arguments)?;
-                let record = self
-                    .db
-                    .get_file_record(&args.file_id)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("File not found: {}", args.file_id))?;
-
-                let content = tokio::fs::read_to_string(&record.path).await?;
-
-                // For now, we return the content and hint that the agent should process it.
-                // In a more advanced version, we might do chunked processing here.
-                Ok(format!(
-                    "Chat export content loaded (format: {}). Please analyze this text to extract relevant entities for the Knowledge Graph and Long-term Memory.\n\nContent:\n{}",
-                    args.format, content
-                ))
+                let import = self
+                    .chat_importer
+                    .enqueue(args.file_id, args.format)
+                    .await?;
+                Ok(serde_json::to_string_pretty(&import)?)
             }
             _ => anyhow::bail!("Unknown tool: {tool_name}"),
         }
