@@ -68,6 +68,14 @@ pub struct LlmConfig {
     pub event_max_context_messages: usize,
     #[serde(default)]
     pub enable_self_reflection: bool,
+    #[serde(default = "default_openai_optimizations")]
+    pub openai_optimizations: bool,
+    #[serde(default = "default_max_context_chars")]
+    pub max_context_chars: usize,
+    #[serde(default = "default_context_compact_target_chars")]
+    pub context_compact_target_chars: usize,
+    #[serde(default = "default_context_keep_recent_dialogue_messages")]
+    pub context_keep_recent_dialogue_messages: usize,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
     #[serde(default)]
@@ -79,6 +87,22 @@ fn default_max_context_messages() -> usize {
 }
 
 fn default_event_max_context_messages() -> usize {
+    12
+}
+
+fn default_openai_optimizations() -> bool {
+    true
+}
+
+fn default_max_context_chars() -> usize {
+    120_000
+}
+
+fn default_context_compact_target_chars() -> usize {
+    80_000
+}
+
+fn default_context_keep_recent_dialogue_messages() -> usize {
     12
 }
 

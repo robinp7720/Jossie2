@@ -159,6 +159,10 @@ async fn main() -> Result<()> {
         max_agent_iterations,
         max_context_messages: config.llm.max_context_messages,
         event_max_context_messages: config.llm.event_max_context_messages,
+        openai_optimizations: config.llm.openai_optimizations,
+        max_context_chars: config.llm.max_context_chars,
+        context_compact_target_chars: config.llm.context_compact_target_chars,
+        context_keep_recent_dialogue_messages: config.llm.context_keep_recent_dialogue_messages,
         google_config: config.google.clone(),
         google_integration,
         telegram_token: config.telegram.bot_token.clone(),
@@ -208,6 +212,8 @@ async fn main() -> Result<()> {
 fn validate_llm_config(config: &mut AppConfig) {
     const MIN_CHAT_CONTEXT_MESSAGES: usize = 20;
     const MIN_EVENT_CONTEXT_MESSAGES: usize = 8;
+    const MIN_CONTEXT_CHARS: usize = 20_000;
+    const MIN_RECENT_DIALOGUE_MESSAGES: usize = 4;
 
     if config.llm.max_context_messages < MIN_CHAT_CONTEXT_MESSAGES {
         tracing::warn!(
@@ -226,6 +232,26 @@ fn validate_llm_config(config: &mut AppConfig) {
         );
         config.llm.event_max_context_messages = MIN_EVENT_CONTEXT_MESSAGES;
     }
+
+    if config.llm.max_context_chars < MIN_CONTEXT_CHARS {
+        tracing::warn!(
+            "llm.max_context_chars={} is too low; clamping to {}",
+            config.llm.max_context_chars,
+            MIN_CONTEXT_CHARS
+        );
+        config.llm.max_context_chars = MIN_CONTEXT_CHARS;
+    }
+    if config.llm.context_compact_target_chars >= config.llm.max_context_chars {
+        config.llm.context_compact_target_chars = config.llm.max_context_chars * 2 / 3;
+        tracing::warn!(
+            "llm.context_compact_target_chars must be below max_context_chars; using {}",
+            config.llm.context_compact_target_chars
+        );
+    }
+    config.llm.context_keep_recent_dialogue_messages = config
+        .llm
+        .context_keep_recent_dialogue_messages
+        .max(MIN_RECENT_DIALOGUE_MESSAGES);
 
     if let Some(service_tier) = &mut config.llm.service_tier {
         let normalized = service_tier.trim().to_string();
@@ -285,6 +311,26 @@ fn override_config_from_env(config: &mut AppConfig) {
     if let Ok(val) = env::var("JOSSIE_LLM_EVENT_MAX_CONTEXT_MESSAGES") {
         if let Ok(parsed) = val.parse::<usize>() {
             config.llm.event_max_context_messages = parsed;
+        }
+    }
+    if let Ok(val) = env::var("JOSSIE_LLM_OPENAI_OPTIMIZATIONS") {
+        if let Some(parsed) = parse_env_bool(&val) {
+            config.llm.openai_optimizations = parsed;
+        }
+    }
+    if let Ok(val) = env::var("JOSSIE_LLM_MAX_CONTEXT_CHARS") {
+        if let Ok(parsed) = val.parse::<usize>() {
+            config.llm.max_context_chars = parsed;
+        }
+    }
+    if let Ok(val) = env::var("JOSSIE_LLM_CONTEXT_COMPACT_TARGET_CHARS") {
+        if let Ok(parsed) = val.parse::<usize>() {
+            config.llm.context_compact_target_chars = parsed;
+        }
+    }
+    if let Ok(val) = env::var("JOSSIE_LLM_CONTEXT_KEEP_RECENT_DIALOGUE_MESSAGES") {
+        if let Ok(parsed) = val.parse::<usize>() {
+            config.llm.context_keep_recent_dialogue_messages = parsed;
         }
     }
     if let Ok(val) = env::var("JOSSIE_TELEGRAM_BOT_TOKEN") {

@@ -183,6 +183,16 @@ max_context_messages = 50
 # Default: 12
 event_max_context_messages = 12
 
+# Enable OpenAI-specific prompt cache breakpoints and within-run response chaining.
+# Set to false for compatible providers that reject these request fields.
+openai_optimizations = true
+
+# Bound the serialized conversation history passed to the model. Completed historical
+# tool activity is projected out first; these limits handle the remaining long context.
+max_context_chars = 120000
+context_compact_target_chars = 80000
+context_keep_recent_dialogue_messages = 12
+
 # ----------------------------------------------------------------------------
 # DATABASE CONFIGURATION
 # ----------------------------------------------------------------------------

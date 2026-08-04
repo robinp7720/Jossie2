@@ -3,9 +3,10 @@ use crate::state::AppState;
 use futures::FutureExt;
 use jossie_core::integration::{CapabilityGroup, ToolEffect};
 use jossie_core::types::{Message, Role};
-use jossie_db::{IntegrationEvent, MemoryKeyInfo, MemoryPromptEntry, NewPendingAction};
+use jossie_db::{IntegrationEvent, MemoryEntry, MemoryPromptEntry, NewPendingAction};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -19,11 +20,12 @@ const MAX_TRACKED_OBSERVATIONS: usize = 5;
 const MAX_RELEVANT_MEMORIES: usize = 4;
 const MAX_PROMPT_MEMORIES: usize = 6;
 const MAX_EVENT_PROMPT_MEMORY_MATCHES: usize = 4;
-const MAX_MEMORY_INDEX_ITEMS: usize = 12;
 const LOOP_GUARD_WARN_THRESHOLD: usize = 2;
 const LOOP_GUARD_STOP_THRESHOLD: usize = 3;
 const LIVE_STANCE_MESSAGE_WINDOW: usize = 6;
 const REFLECTION_CONTEXT_WINDOW: usize = 4;
+
+const INCOMING_NOTIFICATION_MODE_PROMPT: &str = "## Incoming Notification Mode\nThis is still Jossie: same judgment, same continuity, same general tool access as a normal conversation.\nThe difference is that you are deciding whether this newly arrived event deserves an interruption right now.\nDefault to quiet triage.\nNotify only if the event is urgent, time-sensitive, actionable, clearly relevant to the user, or materially changes their plans.\nSkip low-signal items such as newsletters, receipts, marketing mail, routine confirmations, automated churn, or minor non-actionable calendar edits.\nFor email batches, notify only when the batch as a whole suggests something worth surfacing now.\nInterpret this event independently as a fresh arrival.\nDo NOT imply that you made a prior mistake, correction, or retraction unless the event payload explicitly says so.\nFor `gmail_new_message` and `new_email_batch`, frame updates as newly arrived emails, even when similar to prior ones.\nUse tools normally when they materially improve confidence, especially before notifying about details hidden behind an email summary, snippet, attachment, or linked system.\nDo not claim room changes, schedule changes, requirement changes, or downstream consequences unless the email body or another checked source explicitly confirms them.\nIf an email mentions another system such as Moodle, an attachment, or a linked page that you did not verify, say only that the email mentions it.\nIf you notify, write it like Jossie: short, concrete, natural, and grounded in what you actually checked.\nBefore deciding, build a compact internal notification brief and use it to choose `notify` or `skip`.\nOnly notify when confidence and interrupt_score are both strong enough.\nReturn strict JSON only, with no markdown, in this exact shape:\n{\"action\":\"notify|skip\",\"message\":\"<short user-facing message>\",\"what_happened\":\"...\",\"why_now\":\"...\",\"what_changed\":\"...\",\"suggested_action\":\"...\",\"confidence\":0.0,\"interrupt_score\":0.0}";
 
 #[derive(Clone, Copy)]
 enum PromptMemoryScope {
@@ -425,153 +427,108 @@ impl Default for AgentRunOptions {
     }
 }
 
+struct PromptBundle {
+    stable: String,
+    dynamic: String,
+    included_memory_keys: HashSet<String>,
+}
+
+impl PromptBundle {
+    fn cache_key(&self, model_scope: &str) -> String {
+        let digest = Sha256::digest(self.stable.as_bytes());
+        format!("jossie:{model_scope}:{digest:x}")
+    }
+
+    fn insert_into(self, messages: &mut Vec<Message>) {
+        if !self.dynamic.is_empty() {
+            messages.insert(0, Message::transient(Role::System, self.dynamic));
+        }
+        messages.insert(0, Message::transient(Role::System, self.stable));
+    }
+}
+
 async fn build_system_prompt(
     state: &AppState,
     conversation_id: Option<Uuid>,
     user_message: Option<&str>,
     context_messages: Option<&[Message]>,
     prompt_memory_scope: PromptMemoryScope,
-) -> String {
-    let mut prompt = state.system_prompt.clone();
+) -> PromptBundle {
+    let stable = match prompt_memory_scope {
+        PromptMemoryScope::Chat => state.system_prompt.clone(),
+        PromptMemoryScope::Event => format!(
+            "{}\n\n{}",
+            state.system_prompt, INCOMING_NOTIFICATION_MODE_PROMPT
+        ),
+    };
+    let mut dynamic = String::new();
 
     // Add user-local time context for scheduling and personal-assistant decisions.
     let now = chrono::Local::now();
-    prompt.push_str(&format!(
-        "\n\nCurrent Local Date and Time: {}",
+    dynamic.push_str(&format!(
+        "Current Local Date and Time: {}",
         now.format("%A, %B %d, %Y %H:%M:%S %:z")
     ));
 
-    // Dynamically append agent and user profiles from memory
-
-    // Core Identity (Soul) - High Priority
-    if let Ok(Some(entry)) = state.db.get_memory("agent_profile.soul").await {
-        prompt.push_str("\n\n## Agent Core Identity (Soul)\n");
-        prompt.push_str(&entry.content);
-    }
-
-    if let Ok(Some(entry)) = state.db.get_memory("agent_profile").await {
-        prompt.push_str("\n\n## Agent Description (Jossie)\n");
-        prompt.push_str(&entry.content);
-    }
-
-    // Current Mood/State
-    if let Ok(Some(entry)) = state.db.get_memory("agent_profile.mood").await {
-        prompt.push_str("\n\n## Current Mood\n");
-        prompt.push_str(&entry.content);
-    }
-
-    if let Ok(Some(entry)) = state.db.get_memory("user_profile").await {
-        prompt.push_str("\n\n## User Description\n");
-        prompt.push_str(&entry.content);
-    }
-
-    let important_memory_context =
-        build_important_prompt_memory_context(state, prompt_memory_scope).await;
-    if !important_memory_context.is_empty() {
-        prompt.push_str("\n\n");
-        prompt.push_str(&important_memory_context);
-    }
-
-    if let Some(messages) = context_messages {
-        let live_stance = build_live_stance_context(messages);
-        if !live_stance.is_empty() {
-            prompt.push_str("\n\n");
-            prompt.push_str(&live_stance);
+    let profile_future = state.db.get_profile_memories();
+    let important_future = load_important_prompt_memories(state, prompt_memory_scope);
+    let relevant_future = async {
+        if let Some(message) = user_message {
+            load_relevant_memories(state, message).await
+        } else {
+            Vec::new()
         }
-    }
-
-    if let Some(message) = user_message {
-        let relevant_memory_context = build_relevant_memory_context(state, message).await;
-        if !relevant_memory_context.is_empty() {
-            prompt.push_str("\n\n");
-            prompt.push_str(&relevant_memory_context);
+    };
+    let files_future = async {
+        if let Some(conv_id) = conversation_id {
+            state
+                .db
+                .list_files_for_conversation(conv_id)
+                .await
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         }
-    }
-
-    if let Some(conv_id) = conversation_id {
-        if let Ok(files) = state.db.list_files_for_conversation(conv_id).await {
-            if !files.is_empty() {
-                prompt.push_str("\n\n## Attached Files\nThe following files are shared in this conversation. Use `read_file` or `ingest_chat_export` to access them:\n");
-                for file in files {
-                    prompt.push_str(&format!("- `{}` (ID: {})\n", file.name, file.id));
-                }
-            }
+    };
+    let memory_stats_future = state.db.memory_stats();
+    let graph_future = async {
+        if let Some(message) = user_message {
+            build_graph_context(state, message).await
+        } else {
+            String::new()
         }
-    }
-
-    match state.db.memory_list_keys().await {
-        Ok(memory_keys) => {
-            prompt.push_str("\n\n");
-            prompt.push_str(&format_memory_index(&memory_keys));
-        }
-        Err(err) => {
-            tracing::warn!("Failed to build memory index for prompt: {err}");
-        }
-    }
-
-    if let Some(message) = user_message {
-        let graph_context = build_graph_context(state, message).await;
-        if !graph_context.is_empty() {
-            prompt.push_str("\n\n");
-            prompt.push_str(&graph_context);
-        }
-    }
-
-    tracing::debug!("System Prompt Built. Length: {} chars", prompt.len());
-    prompt
-}
-
-fn format_memory_index(keys: &[MemoryKeyInfo]) -> String {
-    if keys.is_empty() {
-        return "## Memory Index (All Available Memories)\nNo memories are currently saved. Use memory tools to store durable context when useful.".to_string();
-    }
-
-    let mut section = String::from(
-        "## Memory Index\nUse this shortlist to fill context gaps before asking the user to repeat information. Search memory for anything not shown here.\n",
+    };
+    let (profiles, important_memories, relevant_memories, files, memory_stats, graph_context) = tokio::join!(
+        profile_future,
+        important_future,
+        relevant_future,
+        files_future,
+        memory_stats_future,
+        graph_future
     );
 
-    let visible = keys.len().min(MAX_MEMORY_INDEX_ITEMS);
-    for key_info in keys.iter().take(visible) {
-        section.push_str("- `");
-        section.push_str(&key_info.key);
-        section.push('`');
-        if !key_info.updated_at.is_empty() {
-            section.push_str(" (updated ");
-            section.push_str(&key_info.updated_at);
-            section.push(')');
+    let profiles = profiles.unwrap_or_default();
+    for (key, heading) in [
+        ("agent_profile.soul", "## Agent Core Identity (Soul)"),
+        ("agent_profile", "## Agent Description (Jossie)"),
+        ("agent_profile.mood", "## Current Mood"),
+        ("user_profile", "## User Description"),
+    ] {
+        if let Some(entry) = profiles.get(key) {
+            dynamic.push_str("\n\n");
+            dynamic.push_str(heading);
+            dynamic.push('\n');
+            dynamic.push_str(&entry.content);
         }
-        section.push('\n');
     }
 
-    if keys.len() > visible {
-        section.push_str(&format!(
-            "- ... {} more memory entries not shown\n",
-            keys.len() - visible
-        ));
-    }
-
-    section
-}
-
-async fn build_important_prompt_memory_context(
-    state: &AppState,
-    scope: PromptMemoryScope,
-) -> String {
-    let Ok(entries) = state
-        .db
-        .memory_prompt_context(scope.as_str(), MAX_PROMPT_MEMORIES)
-        .await
-    else {
-        return String::new();
-    };
-
-    let entries = entries
+    let mut included_memory_keys = HashSet::new();
+    let important_memories = important_memories
         .into_iter()
-        .filter(|entry| !is_builtin_profile_memory(&entry.key))
+        .filter(|entry| included_memory_keys.insert(entry.key.clone()))
         .collect::<Vec<_>>();
-
-    format_prompt_memory_section(
-        match scope {
+    let important_memory_context = format_prompt_memory_section(
+        match prompt_memory_scope {
             PromptMemoryScope::Chat => {
                 "## Important Chat Memory\nUse these durable preferences and traits unless the current user instruction overrides them.\n"
             }
@@ -579,9 +536,81 @@ async fn build_important_prompt_memory_context(
                 "## Important Event Memory\nUse these durable notification preferences and user traits when deciding whether an event matters.\n"
             }
         },
-        &entries,
+        &important_memories,
         260,
-    )
+    );
+    if !important_memory_context.is_empty() {
+        dynamic.push_str("\n\n");
+        dynamic.push_str(&important_memory_context);
+    }
+
+    if let Some(messages) = context_messages {
+        let live_stance = build_live_stance_context(messages);
+        if !live_stance.is_empty() {
+            dynamic.push_str("\n\n");
+            dynamic.push_str(&live_stance);
+        }
+    }
+
+    let relevant_memories = relevant_memories
+        .into_iter()
+        .filter(|entry| included_memory_keys.insert(entry.key.clone()))
+        .take(MAX_RELEVANT_MEMORIES)
+        .collect::<Vec<_>>();
+    let relevant_memory_context = format_relevant_memory_section(&relevant_memories);
+    if !relevant_memory_context.is_empty() {
+        dynamic.push_str("\n\n");
+        dynamic.push_str(&relevant_memory_context);
+    }
+
+    if !files.is_empty() {
+        dynamic.push_str("\n\n## Attached Files\nThe following files are shared in this conversation. Use `read_file` or `ingest_chat_export` to access them:\n");
+        for file in files {
+            dynamic.push_str(&format!("- `{}` (ID: {})\n", file.name, file.id));
+        }
+    }
+
+    if let Ok(stats) = memory_stats {
+        dynamic.push_str(&format!(
+            "\n\n## Memory Availability\n{} saved memories are available. Search memory when the injected context is insufficient.",
+            stats.total
+        ));
+    }
+
+    if !graph_context.is_empty() {
+        dynamic.push_str("\n\n");
+        dynamic.push_str(&graph_context);
+    }
+
+    tracing::debug!(
+        stable_chars = stable.len(),
+        dynamic_chars = dynamic.len(),
+        included_memories = included_memory_keys.len(),
+        "System prompt bundle built"
+    );
+    PromptBundle {
+        stable,
+        dynamic,
+        included_memory_keys,
+    }
+}
+
+async fn load_important_prompt_memories(
+    state: &AppState,
+    scope: PromptMemoryScope,
+) -> Vec<MemoryPromptEntry> {
+    let Ok(entries) = state
+        .db
+        .memory_prompt_context(scope.as_str(), MAX_PROMPT_MEMORIES)
+        .await
+    else {
+        return Vec::new();
+    };
+
+    entries
+        .into_iter()
+        .filter(|entry| !is_builtin_profile_memory(&entry.key))
+        .collect()
 }
 
 fn format_prompt_memory_section(
@@ -613,29 +642,30 @@ fn is_builtin_profile_memory(key: &str) -> bool {
     )
 }
 
-async fn build_relevant_memory_context(state: &AppState, user_message: &str) -> String {
+async fn load_relevant_memories(state: &AppState, user_message: &str) -> Vec<MemoryEntry> {
     if user_message.trim().len() < 6 {
-        return String::new();
+        return Vec::new();
     }
 
     let Ok(entries) = state.db.memory_search(user_message).await else {
-        return String::new();
+        return Vec::new();
     };
 
-    let filtered = entries
+    entries
         .into_iter()
         .filter(|entry| !is_builtin_profile_memory(&entry.key))
         .take(MAX_RELEVANT_MEMORIES)
-        .collect::<Vec<_>>();
+        .collect()
+}
 
-    if filtered.is_empty() {
+fn format_relevant_memory_section(entries: &[MemoryEntry]) -> String {
+    if entries.is_empty() {
         return String::new();
     }
-
     let mut section = String::from(
         "## Potentially Relevant Memory\nThese entries look relevant to the current turn:\n",
     );
-    for entry in filtered {
+    for entry in entries {
         section.push_str("- `");
         section.push_str(&entry.key);
         section.push_str("`: ");
@@ -651,7 +681,7 @@ pub async fn prepend_system_prompt(
     conversation_id: Option<Uuid>,
     messages: &mut Vec<Message>,
     user_message: Option<&str>,
-) {
+) -> String {
     let context_snapshot = snapshot_recent_dialogue(messages, LIVE_STANCE_MESSAGE_WINDOW);
     let content = build_system_prompt(
         state,
@@ -661,10 +691,9 @@ pub async fn prepend_system_prompt(
         PromptMemoryScope::Chat,
     )
     .await;
-    if content.is_empty() {
-        return;
-    }
-    messages.insert(0, Message::transient(Role::System, content));
+    let cache_key = content.cache_key("chat");
+    content.insert_into(messages);
+    cache_key
 }
 
 pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<String> {
@@ -818,7 +847,7 @@ async fn prepare_run_context(
     state: &AppState,
     conv_id: Uuid,
     options: &AgentRunOptions,
-) -> anyhow::Result<(RunToolset, Vec<Message>, String, GoalTracker, usize)> {
+) -> anyhow::Result<(RunToolset, Vec<Message>, String, GoalTracker, usize, String)> {
     let mut messages = state
         .db
         .get_messages(conv_id, Some(state.max_context_messages))
@@ -839,9 +868,17 @@ async fn prepare_run_context(
     let toolset = RunToolset::new(options, has_attachments);
 
     sanitize_context_window(&mut messages);
+    remove_completed_historical_tool_activity(&mut messages);
     maybe_summarize_context(state, conv_id, &mut messages).await;
     sanitize_context_window(&mut messages);
-    prepend_system_prompt(state, Some(conv_id), &mut messages, Some(&last_user_msg)).await;
+    bound_context_window(
+        &mut messages,
+        state.max_context_chars,
+        state.context_compact_target_chars,
+        state.context_keep_recent_dialogue_messages,
+    );
+    let prompt_cache_key =
+        prepend_system_prompt(state, Some(conv_id), &mut messages, Some(&last_user_msg)).await;
     if options.scheduled_execution {
         messages.insert(1, Message::transient(
             Role::System,
@@ -855,6 +892,7 @@ async fn prepare_run_context(
         last_user_msg.clone(),
         GoalTracker::new(&last_user_msg),
         if state.enable_self_reflection { 1 } else { 0 },
+        prompt_cache_key,
     ))
 }
 
@@ -1266,6 +1304,61 @@ pub async fn run_agent_loop_with_options(
     }
 }
 
+fn initial_llm_request_options(
+    state: &AppState,
+    prompt_cache_key: &str,
+) -> jossie_llm::LlmRequestOptions {
+    if !state.openai_optimizations {
+        return jossie_llm::LlmRequestOptions::default();
+    }
+    jossie_llm::LlmRequestOptions {
+        prompt_cache_key: Some(prompt_cache_key.to_string()),
+        cache_breakpoint_message_index: Some(0),
+        ..jossie_llm::LlmRequestOptions::default()
+    }
+}
+
+async fn complete_agent_iteration(
+    state: &AppState,
+    full_messages: &[Message],
+    chained_messages: &[Message],
+    tools: &[jossie_core::ToolDefinition],
+    previous_response_id: Option<&str>,
+    prompt_cache_key: &str,
+    structured_output: Option<&jossie_llm::StructuredOutputFormat>,
+) -> anyhow::Result<jossie_llm::LlmOutput> {
+    if state.openai_optimizations
+        && let Some(previous_response_id) = previous_response_id
+    {
+        let chained_options = jossie_llm::LlmRequestOptions {
+            previous_response_id: Some(previous_response_id.to_string()),
+            structured_output: structured_output.cloned(),
+            ..jossie_llm::LlmRequestOptions::default()
+        };
+        match state
+            .llm
+            .complete_with_options(chained_messages, tools, &chained_options)
+            .await
+        {
+            Ok(output) => return Ok(output),
+            Err(error) => {
+                tracing::warn!(
+                    "Responses continuation failed; retrying from local context: {error}"
+                );
+            }
+        }
+    }
+
+    let mut options = initial_llm_request_options(state, prompt_cache_key);
+    if state.openai_optimizations {
+        options.structured_output = structured_output.cloned();
+    }
+    state
+        .llm
+        .complete_with_options(full_messages, tools, &options)
+        .await
+}
+
 async fn run_agent_loop_inner(
     state: &AppState,
     conv_id: Uuid,
@@ -1282,12 +1375,25 @@ async fn run_agent_loop_inner(
         last_user_msg,
         mut goal_tracker,
         mut reflection_retries_remaining,
+        prompt_cache_key,
     ) = prepare_run_context(state, conv_id, options).await?;
+    let mut previous_response_id: Option<String> = None;
+    let mut chained_messages = Vec::new();
 
     for _iteration in 0..state.max_agent_iterations {
         ensure_run_not_cancelled(state, conv_id, &run_id, None).await?;
         if _iteration > 0 {
             inject_goal_tracking_message(&mut messages, &goal_tracker);
+            chained_messages.push(
+                Message::transient(Role::System, goal_tracker.build_tracking_message())
+                    .with_name("goal_tracker".to_string()),
+            );
+            bound_context_window(
+                &mut messages,
+                state.max_context_chars,
+                state.context_compact_target_chars,
+                state.context_keep_recent_dialogue_messages,
+            );
         }
         let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
         let est_tokens = total_chars / 4;
@@ -1314,7 +1420,18 @@ async fn run_agent_loop_inner(
         }
 
         let tools = toolset.definitions(state);
-        let output = state.llm.complete(&messages, &tools).await?;
+        let output = complete_agent_iteration(
+            state,
+            &messages,
+            &chained_messages,
+            &tools,
+            previous_response_id.as_deref(),
+            &prompt_cache_key,
+            None,
+        )
+        .await?;
+        previous_response_id = output.response_id.clone();
+        chained_messages.clear();
         let content = output.content;
         let tool_calls = output.tool_calls;
         let response_items = output.response_items;
@@ -1331,13 +1448,15 @@ async fn run_agent_loop_inner(
                         Message::transient(Role::Assistant, content.clone())
                             .with_response_items(response_items.clone()),
                     );
-                    messages.push(Message::transient(
+                    let feedback_message = Message::transient(
                         Role::System,
                         format!(
                             "[SELF-REFLECTION FEEDBACK: Your response needs improvement. {}. Please revise your response.]",
                             feedback
                         ),
-                    ));
+                    );
+                    messages.push(feedback_message.clone());
+                    chained_messages.push(feedback_message);
                     continue;
                 }
             }
@@ -1348,9 +1467,22 @@ async fn run_agent_loop_inner(
             let db = state.db.clone();
             let kg_llm = state.kg_llm.clone();
             let assistant_reply = content.clone();
+            let openai_optimizations = state.openai_optimizations;
 
             tokio::spawn(async move {
-                spawn_knowledge_extraction(db, kg_llm, last_user_msg, assistant_reply).await;
+                spawn_knowledge_extraction(
+                    db,
+                    kg_llm,
+                    last_user_msg,
+                    assistant_reply,
+                    openai_optimizations,
+                )
+                .await;
+            });
+            let summary_db = state.db.clone();
+            let summary_llm = state.kg_llm.clone();
+            tokio::spawn(async move {
+                update_rolling_conversation_summary(summary_db, summary_llm, conv_id).await;
             });
 
             return Ok(content);
@@ -1370,6 +1502,7 @@ async fn run_agent_loop_inner(
                 Role::System,
                 format!("[LOOP GUARD: {loop_warning}]"),
             ));
+            previous_response_id = None;
             continue;
         }
 
@@ -1382,6 +1515,7 @@ async fn run_agent_loop_inner(
         persist_message(state, &assistant_msg).await?;
         messages.push(assistant_msg);
 
+        let capability_message_start = messages.len();
         if process_capability_activation(
             state,
             conv_id,
@@ -1394,6 +1528,7 @@ async fn run_agent_loop_inner(
         )
         .await?
         {
+            chained_messages.extend_from_slice(&messages[capability_message_start..]);
             continue;
         }
 
@@ -1430,7 +1565,8 @@ async fn run_agent_loop_inner(
                 .with_tool_call_id(call.id.clone())
                 .with_name(call.name.clone());
             persist_message(state, &tool_msg).await?;
-            messages.push(tool_msg);
+            messages.push(tool_msg.clone());
+            chained_messages.push(tool_msg);
         }
         if let Some(action) = pending_actions.first() {
             emit_stream_event(
@@ -1513,6 +1649,7 @@ async fn run_agent_loop_streaming_inner(
         last_user_msg,
         mut goal_tracker,
         mut reflection_retries_remaining,
+        prompt_cache_key,
     ) = match prepare_run_context(state, conv_id, &options).await {
         Ok(ctx) => ctx,
         Err(e) => {
@@ -1541,6 +1678,9 @@ async fn run_agent_loop_streaming_inner(
     )
     .await;
 
+    let mut previous_response_id: Option<String> = None;
+    let mut chained_messages = Vec::new();
+
     for iteration in 0..state.max_agent_iterations {
         if ensure_run_not_cancelled(state, conv_id, &run_id, Some(&event_tx))
             .await
@@ -1550,6 +1690,16 @@ async fn run_agent_loop_streaming_inner(
         }
         if iteration > 0 {
             inject_goal_tracking_message(&mut messages, &goal_tracker);
+            chained_messages.push(
+                Message::transient(Role::System, goal_tracker.build_tracking_message())
+                    .with_name("goal_tracker".to_string()),
+            );
+            bound_context_window(
+                &mut messages,
+                state.max_context_chars,
+                state.context_compact_target_chars,
+                state.context_keep_recent_dialogue_messages,
+            );
         }
 
         emit_stream_event(
@@ -1565,12 +1715,34 @@ async fn run_agent_loop_streaming_inner(
 
         let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(200);
         let llm = state.llm.clone();
-        let messages_clone = messages.clone();
-        let tools_clone = toolset.definitions(state);
+        let (messages_clone, request_options) = if state.openai_optimizations
+            && let Some(previous_response_id) = previous_response_id.as_ref()
+        {
+            (
+                chained_messages.clone(),
+                jossie_llm::LlmRequestOptions {
+                    previous_response_id: Some(previous_response_id.clone()),
+                    ..jossie_llm::LlmRequestOptions::default()
+                },
+            )
+        } else {
+            (
+                messages.clone(),
+                initial_llm_request_options(state, &prompt_cache_key),
+            )
+        };
+        let tools = toolset.definitions(state);
+        let tools_clone = tools.clone();
+        let continuation_attempt = request_options.previous_response_id.is_some();
 
         let stream_task = tokio::spawn(async move {
             if let Err(e) = llm
-                .complete_stream(&messages_clone, &tools_clone, stream_tx)
+                .complete_stream_with_options(
+                    &messages_clone,
+                    &tools_clone,
+                    &request_options,
+                    stream_tx,
+                )
                 .await
             {
                 tracing::error!("LLM stream error: {e}");
@@ -1580,8 +1752,9 @@ async fn run_agent_loop_streaming_inner(
         let mut full_content = String::new();
         let mut tool_calls = Vec::new();
         let mut response_items = Vec::new();
-        let mut stream_failed = false;
+        let mut stream_error = None;
         let mut done_received = false;
+        let mut completed_response_id = None;
 
         while !done_received {
             tokio::select! {
@@ -1602,23 +1775,17 @@ async fn run_agent_loop_streaming_inner(
                         Some(jossie_llm::StreamEvent::Completed {
                             tool_calls: calls,
                             response_items: items,
+                            response_id,
+                            ..
                         }) => {
                             tool_calls = calls;
                             response_items = items;
+                            completed_response_id = response_id;
                             done_received = true;
                         }
                         Some(jossie_llm::StreamEvent::Error(e)) => {
-                            stream_failed = true;
+                            stream_error = Some(e);
                             done_received = true;
-                            emit_stream_event(
-                                state,
-                                Some(&event_tx),
-                                ServerEvent::Error {
-                                    conversation_id: conv_id,
-                                    run_id: Some(run_id.clone()),
-                                    error: e,
-                                },
-                            ).await;
                         }
                         None => {
                             done_received = true;
@@ -1637,9 +1804,65 @@ async fn run_agent_loop_streaming_inner(
 
         let _ = stream_task.await;
 
-        if stream_failed {
-            return;
+        if let Some(error) = stream_error {
+            if continuation_attempt && full_content.is_empty() {
+                tracing::warn!(
+                    "Streaming Responses continuation failed; retrying from local context: {error}"
+                );
+                let request_options = initial_llm_request_options(state, &prompt_cache_key);
+                match state
+                    .llm
+                    .complete_with_options(&messages, &tools, &request_options)
+                    .await
+                {
+                    Ok(output) => {
+                        full_content = output.content;
+                        tool_calls = output.tool_calls;
+                        response_items = output.response_items;
+                        completed_response_id = output.response_id;
+                        if !full_content.is_empty() {
+                            emit_stream_event(
+                                state,
+                                Some(&event_tx),
+                                ServerEvent::AssistantDelta {
+                                    conversation_id: conv_id,
+                                    run_id: run_id.clone(),
+                                    content: full_content.clone(),
+                                },
+                            )
+                            .await;
+                        }
+                    }
+                    Err(fallback_error) => {
+                        emit_stream_event(
+                            state,
+                            Some(&event_tx),
+                            ServerEvent::Error {
+                                conversation_id: conv_id,
+                                run_id: Some(run_id.clone()),
+                                error: fallback_error.to_string(),
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            } else {
+                emit_stream_event(
+                    state,
+                    Some(&event_tx),
+                    ServerEvent::Error {
+                        conversation_id: conv_id,
+                        run_id: Some(run_id.clone()),
+                        error,
+                    },
+                )
+                .await;
+                return;
+            }
         }
+        previous_response_id = completed_response_id;
+        chained_messages.clear();
 
         if !tool_calls.is_empty() {
             if iteration + 1 >= state.max_agent_iterations {
@@ -1707,6 +1930,7 @@ async fn run_agent_loop_streaming_inner(
                     Role::System,
                     format!("[LOOP GUARD: {loop_warning}]"),
                 ));
+                previous_response_id = None;
                 continue;
             }
 
@@ -1719,6 +1943,7 @@ async fn run_agent_loop_streaming_inner(
             let _ = persist_message(state, &assistant_msg).await;
             messages.push(assistant_msg);
 
+            let capability_message_start = messages.len();
             match process_capability_activation(
                 state,
                 conv_id,
@@ -1731,7 +1956,10 @@ async fn run_agent_loop_streaming_inner(
             )
             .await
             {
-                Ok(true) => continue,
+                Ok(true) => {
+                    chained_messages.extend_from_slice(&messages[capability_message_start..]);
+                    continue;
+                }
                 Ok(false) => {}
                 Err(error) => {
                     emit_stream_event(
@@ -1825,7 +2053,8 @@ async fn run_agent_loop_streaming_inner(
                     .with_tool_call_id(call.id.clone())
                     .with_name(call.name.clone());
                 let _ = persist_message(state, &tool_msg).await;
-                messages.push(tool_msg);
+                messages.push(tool_msg.clone());
+                chained_messages.push(tool_msg);
             }
             if let Some(action) = pending_actions.first() {
                 emit_stream_event(
@@ -1873,13 +2102,15 @@ async fn run_agent_loop_streaming_inner(
                     Message::transient(Role::Assistant, full_content)
                         .with_response_items(response_items),
                 );
-                messages.push(Message::transient(
+                let feedback_message = Message::transient(
                     Role::System,
                     format!(
                         "[SELF-REFLECTION FEEDBACK: Your response needs improvement. {}. Please revise your response.]",
                         feedback
                     ),
-                ));
+                );
+                messages.push(feedback_message.clone());
+                chained_messages.push(feedback_message);
                 continue;
             }
         }
@@ -1887,12 +2118,25 @@ async fn run_agent_loop_streaming_inner(
         let assistant_msg = Message::new(conv_id, Role::Assistant, full_content);
         let assistant_reply = assistant_msg.content.clone();
         let user_for_extraction = last_user_msg.clone();
+        let openai_optimizations = state.openai_optimizations;
         let _ = persist_message(state, &assistant_msg).await;
 
         let db = state.db.clone();
         let kg_llm = state.kg_llm.clone();
         tokio::spawn(async move {
-            spawn_knowledge_extraction(db, kg_llm, user_for_extraction, assistant_reply).await;
+            spawn_knowledge_extraction(
+                db,
+                kg_llm,
+                user_for_extraction,
+                assistant_reply,
+                openai_optimizations,
+            )
+            .await;
+        });
+        let summary_db = state.db.clone();
+        let summary_llm = state.kg_llm.clone();
+        tokio::spawn(async move {
+            update_rolling_conversation_summary(summary_db, summary_llm, conv_id).await;
         });
 
         emit_stream_event(
@@ -1986,12 +2230,35 @@ Output only PASS or RETRY: <feedback>, nothing else."#
 /// Context compression: summarize older messages when context exceeds threshold.
 /// Keeps the most recent `keep_recent` messages in full and replaces older ones
 /// with a compact summary generated by kg_llm.
-const CONTEXT_CHAR_THRESHOLD: usize = 300_000;
-const KEEP_RECENT_MESSAGES: usize = 10;
-
 async fn maybe_summarize_context(state: &AppState, conv_id: Uuid, messages: &mut Vec<Message>) {
     let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
-    if total_chars < CONTEXT_CHAR_THRESHOLD || messages.len() <= KEEP_RECENT_MESSAGES {
+    let keep_recent = state.context_keep_recent_dialogue_messages;
+
+    let existing_summary = state
+        .db
+        .get_conversation_summary(conv_id)
+        .await
+        .ok()
+        .flatten();
+    if let Some(existing) = &existing_summary
+        && !messages
+            .iter()
+            .any(|message| message.name.as_deref() == Some("conversation_summary"))
+    {
+        messages.insert(
+            0,
+            Message::transient(
+                Role::System,
+                format!(
+                    "## Conversation Continuity Summary (previous {} messages)\nUse this to preserve facts, relationship continuity, and conversational stance.\n{}",
+                    existing.messages_summarized, existing.summary
+                ),
+            )
+            .with_name("conversation_summary".to_string()),
+        );
+    }
+
+    if total_chars < state.max_context_chars || messages.len() <= keep_recent {
         return;
     }
 
@@ -2002,12 +2269,12 @@ async fn maybe_summarize_context(state: &AppState, conv_id: Uuid, messages: &mut
     );
 
     // Check if we already have a recent summary
-    if let Ok(Some(existing)) = state.db.get_conversation_summary(conv_id).await {
+    if let Some(existing) = existing_summary {
         // If we already summarized most messages, just use the existing summary
         let unsummarized = messages.len() as i64 - existing.messages_summarized;
-        if unsummarized <= KEEP_RECENT_MESSAGES as i64 + 5 {
+        if unsummarized <= keep_recent as i64 + 5 {
             // Inject existing summary and keep only recent messages
-            let keep_from = messages.len().saturating_sub(KEEP_RECENT_MESSAGES);
+            let keep_from = messages.len().saturating_sub(keep_recent);
             let mut recent = messages.split_off(keep_from);
             sanitize_context_window(&mut recent);
             messages.clear();
@@ -2017,14 +2284,14 @@ async fn maybe_summarize_context(state: &AppState, conv_id: Uuid, messages: &mut
                     "## Conversation Continuity Summary (previous {} messages)\nUse this to preserve facts, relationship continuity, and conversational stance.\n{}",
                     existing.messages_summarized, existing.summary
                 ),
-            ));
+            ).with_name("conversation_summary".to_string()));
             messages.extend(recent);
             return;
         }
     }
 
     // Build the older messages to summarize
-    let keep_from = messages.len().saturating_sub(KEEP_RECENT_MESSAGES);
+    let keep_from = messages.len().saturating_sub(keep_recent);
     let to_summarize: Vec<String> = messages[..keep_from]
         .iter()
         .map(|m| format!("{:?}: {}", m.role, &m.content[..m.content.len().min(500)]))
@@ -2078,7 +2345,7 @@ Conversation:
                     "## Conversation Continuity Summary (previous {} messages)\nUse this to preserve facts, relationship continuity, and conversational stance.\n{}",
                     messages_count, summary
                 ),
-            ));
+            ).with_name("conversation_summary".to_string()));
             messages.extend(recent);
 
             tracing::info!(
@@ -2094,14 +2361,102 @@ Conversation:
     }
 }
 
+async fn update_rolling_conversation_summary(
+    db: Arc<jossie_db::Database>,
+    kg_llm: jossie_llm::LlmClient,
+    conversation_id: Uuid,
+) {
+    const SUMMARY_CHUNK_MESSAGES: usize = 120;
+    const SUMMARY_MIN_MESSAGES: usize = 80;
+    const SUMMARY_MIN_CHARS: usize = 40_000;
+
+    let existing = db
+        .get_conversation_summary(conversation_id)
+        .await
+        .ok()
+        .flatten();
+    let last_message_id = existing
+        .as_ref()
+        .and_then(|summary| summary.last_message_id.as_deref());
+    let Ok(chunk) = db
+        .get_messages_after_for_summary(conversation_id, last_message_id, SUMMARY_CHUNK_MESSAGES)
+        .await
+    else {
+        return;
+    };
+    let chunk_chars = chunk
+        .iter()
+        .map(|message| message.content.len())
+        .sum::<usize>();
+    if chunk.len() < SUMMARY_MIN_MESSAGES && chunk_chars < SUMMARY_MIN_CHARS {
+        return;
+    }
+
+    let transcript = chunk
+        .iter()
+        .map(|message| {
+            let content = if message.role == Role::Tool {
+                preview_text(&message.content, 800)
+            } else {
+                preview_text(&message.content, 1_500)
+            };
+            format!("{:?}: {content}", message.role)
+        })
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    let previous = existing
+        .as_ref()
+        .map(|summary| summary.summary.as_str())
+        .unwrap_or("No previous summary.");
+    let prompt = format!(
+        "Update the compact conversation continuity summary using the new transcript chunk.\n\
+         Preserve durable facts, decisions, user preferences, commitments, unresolved blockers,\n\
+         important tool findings, current conversational stance, and next actions. Remove stale or\n\
+         superseded details. Do not invent facts. Return concise markdown with exactly these headings:\n\
+         ## Facts And Decisions\n## User Preferences And Relationship Signals\n\
+         ## Current Stance To Preserve\n## Open Loops\n\n\
+         Previous summary:\n{previous}\n\nNew transcript chunk:\n{transcript}"
+    );
+    let system = Message::transient(
+        Role::System,
+        "You maintain compact rolling conversation state. Output only the requested summary."
+            .to_string(),
+    );
+    let user = Message::transient(Role::User, prompt);
+    match kg_llm.complete(&[system, user], &[]).await {
+        Ok(output) if !output.content.trim().is_empty() => {
+            let previous_count = existing
+                .as_ref()
+                .map(|summary| summary.messages_summarized)
+                .unwrap_or(0);
+            let last_id = chunk.last().map(|message| message.id.to_string());
+            if let Err(error) = db
+                .save_conversation_summary(
+                    conversation_id,
+                    &output.content,
+                    previous_count + chunk.len() as i64,
+                    last_id.as_deref(),
+                )
+                .await
+            {
+                tracing::warn!("Failed to save rolling conversation summary: {error}");
+            }
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!("Rolling conversation summary failed: {error}"),
+    }
+}
+
 pub(crate) async fn spawn_knowledge_extraction(
     db: Arc<jossie_db::Database>,
     kg_llm: jossie_llm::LlmClient,
     user_msg: String,
     assistant_msg: String,
+    openai_optimizations: bool,
 ) {
-    if user_msg.len() < 10 && assistant_msg.len() < 10 {
-        return; // Skip short chat
+    if !should_extract_knowledge(&user_msg, &assistant_msg) {
+        tracing::debug!("Skipping knowledge extraction for a low-signal turn");
+        return;
     }
 
     let prompt = format!(
@@ -2132,7 +2487,57 @@ If nothing to extract, output {{ "nodes": [], "edges": [] }}"#
     );
     let user_msg = Message::transient(Role::User, prompt);
 
-    match kg_llm.complete(&[sys_msg, user_msg], &[]).await {
+    let extraction_messages = [sys_msg, user_msg];
+    let extraction_result = if openai_optimizations {
+        kg_llm
+            .complete_with_options(
+                &extraction_messages,
+                &[],
+                &jossie_llm::LlmRequestOptions {
+                    structured_output: Some(jossie_llm::StructuredOutputFormat {
+                        name: "knowledge_graph_extraction".to_string(),
+                        schema: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "nodes": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {"type": "string"},
+                                            "label": {"type": "string"},
+                                            "type": {"type": "string"}
+                                        },
+                                        "required": ["id", "label", "type"],
+                                        "additionalProperties": false
+                                    }
+                                },
+                                "edges": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "source": {"type": "string"},
+                                            "target": {"type": "string"},
+                                            "relation": {"type": "string"}
+                                        },
+                                        "required": ["source", "target", "relation"],
+                                        "additionalProperties": false
+                                    }
+                                }
+                            },
+                            "required": ["nodes", "edges"],
+                            "additionalProperties": false
+                        }),
+                    }),
+                    ..jossie_llm::LlmRequestOptions::default()
+                },
+            )
+            .await
+    } else {
+        kg_llm.complete(&extraction_messages, &[]).await
+    };
+    match extraction_result {
         Ok(output) => {
             let response = output.content;
             let clean_json = response
@@ -2173,6 +2578,52 @@ If nothing to extract, output {{ "nodes": [], "edges": [] }}"#
         }
         Err(e) => tracing::error!("KG Extraction LLM failed: {e}"),
     }
+}
+
+fn should_extract_knowledge(user_msg: &str, assistant_msg: &str) -> bool {
+    if user_msg.trim().len() + assistant_msg.trim().len() < 80 {
+        return false;
+    }
+    let combined = format!("{user_msg}\n{assistant_msg}");
+    let lower = combined.to_lowercase();
+    let has_durable_relation = contains_any(
+        &lower,
+        &[
+            " works at ",
+            " works on ",
+            " lives in ",
+            " is my ",
+            " project ",
+            " company ",
+            " colleague ",
+            " friend ",
+            " partner ",
+            " manager ",
+            " meeting with ",
+        ],
+    );
+    let has_explicit_identifier = user_msg.contains('@') || user_msg.contains('"');
+    let has_entity_context = contains_any(
+        &user_msg.to_lowercase(),
+        &[
+            "person",
+            "people",
+            "project",
+            "company",
+            "colleague",
+            "friend",
+            "partner",
+            "manager",
+            "boss",
+            "family",
+            "meeting",
+            "works",
+            "lives",
+        ],
+    );
+    has_durable_relation
+        || has_explicit_identifier
+        || (has_entity_context && !extract_candidate_entities(user_msg).is_empty())
 }
 
 pub async fn generate_event_message(
@@ -2236,6 +2687,30 @@ struct EventNotificationState {
     sent_at: String,
 }
 
+fn event_mode_output_format() -> jossie_llm::StructuredOutputFormat {
+    jossie_llm::StructuredOutputFormat {
+        name: "event_notification_decision".to_string(),
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["notify", "skip"]},
+                "message": {"type": "string"},
+                "what_happened": {"type": "string"},
+                "why_now": {"type": "string"},
+                "what_changed": {"type": "string"},
+                "suggested_action": {"type": "string"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "interrupt_score": {"type": "number", "minimum": 0, "maximum": 1}
+            },
+            "required": [
+                "action", "message", "what_happened", "why_now", "what_changed",
+                "suggested_action", "confidence", "interrupt_score"
+            ],
+            "additionalProperties": false
+        }),
+    }
+}
+
 const EVENT_NOTIFICATION_MARKER: &str = "integration_event_notification";
 const EVENT_MODE_SETTINGS_NAMESPACE: &str = "event_mode";
 const EVENT_NOTIFY_COOLDOWN_SECONDS: i64 = 120;
@@ -2260,6 +2735,12 @@ async fn generate_event_message_inner(
     strip_tool_activity_from_event_context(&mut messages);
 
     sanitize_context_window(&mut messages);
+    bound_context_window(
+        &mut messages,
+        (state.max_context_chars / 3).max(20_000),
+        (state.context_compact_target_chars / 3).max(15_000),
+        state.context_keep_recent_dialogue_messages.min(8),
+    );
 
     let event_context = build_event_context_hint(event);
     let context_snapshot = snapshot_recent_dialogue(&messages, LIVE_STANCE_MESSAGE_WINDOW);
@@ -2271,20 +2752,20 @@ async fn generate_event_message_inner(
         PromptMemoryScope::Event,
     )
     .await;
-    let event_memory_context = build_event_specific_prompt_memory_context(state, event).await;
+    let event_memory_context =
+        build_event_specific_prompt_memory_context(state, event, &prompt.included_memory_keys)
+            .await;
     if !event_memory_context.is_empty() {
-        prompt.push_str("\n\n");
-        prompt.push_str(&event_memory_context);
+        prompt.dynamic.push_str("\n\n");
+        prompt.dynamic.push_str(&event_memory_context);
     }
-    prompt.push_str(
-        "\n\n## Incoming Notification Mode\nThis is still Jossie: same judgment, same continuity, same general tool access as a normal conversation.\nThe difference is that you are deciding whether this newly arrived event deserves an interruption right now.\nDefault to quiet triage.\nNotify only if the event is urgent, time-sensitive, actionable, clearly relevant to the user, or materially changes their plans.\nSkip low-signal items such as newsletters, receipts, marketing mail, routine confirmations, automated churn, or minor non-actionable calendar edits.\nFor email batches, notify only when the batch as a whole suggests something worth surfacing now.\nInterpret this event independently as a fresh arrival.\nDo NOT imply that you made a prior mistake, correction, or retraction unless the event payload explicitly says so.\nFor `gmail_new_message` and `new_email_batch`, frame updates as newly arrived emails, even when similar to prior ones.\nUse tools normally when they materially improve confidence, especially before notifying about details hidden behind an email summary, snippet, attachment, or linked system.\nDo not claim room changes, schedule changes, requirement changes, or downstream consequences unless the email body or another checked source explicitly confirms them.\nIf an email mentions another system such as Moodle, an attachment, or a linked page that you did not verify, say only that the email mentions it.\nIf you notify, write it like Jossie: short, concrete, natural, and grounded in what you actually checked.\nBefore deciding, build a compact internal notification brief and use it to choose `notify` or `skip`.\nOnly notify when confidence and interrupt_score are both strong enough.\nReturn strict JSON only, with no markdown, in this exact shape:\n{\"action\":\"notify|skip\",\"message\":\"<short user-facing message>\",\"what_happened\":\"...\",\"why_now\":\"...\",\"what_changed\":\"...\",\"suggested_action\":\"...\",\"confidence\":0.0,\"interrupt_score\":0.0}"
-    );
     if !recent_notification_context.is_empty() {
-        prompt.push_str("\n\n");
-        prompt.push_str(&recent_notification_context);
+        prompt.dynamic.push_str("\n\n");
+        prompt.dynamic.push_str(&recent_notification_context);
     }
 
-    messages.insert(0, Message::transient(Role::System, prompt));
+    let prompt_cache_key = prompt.cache_key("event");
+    prompt.insert_into(&mut messages);
 
     let event_payload = serde_json::json!({
         "integration": event.integration,
@@ -2302,10 +2783,24 @@ async fn generate_event_message_inner(
     ));
 
     let tools = build_event_mode_tools(state, event);
+    let event_output_format = event_mode_output_format();
     let fingerprint = event_notification_fingerprint(event);
+    let mut previous_response_id: Option<String> = None;
+    let mut chained_messages = Vec::new();
 
     for _ in 0..EVENT_MODE_MAX_ITERATIONS {
-        let output = state.llm.complete(&messages, &tools).await?;
+        let output = complete_agent_iteration(
+            state,
+            &messages,
+            &chained_messages,
+            &tools,
+            previous_response_id.as_deref(),
+            &prompt_cache_key,
+            Some(&event_output_format),
+        )
+        .await?;
+        previous_response_id = output.response_id.clone();
+        chained_messages.clear();
         let content = output.content;
         let tool_calls = output.tool_calls;
         let response_items = output.response_items;
@@ -2376,7 +2871,8 @@ async fn generate_event_message_inner(
                     .with_tool_call_id(call.id.clone())
                     .with_name(call.name.clone()),
             };
-            messages.push(tool_msg);
+            messages.push(tool_msg.clone());
+            chained_messages.push(tool_msg);
         }
     }
 
@@ -2390,20 +2886,25 @@ fn build_event_mode_tools(
     state: &AppState,
     event: &IntegrationEvent,
 ) -> Vec<jossie_core::ToolDefinition> {
+    let event_capability = match event.event_type.as_str() {
+        "new_email" | "gmail_new_message" | "new_email_batch" => Some(CapabilityGroup::Mail),
+        "calendar_event" | "calendar_event_updated" | "calendar_event_batch" => {
+            Some(CapabilityGroup::Calendar)
+        }
+        _ => None,
+    };
     let mut tools: Vec<jossie_core::ToolDefinition> = state
         .registry
         .all_agent_tool_definitions()
         .into_iter()
         .filter(|tool| {
-            state
-                .registry
-                .metadata_for(&jossie_core::ToolCall {
-                    id: String::new(),
-                    name: tool.name.clone(),
-                    arguments: "{}".to_string(),
-                })
-                .effect
-                == jossie_core::integration::ToolEffect::Read
+            let metadata = state.registry.metadata_for(&jossie_core::ToolCall {
+                id: String::new(),
+                name: tool.name.clone(),
+                arguments: "{}".to_string(),
+            });
+            metadata.effect == jossie_core::integration::ToolEffect::Read
+                && event_capability == Some(metadata.capability)
         })
         .collect();
     if event_supports_trigger_email_read(event) {
@@ -2748,6 +3249,7 @@ fn build_event_context_hint(event: &IntegrationEvent) -> String {
 async fn build_event_specific_prompt_memory_context(
     state: &AppState,
     event: &IntegrationEvent,
+    excluded_keys: &HashSet<String>,
 ) -> String {
     let query = build_event_memory_query(event);
     if query.trim().is_empty() {
@@ -2768,7 +3270,9 @@ async fn build_event_specific_prompt_memory_context(
 
     let entries = entries
         .into_iter()
-        .filter(|entry| !is_builtin_profile_memory(&entry.key))
+        .filter(|entry| {
+            !is_builtin_profile_memory(&entry.key) && !excluded_keys.contains(&entry.key)
+        })
         .collect::<Vec<_>>();
 
     format_prompt_memory_section(
@@ -2962,29 +3466,46 @@ async fn build_graph_context(state: &AppState, user_message: &str) -> String {
         return String::new();
     }
 
+    let lower_message = user_message.to_lowercase();
+    let has_context_intent = contains_any(
+        &lower_message,
+        &[
+            "remember",
+            "who",
+            "person",
+            "people",
+            "project",
+            "work",
+            "meeting",
+            "company",
+            "relationship",
+            "context",
+            "know about",
+        ],
+    );
+    let first_word = user_message
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|ch: char| ch.is_ascii_punctuation());
+    if candidates.len() == 1
+        && candidates[0].eq_ignore_ascii_case(first_word)
+        && !has_context_intent
+    {
+        return String::new();
+    }
+
     const MAX_CANDIDATES: usize = 8;
     const MAX_NODES: usize = 6;
     const MAX_EDGES_PER_NODE: usize = 6;
 
-    let mut nodes = Vec::new();
-    let mut seen_nodes = HashSet::new();
-
-    for candidate in candidates.into_iter().take(MAX_CANDIDATES) {
-        let Ok(found) = state.db.graph_find_nodes(&candidate).await else {
-            continue;
-        };
-        for node in found {
-            if seen_nodes.insert(node.id.clone()) {
-                nodes.push(node);
-            }
-            if nodes.len() >= MAX_NODES {
-                break;
-            }
-        }
-        if nodes.len() >= MAX_NODES {
-            break;
-        }
-    }
+    let candidates = candidates
+        .into_iter()
+        .take(MAX_CANDIDATES)
+        .collect::<Vec<_>>();
+    let Ok(nodes) = state.db.graph_find_nodes_many(&candidates, MAX_NODES).await else {
+        return String::new();
+    };
 
     if nodes.is_empty() {
         return String::new();
@@ -2994,13 +3515,16 @@ async fn build_graph_context(state: &AppState, user_message: &str) -> String {
     lines.push("## Context Graph".to_string());
 
     let mut seen_edges = HashSet::new();
+    let node_ids = nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>();
+    let mut neighbors_by_node = state
+        .db
+        .graph_get_neighbors_many(&node_ids, MAX_EDGES_PER_NODE)
+        .await
+        .unwrap_or_default();
     for node in &nodes {
         lines.push(format!("- {} [{}]", node.label, node.node_type));
 
-        let Ok(neighbors) = state.db.graph_get_neighbors(&node.id).await else {
-            continue;
-        };
-        for neighbor in neighbors.into_iter().take(MAX_EDGES_PER_NODE) {
+        for neighbor in neighbors_by_node.remove(&node.id).unwrap_or_default() {
             let line = if neighbor.direction == "outgoing" {
                 format!(
                     "- {} --[{}]--> {}",
@@ -3021,7 +3545,7 @@ async fn build_graph_context(state: &AppState, user_message: &str) -> String {
     let mut context = lines.join("\n");
 
     // NEW: Add contextual hints to encourage proactive searching
-    let lower_msg = user_message.to_lowercase();
+    let lower_msg = lower_message;
 
     if user_message.contains('?') && nodes.len() < 3 {
         context.push_str("\n\n**Hint**: This is a question. Consider using graph_search to find more relevant context before answering.");
@@ -3049,32 +3573,50 @@ async fn enrich_candidates_with_context(
     mut candidates: Vec<String>,
 ) -> Vec<String> {
     let lower = message.to_lowercase();
-
-    // Proactively search for entities when certain keywords appear
-    if lower.contains("work") || lower.contains("project") || lower.contains("job") {
-        if let Ok(nodes) = state.db.graph_list_nodes_by_type("Project").await {
-            candidates.extend(nodes.into_iter().map(|n| n.label).take(3));
-        }
-    }
-
-    if lower.contains("meeting")
+    let wants_projects =
+        lower.contains("work") || lower.contains("project") || lower.contains("job");
+    let wants_people = lower.contains("meeting")
         || lower.contains("talk")
         || lower.contains("discuss")
-        || lower.contains("call")
-    {
-        if let Ok(nodes) = state.db.graph_list_nodes_by_type("Person").await {
-            candidates.extend(nodes.into_iter().map(|n| n.label).take(5));
-        }
+        || lower.contains("call");
+    let wants_companies = lower.contains("company") || lower.contains("organization");
+    let mut node_types = Vec::new();
+    if wants_projects {
+        node_types.push("Project");
     }
-
-    if lower.contains("company") || lower.contains("organization") {
-        if let Ok(nodes) = state.db.graph_list_nodes_by_type("Company").await {
-            candidates.extend(nodes.into_iter().map(|n| n.label).take(3));
-        }
+    if wants_people {
+        node_types.push("Person");
     }
-
-    // Add frequently mentioned entities from memory (if stored)
-    if let Ok(Some(freq_entities)) = state.db.get_memory("frequent_entities").await {
+    if wants_companies {
+        node_types.push("Company");
+    }
+    let (context_nodes, frequent_entities) = tokio::join!(
+        state.db.graph_list_nodes_by_types(&node_types, 15),
+        state.db.get_memory("frequent_entities")
+    );
+    let context_nodes = context_nodes.unwrap_or_default();
+    candidates.extend(
+        context_nodes
+            .iter()
+            .filter(|node| node.node_type == "Project")
+            .take(3)
+            .map(|node| node.label.clone()),
+    );
+    candidates.extend(
+        context_nodes
+            .iter()
+            .filter(|node| node.node_type == "Person")
+            .take(5)
+            .map(|node| node.label.clone()),
+    );
+    candidates.extend(
+        context_nodes
+            .iter()
+            .filter(|node| node.node_type == "Company")
+            .take(3)
+            .map(|node| node.label.clone()),
+    );
+    if let Ok(Some(freq_entities)) = frequent_entities {
         if let Ok(entities) = serde_json::from_str::<Vec<String>>(&freq_entities.content) {
             candidates.extend(entities.into_iter().take(3));
         }
@@ -3253,6 +3795,120 @@ fn is_entity_token(token: &str, stopwords: &HashSet<&str>) -> bool {
     token.len() > 1
 }
 
+fn remove_completed_historical_tool_activity(messages: &mut Vec<Message>) {
+    let Some(last_final_assistant) = messages.iter().rposition(|message| {
+        message.role == Role::Assistant
+            && message.tool_calls.is_none()
+            && !message.content.trim().is_empty()
+    }) else {
+        return;
+    };
+
+    let mut projected = Vec::with_capacity(messages.len());
+    let mut idx = 0usize;
+    let mut removed_chars = 0usize;
+    while idx < messages.len() {
+        let message = &messages[idx];
+        if message.role == Role::Assistant && message.tool_calls.is_some() {
+            let mut block_end = idx + 1;
+            while block_end < messages.len() && messages[block_end].role == Role::Tool {
+                block_end += 1;
+            }
+            if block_end <= last_final_assistant {
+                removed_chars += messages[idx..block_end]
+                    .iter()
+                    .map(|message| message.content.len())
+                    .sum::<usize>();
+                idx = block_end;
+                continue;
+            }
+        }
+        projected.push(message.clone());
+        idx += 1;
+    }
+
+    if removed_chars > 0 {
+        tracing::debug!(
+            removed_chars,
+            remaining_messages = projected.len(),
+            "Projected completed historical tool activity out of prompt context"
+        );
+        *messages = projected;
+    }
+}
+
+fn bound_context_window(
+    messages: &mut Vec<Message>,
+    max_chars: usize,
+    target_chars: usize,
+    keep_recent_dialogue: usize,
+) {
+    if context_chars(messages) <= max_chars {
+        return;
+    }
+
+    let dialogue_indices = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, message)| matches!(message.role, Role::User | Role::Assistant))
+        .take(keep_recent_dialogue)
+        .map(|(idx, _)| idx)
+        .collect::<HashSet<_>>();
+    let first_required = dialogue_indices
+        .iter()
+        .copied()
+        .min()
+        .unwrap_or(messages.len());
+    let before = context_chars(messages);
+    let mut retained = messages
+        .iter()
+        .enumerate()
+        .filter(|(idx, message)| message.role == Role::System || *idx >= first_required)
+        .map(|(_, message)| message.clone())
+        .collect::<Vec<_>>();
+    sanitize_context_window(&mut retained);
+    *messages = retained;
+
+    while context_chars(messages) > target_chars {
+        let newest_tool = messages
+            .iter()
+            .rposition(|message| message.role == Role::Tool);
+        let Some((idx, _)) = messages
+            .iter()
+            .enumerate()
+            .filter(|(idx, message)| {
+                message.role == Role::Tool
+                    && Some(*idx) != newest_tool
+                    && message.content.len() > 2_000
+            })
+            .max_by_key(|(_, message)| message.content.len())
+        else {
+            break;
+        };
+        let excess = context_chars(messages).saturating_sub(target_chars);
+        let new_limit = messages[idx]
+            .content
+            .len()
+            .saturating_sub(excess)
+            .max(2_000);
+        messages[idx].content = preview_text(&messages[idx].content, new_limit);
+    }
+
+    tracing::info!(
+        before_chars = before,
+        after_chars = context_chars(messages),
+        max_chars,
+        target_chars,
+        retained_messages = messages.len(),
+        "Bounded prompt context"
+    );
+}
+
+fn context_chars(messages: &[Message]) -> usize {
+    messages.iter().map(|message| message.content.len()).sum()
+}
+
 fn sanitize_context_window(messages: &mut Vec<Message>) {
     let mut sanitized = Vec::with_capacity(messages.len());
     let mut idx = 0usize;
@@ -3413,48 +4069,88 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_index_lists_all_keys() {
-        let keys = vec![
-            MemoryKeyInfo {
-                key: "user_profile.location".to_string(),
-                created_at: "2026-01-01T00:00:00Z".to_string(),
-                updated_at: "2026-01-02T00:00:00Z".to_string(),
-            },
-            MemoryKeyInfo {
-                key: "agent_profile.mood".to_string(),
-                created_at: "2026-01-03T00:00:00Z".to_string(),
-                updated_at: "2026-01-04T00:00:00Z".to_string(),
-            },
-        ];
+    fn completed_historical_tool_activity_is_removed() {
+        let conv_id = Uuid::new_v4();
+        let assistant = Message::new(conv_id, Role::Assistant, "Checking".to_string())
+            .with_tool_calls(serde_json::json!([{
+                "id": "call_1",
+                "name": "lookup",
+                "arguments": "{}"
+            }]));
+        let tool = Message::new(conv_id, Role::Tool, "x".repeat(100_000))
+            .with_tool_call_id("call_1".to_string());
+        let final_answer = Message::new(conv_id, Role::Assistant, "Found it".to_string());
+        let latest_user = Message::new(conv_id, Role::User, "What next?".to_string());
+        let mut messages = vec![assistant, tool, final_answer, latest_user];
 
-        let section = format_memory_index(&keys);
-        assert!(section.contains("user_profile.location"));
-        assert!(section.contains("agent_profile.mood"));
-        assert!(section.contains("2026-01-02T00:00:00Z"));
-        assert!(section.contains("2026-01-04T00:00:00Z"));
+        remove_completed_historical_tool_activity(&mut messages);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "Found it");
+        assert_eq!(messages[1].content, "What next?");
     }
 
     #[test]
-    fn test_memory_index_empty_state() {
-        let section = format_memory_index(&[]);
-        assert!(section.contains("No memories are currently saved"));
-    }
-
-    #[test]
-    fn test_memory_index_shortlists_large_memory_sets() {
-        let keys = (0..15)
-            .map(|idx| MemoryKeyInfo {
-                key: format!("memory.{idx}"),
-                created_at: "2026-01-01T00:00:00Z".to_string(),
-                updated_at: "2026-01-02T00:00:00Z".to_string(),
+    fn bounded_context_retains_recent_dialogue() {
+        let conv_id = Uuid::new_v4();
+        let mut messages = (0..20)
+            .map(|idx| {
+                Message::new(
+                    conv_id,
+                    if idx % 2 == 0 {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
+                    format!("message-{idx} {}", "x".repeat(10_000)),
+                )
             })
             .collect::<Vec<_>>();
 
-        let section = format_memory_index(&keys);
-        assert!(section.contains("memory.0"));
-        assert!(section.contains("memory.11"));
-        assert!(!section.contains("memory.12"));
-        assert!(section.contains("3 more memory entries not shown"));
+        bound_context_window(&mut messages, 120_000, 80_000, 6);
+
+        assert!(context_chars(&messages) <= 120_000);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.content.starts_with("message-19"))
+        );
+        assert!(
+            messages
+                .iter()
+                .filter(|message| matches!(message.role, Role::User | Role::Assistant))
+                .count()
+                >= 6
+        );
+    }
+
+    #[test]
+    fn prompt_cache_key_ignores_dynamic_context() {
+        let first = PromptBundle {
+            stable: "stable prompt".to_string(),
+            dynamic: "time one".to_string(),
+            included_memory_keys: HashSet::new(),
+        };
+        let second = PromptBundle {
+            stable: "stable prompt".to_string(),
+            dynamic: "time two and different memories".to_string(),
+            included_memory_keys: HashSet::new(),
+        };
+
+        assert_eq!(first.cache_key("chat"), second.cache_key("chat"));
+        assert_ne!(first.cache_key("chat"), second.cache_key("event"));
+    }
+
+    #[test]
+    fn knowledge_extraction_skips_chitchat_and_keeps_durable_relations() {
+        assert!(!should_extract_knowledge(
+            "Hello, how are you?",
+            "I'm doing well. What can I help with today?"
+        ));
+        assert!(should_extract_knowledge(
+            "Alice is my colleague and works on the Jossie project.",
+            "I'll remember that context for future work with Alice."
+        ));
     }
 
     #[test]

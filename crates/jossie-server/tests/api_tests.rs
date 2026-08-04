@@ -32,6 +32,10 @@ async fn setup_app() -> axum::Router {
         max_agent_iterations: 5,
         max_context_messages: 10,
         event_max_context_messages: 10,
+        openai_optimizations: false,
+        max_context_chars: 120_000,
+        context_compact_target_chars: 80_000,
+        context_keep_recent_dialogue_messages: 12,
         google_config: jossie_core::config::GoogleConfig {
             client_id: "".to_string(),
             client_secret: "".to_string(),

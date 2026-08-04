@@ -98,6 +98,8 @@ CREATE TABLE IF NOT EXISTS graph_edges (
 
 CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_id);
 CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_id);
+CREATE INDEX IF NOT EXISTS idx_graph_nodes_type_updated
+    ON graph_nodes(type, updated_at DESC);
 
 -- Scheduled tasks created by the agent via chat tools
 CREATE TABLE IF NOT EXISTS scheduled_tasks (

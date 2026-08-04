@@ -387,6 +387,8 @@ pub trait Integration: Send + Sync {
 pub struct IntegrationRegistry {
     integrations: Vec<Arc<dyn Integration>>,
     tool_map: HashMap<String, usize>,
+    tool_definitions: Vec<ToolDefinition>,
+    agent_tool_definitions: Vec<ToolDefinition>,
 }
 
 impl IntegrationRegistry {
@@ -394,26 +396,29 @@ impl IntegrationRegistry {
         Self {
             integrations: Vec::new(),
             tool_map: HashMap::new(),
+            tool_definitions: Vec::new(),
+            agent_tool_definitions: Vec::new(),
         }
     }
 
     pub fn register(&mut self, integration: Arc<dyn Integration>) {
         let idx = self.integrations.len();
-        for tool in integration.tools() {
+        let tools = integration.tools();
+        for tool in &tools {
             self.tool_map.insert(tool.name.clone(), idx);
         }
+        self.tool_definitions.extend(tools);
+        self.agent_tool_definitions
+            .extend(integration.agent_tools());
         self.integrations.push(integration);
     }
 
     pub fn all_tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.integrations.iter().flat_map(|i| i.tools()).collect()
+        self.tool_definitions.clone()
     }
 
     pub fn all_agent_tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.integrations
-            .iter()
-            .flat_map(|i| i.agent_tools())
-            .collect()
+        self.agent_tool_definitions.clone()
     }
 
     pub fn agent_tool_definitions_for(

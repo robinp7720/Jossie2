@@ -31,6 +31,16 @@ struct ResponsesRequest {
     reasoning: Option<ResponseReasoningConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     service_tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_response_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_options: Option<PromptCacheOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<ResponseTextConfig>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,6 +74,32 @@ struct ResponseInputText {
     #[serde(rename = "type")]
     item_type: &'static str,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_breakpoint: Option<PromptCacheBreakpoint>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PromptCacheBreakpoint {
+    mode: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PromptCacheOptions {
+    mode: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResponseTextConfig {
+    format: ResponseTextFormat,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResponseTextFormat {
+    #[serde(rename = "type")]
+    format_type: &'static str,
+    name: String,
+    strict: bool,
+    schema: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,11 +161,15 @@ struct ResponseReasoningConfig {
 #[derive(Debug, Clone, Deserialize)]
 struct ResponsesResponse {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     output: Vec<Value>,
     #[allow(dead_code)]
     status: Option<String>,
     #[serde(default)]
     error: Option<ResponseError>,
+    #[serde(default)]
+    usage: Option<ResponseUsage>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,6 +183,8 @@ pub enum StreamEvent {
     Completed {
         tool_calls: Vec<ToolCall>,
         response_items: Vec<Value>,
+        response_id: Option<String>,
+        usage: Option<ResponseUsage>,
     },
     Error(String),
 }
@@ -152,6 +194,50 @@ pub struct LlmOutput {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
     pub response_items: Vec<Value>,
+    pub response_id: Option<String>,
+    pub usage: Option<ResponseUsage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResponseUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub input_tokens_details: ResponseInputTokenDetails,
+    #[serde(default)]
+    pub output_tokens_details: ResponseOutputTokenDetails,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResponseInputTokenDetails {
+    #[serde(default)]
+    pub cached_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResponseOutputTokenDetails {
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LlmRequestOptions {
+    pub previous_response_id: Option<String>,
+    pub prompt_cache_key: Option<String>,
+    pub cache_breakpoint_message_index: Option<usize>,
+    pub structured_output: Option<StructuredOutputFormat>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StructuredOutputFormat {
+    pub name: String,
+    pub schema: Value,
 }
 
 impl LlmClient {
@@ -184,10 +270,13 @@ impl LlmClient {
         self.service_tier = service_tier;
     }
 
-    fn build_input(messages: &[Message]) -> Vec<ResponseInputItem> {
+    fn build_input(
+        messages: &[Message],
+        cache_breakpoint_message_index: Option<usize>,
+    ) -> Vec<ResponseInputItem> {
         let mut items = Vec::new();
 
-        for message in messages {
+        for (message_index, message) in messages.iter().enumerate() {
             if message.role == Role::Assistant
                 && let Some(response_items) = &message.response_items
                 && !response_items.is_empty()
@@ -204,6 +293,9 @@ impl LlmClient {
                         content: vec![ResponseInputText {
                             item_type: "input_text",
                             text: message.content.clone(),
+                            prompt_cache_breakpoint: (cache_breakpoint_message_index
+                                == Some(message_index))
+                            .then_some(PromptCacheBreakpoint { mode: "explicit" }),
                         }],
                     }));
                 }
@@ -279,13 +371,14 @@ impl LlmClient {
         messages: &[Message],
         tools: &[ToolDefinition],
         stream: bool,
+        options: &LlmRequestOptions,
     ) -> ResponsesRequest {
         let built_tools = self.build_tools(tools);
         let has_tools = built_tools.is_some();
 
         ResponsesRequest {
             model: self.model.clone(),
-            input: Self::build_input(messages),
+            input: Self::build_input(messages, options.cache_breakpoint_message_index),
             tools: built_tools,
             tool_choice: if has_tools {
                 Some(Value::String("auto".to_string()))
@@ -302,6 +395,23 @@ impl LlmClient {
                 None
             },
             service_tier: self.service_tier.clone(),
+            previous_response_id: options.previous_response_id.clone(),
+            prompt_cache_key: options.prompt_cache_key.clone(),
+            prompt_cache_options: options
+                .cache_breakpoint_message_index
+                .map(|_| PromptCacheOptions { mode: "explicit" }),
+            store: options.previous_response_id.as_ref().map(|_| true),
+            text: options
+                .structured_output
+                .as_ref()
+                .map(|format| ResponseTextConfig {
+                    format: ResponseTextFormat {
+                        format_type: "json_schema",
+                        name: format.name.clone(),
+                        strict: true,
+                        schema: format.schema.clone(),
+                    },
+                }),
         }
     }
 
@@ -311,7 +421,17 @@ impl LlmClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> anyhow::Result<LlmOutput> {
-        let req = self.build_request(messages, tools, false);
+        self.complete_with_options(messages, tools, &LlmRequestOptions::default())
+            .await
+    }
+
+    pub async fn complete_with_options(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &LlmRequestOptions,
+    ) -> anyhow::Result<LlmOutput> {
+        let req = self.build_request(messages, tools, false, options);
 
         let resp = self
             .client
@@ -328,7 +448,9 @@ impl LlmClient {
         }
 
         let response: ResponsesResponse = resp.json().await?;
-        collect_response_output(response)
+        let output = collect_response_output(response)?;
+        trace_usage("non_streaming", output.usage.as_ref());
+        Ok(output)
     }
 
     /// Streaming completion. Sends events to the channel.
@@ -338,7 +460,18 @@ impl LlmClient {
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamEvent>,
     ) -> anyhow::Result<()> {
-        let req = self.build_request(messages, tools, true);
+        self.complete_stream_with_options(messages, tools, &LlmRequestOptions::default(), tx)
+            .await
+    }
+
+    pub async fn complete_stream_with_options(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        options: &LlmRequestOptions,
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> anyhow::Result<()> {
+        let req = self.build_request(messages, tools, true, options);
 
         let resp = match self
             .client
@@ -375,6 +508,7 @@ impl LlmClient {
         let mut pending_calls: HashMap<i32, PendingToolCall> = HashMap::new();
         let mut completed_items: HashMap<i32, Value> = HashMap::new();
         let mut done_received = false;
+        let mut response_metadata = StreamResponseMetadata::default();
 
         while let Some(chunk) = stream.next().await {
             let chunk = match chunk {
@@ -404,7 +538,14 @@ impl LlmClient {
                     break;
                 }
 
-                handle_stream_event(data, &mut pending_calls, &mut completed_items, &tx).await;
+                handle_stream_event(
+                    data,
+                    &mut pending_calls,
+                    &mut completed_items,
+                    &mut response_metadata,
+                    &tx,
+                )
+                .await;
             }
 
             if done_received {
@@ -414,10 +555,13 @@ impl LlmClient {
 
         let calls = collect_tool_calls(pending_calls);
         let response_items = collect_response_items(completed_items);
+        trace_usage("streaming", response_metadata.usage.as_ref());
         let _ = tx
             .send(StreamEvent::Completed {
                 tool_calls: calls,
                 response_items,
+                response_id: response_metadata.response_id,
+                usage: response_metadata.usage,
             })
             .await;
         Ok(())
@@ -483,13 +627,37 @@ fn collect_response_output(response: ResponsesResponse) -> anyhow::Result<LlmOut
         content,
         tool_calls,
         response_items: response.output,
+        response_id: response.id,
+        usage: response.usage,
     })
+}
+
+fn trace_usage(kind: &str, usage: Option<&ResponseUsage>) {
+    if let Some(usage) = usage {
+        tracing::info!(
+            request_kind = kind,
+            input_tokens = usage.input_tokens,
+            cached_tokens = usage.input_tokens_details.cached_tokens,
+            cache_write_tokens = usage.input_tokens_details.cache_write_tokens,
+            output_tokens = usage.output_tokens,
+            reasoning_tokens = usage.output_tokens_details.reasoning_tokens,
+            total_tokens = usage.total_tokens,
+            "LLM token usage"
+        );
+    }
+}
+
+#[derive(Default)]
+struct StreamResponseMetadata {
+    response_id: Option<String>,
+    usage: Option<ResponseUsage>,
 }
 
 async fn handle_stream_event(
     data: &str,
     pending_calls: &mut HashMap<i32, PendingToolCall>,
     completed_items: &mut HashMap<i32, Value>,
+    response_metadata: &mut StreamResponseMetadata,
     tx: &mpsc::Sender<StreamEvent>,
 ) {
     let Ok(value) = serde_json::from_str::<Value>(data) else {
@@ -567,6 +735,19 @@ async fn handle_stream_event(
                 return;
             };
             completed_items.insert(index as i32, item.clone());
+        }
+        "response.completed" => {
+            let Some(response) = value.get("response") else {
+                return;
+            };
+            response_metadata.response_id = response
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            response_metadata.usage = response
+                .get("usage")
+                .cloned()
+                .and_then(|usage| serde_json::from_value(usage).ok());
         }
         "error" => {
             let message = value
@@ -652,12 +833,15 @@ mod tests {
         let mut tool = make_message(Role::Tool, "{\"temp\":12}");
         tool.tool_call_id = Some("call_123".to_string());
 
-        let items = LlmClient::build_input(&[
-            make_message(Role::System, "You are helpful."),
-            make_message(Role::User, "What's the weather?"),
-            assistant,
-            tool,
-        ]);
+        let items = LlmClient::build_input(
+            &[
+                make_message(Role::System, "You are helpful."),
+                make_message(Role::User, "What's the weather?"),
+                assistant,
+                tool,
+            ],
+            None,
+        );
 
         let json = serde_json::to_value(items).unwrap();
         assert_eq!(json[0]["role"], "system");
@@ -691,7 +875,7 @@ mod tests {
         let mut tool = make_message(Role::Tool, "{\"temp\":12}");
         tool.tool_call_id = Some("call_123".to_string());
 
-        let json = serde_json::to_value(LlmClient::build_input(&[assistant, tool])).unwrap();
+        let json = serde_json::to_value(LlmClient::build_input(&[assistant, tool], None)).unwrap();
 
         assert_eq!(json[0], reasoning);
         assert_eq!(json[1], function_call);
@@ -704,7 +888,12 @@ mod tests {
         let mut client = LlmClient::new("https://api.openai.com/v1", "test-key", "gpt-4.1");
         client.set_enable_web_search(true);
 
-        let request = client.build_request(&[make_message(Role::User, "Latest news?")], &[], false);
+        let request = client.build_request(
+            &[make_message(Role::User, "Latest news?")],
+            &[],
+            false,
+            &LlmRequestOptions::default(),
+        );
         let json = serde_json::to_value(request).unwrap();
 
         assert_eq!(json["tool_choice"], "auto");
@@ -715,7 +904,12 @@ mod tests {
     fn build_request_defaults_to_flex_service_tier() {
         let client = LlmClient::new("https://api.openai.com/v1", "test-key", "gpt-4.1");
 
-        let request = client.build_request(&[make_message(Role::User, "Hi")], &[], false);
+        let request = client.build_request(
+            &[make_message(Role::User, "Hi")],
+            &[],
+            false,
+            &LlmRequestOptions::default(),
+        );
         let json = serde_json::to_value(request).unwrap();
 
         assert_eq!(json["service_tier"], "flex");
@@ -726,7 +920,12 @@ mod tests {
         let mut client = LlmClient::new("https://api.openai.com/v1", "test-key", "gpt-4.1");
         client.set_service_tier(None);
 
-        let request = client.build_request(&[make_message(Role::User, "Hi")], &[], false);
+        let request = client.build_request(
+            &[make_message(Role::User, "Hi")],
+            &[],
+            false,
+            &LlmRequestOptions::default(),
+        );
         let json = serde_json::to_value(request).unwrap();
 
         assert!(json.get("service_tier").is_none());
@@ -738,7 +937,12 @@ mod tests {
         client.set_reasoning_effort(Some("low".to_string()));
         client.set_reasoning_context(Some("current_turn".to_string()));
 
-        let request = client.build_request(&[make_message(Role::User, "Hi")], &[], false);
+        let request = client.build_request(
+            &[make_message(Role::User, "Hi")],
+            &[],
+            false,
+            &LlmRequestOptions::default(),
+        );
         let json = serde_json::to_value(request).unwrap();
 
         assert_eq!(json["reasoning"]["effort"], "low");
@@ -749,7 +953,12 @@ mod tests {
     fn build_request_omits_reasoning_when_unconfigured() {
         let client = LlmClient::new("https://api.openai.com/v1", "test-key", "gpt-4.1");
 
-        let request = client.build_request(&[make_message(Role::User, "Hi")], &[], false);
+        let request = client.build_request(
+            &[make_message(Role::User, "Hi")],
+            &[],
+            false,
+            &LlmRequestOptions::default(),
+        );
         let json = serde_json::to_value(request).unwrap();
 
         assert!(json.get("reasoning").is_none());
@@ -773,12 +982,98 @@ mod tests {
             }),
         }];
 
-        let request = client.build_request(&[make_message(Role::User, "Find it")], &tools, false);
+        let request = client.build_request(
+            &[make_message(Role::User, "Find it")],
+            &tools,
+            false,
+            &LlmRequestOptions::default(),
+        );
         let json = serde_json::to_value(request).unwrap();
 
         assert_eq!(json["tools"][0]["type"], "function");
         assert_eq!(json["tools"][0]["name"], "lookup");
         assert_eq!(json["tools"][1]["type"], "web_search");
+    }
+
+    #[test]
+    fn build_request_marks_explicit_stable_prefix() {
+        let client = LlmClient::new("https://api.openai.com/v1", "test-key", "gpt-5.6-sol");
+        let options = LlmRequestOptions {
+            prompt_cache_key: Some("jossie:chat:abc".to_string()),
+            cache_breakpoint_message_index: Some(0),
+            ..LlmRequestOptions::default()
+        };
+
+        let request = client.build_request(
+            &[
+                make_message(Role::System, "stable"),
+                make_message(Role::System, "dynamic"),
+                make_message(Role::User, "hello"),
+            ],
+            &[],
+            false,
+            &options,
+        );
+        let json = serde_json::to_value(request).unwrap();
+
+        assert_eq!(json["prompt_cache_key"], "jossie:chat:abc");
+        assert_eq!(json["prompt_cache_options"]["mode"], "explicit");
+        assert_eq!(
+            json["input"][0]["content"][0]["prompt_cache_breakpoint"]["mode"],
+            "explicit"
+        );
+        assert!(
+            json["input"][1]["content"][0]
+                .get("prompt_cache_breakpoint")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn continuation_request_uses_previous_response_id_without_cache_write() {
+        let client = LlmClient::new("https://api.openai.com/v1", "test-key", "gpt-5.6-sol");
+        let options = LlmRequestOptions {
+            previous_response_id: Some("resp_previous".to_string()),
+            ..LlmRequestOptions::default()
+        };
+        let request = client.build_request(
+            &[make_message(Role::Tool, "result").with_tool_call_id("call_1".to_string())],
+            &[],
+            false,
+            &options,
+        );
+        let json = serde_json::to_value(request).unwrap();
+
+        assert_eq!(json["previous_response_id"], "resp_previous");
+        assert_eq!(json["store"], true);
+        assert!(json.get("prompt_cache_options").is_none());
+    }
+
+    #[test]
+    fn build_request_serializes_structured_output_schema() {
+        let client = LlmClient::new("https://api.openai.com/v1", "test-key", "gpt-5.6-luna");
+        let request = client.build_request(
+            &[make_message(Role::User, "classify")],
+            &[],
+            false,
+            &LlmRequestOptions {
+                structured_output: Some(StructuredOutputFormat {
+                    name: "classification".to_string(),
+                    schema: json!({
+                        "type": "object",
+                        "properties": {"label": {"type": "string"}},
+                        "required": ["label"],
+                        "additionalProperties": false
+                    }),
+                }),
+                ..LlmRequestOptions::default()
+            },
+        );
+        let json = serde_json::to_value(request).unwrap();
+
+        assert_eq!(json["text"]["format"]["type"], "json_schema");
+        assert_eq!(json["text"]["format"]["name"], "classification");
+        assert_eq!(json["text"]["format"]["strict"], true);
     }
 
     #[test]
@@ -789,6 +1084,7 @@ mod tests {
             "summary": []
         });
         let response = ResponsesResponse {
+            id: Some("resp_456".to_string()),
             output: vec![
                 reasoning.clone(),
                 json!({
@@ -807,6 +1103,12 @@ mod tests {
             ],
             status: Some("completed".to_string()),
             error: None,
+            usage: Some(ResponseUsage {
+                input_tokens: 10,
+                output_tokens: 4,
+                total_tokens: 14,
+                ..ResponseUsage::default()
+            }),
         };
 
         let output = collect_response_output(response).unwrap();
@@ -816,6 +1118,8 @@ mod tests {
         assert_eq!(output.tool_calls[0].name, "lookup");
         assert_eq!(output.response_items.len(), 3);
         assert_eq!(output.response_items[0], reasoning);
+        assert_eq!(output.response_id.as_deref(), Some("resp_456"));
+        assert_eq!(output.usage.unwrap().total_tokens, 14);
     }
 
     #[tokio::test]
@@ -823,6 +1127,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let mut pending_calls = HashMap::new();
         let mut completed_items = HashMap::new();
+        let mut response_metadata = StreamResponseMetadata::default();
         let second = json!({"type": "function_call", "call_id": "call_1"});
         let first = json!({"type": "reasoning", "id": "rs_1", "summary": []});
 
@@ -835,6 +1140,7 @@ mod tests {
             .to_string(),
             &mut pending_calls,
             &mut completed_items,
+            &mut response_metadata,
             &tx,
         )
         .await;
@@ -847,6 +1153,28 @@ mod tests {
             .to_string(),
             &mut pending_calls,
             &mut completed_items,
+            &mut response_metadata,
+            &tx,
+        )
+        .await;
+        handle_stream_event(
+            &json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_stream",
+                    "usage": {
+                        "input_tokens": 20,
+                        "input_tokens_details": {"cached_tokens": 10, "cache_write_tokens": 2},
+                        "output_tokens": 5,
+                        "output_tokens_details": {"reasoning_tokens": 1},
+                        "total_tokens": 25
+                    }
+                }
+            })
+            .to_string(),
+            &mut pending_calls,
+            &mut completed_items,
+            &mut response_metadata,
             &tx,
         )
         .await;
@@ -854,5 +1182,17 @@ mod tests {
         let items = collect_response_items(completed_items);
         assert_eq!(items[0]["type"], "reasoning");
         assert_eq!(items[1]["type"], "function_call");
+        assert_eq!(
+            response_metadata.response_id.as_deref(),
+            Some("resp_stream")
+        );
+        assert_eq!(
+            response_metadata
+                .usage
+                .unwrap()
+                .input_tokens_details
+                .cached_tokens,
+            10
+        );
     }
 }

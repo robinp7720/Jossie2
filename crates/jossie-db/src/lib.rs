@@ -1,7 +1,8 @@
 use anyhow::Context;
 use chrono::{Duration, Utc};
 use jossie_core::types::{Conversation, Message, Role};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use sqlx::QueryBuilder;
+use sqlx::sqlite::{Sqlite, SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -391,10 +392,13 @@ impl Database {
                 .await?
         };
 
+        let message_ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
+        let mut attachments_by_message = self.get_message_attachments_many(&message_ids).await?;
+
         let mut messages = Vec::new();
         for row in rows {
             let mut msg: Message = row.into();
-            let attachments = self.get_message_attachments(msg.id).await?;
+            let attachments = attachments_by_message.remove(&msg.id).unwrap_or_default();
             if !attachments.is_empty() {
                 msg.attachments = Some(
                     attachments
@@ -411,6 +415,42 @@ impl Database {
             messages.push(msg);
         }
         Ok(messages)
+    }
+
+    async fn get_message_attachments_many(
+        &self,
+        message_ids: &[String],
+    ) -> anyhow::Result<HashMap<Uuid, Vec<FileRecord>>> {
+        if message_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT ma.message_id, f.id, f.name, f.mime_type, f.size, f.path,
+                    f.conversation_id, f.created_at
+             FROM message_attachments ma
+             INNER JOIN files f ON f.id = ma.file_id
+             WHERE ma.message_id IN (",
+        );
+        {
+            let mut separated = builder.separated(", ");
+            for message_id in message_ids {
+                separated.push_bind(message_id);
+            }
+        }
+        builder.push(") ORDER BY f.created_at ASC");
+        let rows = builder
+            .build_query_as::<MessageAttachmentFileRow>()
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut by_message: HashMap<Uuid, Vec<FileRecord>> = HashMap::new();
+        for row in rows {
+            let Ok(message_id) = row.message_id.parse::<Uuid>() else {
+                continue;
+            };
+            by_message.entry(message_id).or_default().push(row.into());
+        }
+        Ok(by_message)
     }
 
     // Memory (FTS5)
@@ -554,6 +594,28 @@ impl Database {
             content: r.content,
             tags: r.tags,
         }))
+    }
+
+    pub async fn get_profile_memories(&self) -> anyhow::Result<HashMap<String, MemoryEntry>> {
+        let rows = sqlx::query_as::<_, MemoryRow>(
+            "SELECT key, content, tags FROM memory
+             WHERE key IN ('agent_profile.soul', 'agent_profile', 'agent_profile.mood',
+                           'user_profile', 'frequent_entities')",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let entry = MemoryEntry {
+                    key: row.key,
+                    content: row.content,
+                    tags: row.tags,
+                };
+                (entry.key.clone(), entry)
+            })
+            .collect())
     }
 
     pub async fn memory_list_keys(&self) -> anyhow::Result<Vec<MemoryKeyInfo>> {
@@ -1341,6 +1403,32 @@ impl Database {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    pub async fn graph_find_nodes_many(
+        &self,
+        queries: &[String],
+        limit: usize,
+    ) -> anyhow::Result<Vec<GraphNode>> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut builder = QueryBuilder::<Sqlite>::new("SELECT * FROM graph_nodes WHERE ");
+        {
+            let mut separated = builder.separated(" OR ");
+            for query in queries {
+                separated
+                    .push("label LIKE ")
+                    .push_bind_unseparated(format!("%{query}%"));
+            }
+        }
+        builder.push(" ORDER BY updated_at DESC LIMIT ");
+        builder.push_bind(limit.max(1).min(50) as i64);
+        let rows = builder
+            .build_query_as::<GraphNodeRow>()
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
     pub async fn graph_get_neighbors(&self, node_id: &str) -> anyhow::Result<Vec<GraphNeighbor>> {
         // Outgoing edges
         let outgoing = sqlx::query_as::<_, GraphNeighborRow>(
@@ -1407,6 +1495,64 @@ impl Database {
         Ok(results)
     }
 
+    pub async fn graph_get_neighbors_many(
+        &self,
+        node_ids: &[String],
+        per_node_limit: usize,
+    ) -> anyhow::Result<HashMap<String, Vec<GraphNeighbor>>> {
+        if node_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "WITH neighbors AS (\n\
+             SELECT e.source_id AS root_id, 'outgoing' AS direction, e.id AS edge_id,\n\
+                    e.relation, e.weight, e.updated_at, n.id AS node_id, n.label,\n\
+                    n.type AS node_type, n.properties AS node_properties\n\
+             FROM graph_edges e JOIN graph_nodes n ON n.id = e.target_id\n\
+             WHERE e.source_id IN (",
+        );
+        {
+            let mut separated = builder.separated(", ");
+            for node_id in node_ids {
+                separated.push_bind(node_id);
+            }
+        }
+        builder.push(
+            ") UNION ALL\n\
+             SELECT e.target_id AS root_id, 'incoming' AS direction, e.id AS edge_id,\n\
+                    e.relation, e.weight, e.updated_at, n.id AS node_id, n.label,\n\
+                    n.type AS node_type, n.properties AS node_properties\n\
+             FROM graph_edges e JOIN graph_nodes n ON n.id = e.source_id\n\
+             WHERE e.target_id IN (",
+        );
+        {
+            let mut separated = builder.separated(", ");
+            for node_id in node_ids {
+                separated.push_bind(node_id);
+            }
+        }
+        builder.push(
+            ")), ranked AS (\n\
+             SELECT *, ROW_NUMBER() OVER (PARTITION BY root_id ORDER BY weight DESC, updated_at DESC) AS rank\n\
+             FROM neighbors)\n\
+             SELECT root_id, direction, edge_id, relation, weight, node_id, label, node_type, node_properties\n\
+             FROM ranked WHERE rank <= ",
+        );
+        builder.push_bind(per_node_limit.max(1).min(20) as i64);
+
+        let rows = builder
+            .build_query_as::<GraphContextNeighborRow>()
+            .fetch_all(&self.pool)
+            .await?;
+        let mut by_root: HashMap<String, Vec<GraphNeighbor>> = HashMap::new();
+        for row in rows {
+            let root_id = row.root_id.clone();
+            by_root.entry(root_id).or_default().push(row.into());
+        }
+        Ok(by_root)
+    }
+
     pub async fn graph_list_nodes(&self, limit: usize) -> anyhow::Result<Vec<GraphNode>> {
         let limit = limit.max(1).min(5000);
         let rows = sqlx::query_as::<_, GraphNodeRow>(
@@ -1442,6 +1588,30 @@ impl Database {
         .bind(node_type)
         .fetch_all(&self.pool)
         .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn graph_list_nodes_by_types(
+        &self,
+        node_types: &[&str],
+        limit: usize,
+    ) -> anyhow::Result<Vec<GraphNode>> {
+        if node_types.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut builder = QueryBuilder::<Sqlite>::new("SELECT * FROM graph_nodes WHERE type IN (");
+        {
+            let mut separated = builder.separated(", ");
+            for node_type in node_types {
+                separated.push_bind(node_type);
+            }
+        }
+        builder.push(") ORDER BY updated_at DESC LIMIT ");
+        builder.push_bind(limit.max(1).min(100) as i64);
+        let rows = builder
+            .build_query_as::<GraphNodeRow>()
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
@@ -1725,6 +1895,28 @@ impl Database {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn get_messages_after_for_summary(
+        &self,
+        conversation_id: Uuid,
+        last_message_id: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Message>> {
+        let rows = sqlx::query_as::<_, MessageRow>(
+            "SELECT id, conversation_id, role, content, tool_calls, tool_call_id, name, created_at
+             FROM messages
+             WHERE conversation_id = ?
+               AND rowid > COALESCE((SELECT rowid FROM messages WHERE id = ?), 0)
+             ORDER BY rowid ASC
+             LIMIT ?",
+        )
+        .bind(conversation_id.to_string())
+        .bind(last_message_id)
+        .bind(limit.max(1).min(500) as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
     }
 
     // Out-of-Band Messages
@@ -2126,6 +2318,18 @@ struct FileRow {
     created_at: String,
 }
 
+#[derive(sqlx::FromRow)]
+struct MessageAttachmentFileRow {
+    message_id: String,
+    id: String,
+    name: String,
+    mime_type: Option<String>,
+    size: i64,
+    path: String,
+    conversation_id: Option<String>,
+    created_at: String,
+}
+
 impl From<FileRow> for FileRecord {
     fn from(r: FileRow) -> Self {
         FileRecord {
@@ -2135,6 +2339,20 @@ impl From<FileRow> for FileRecord {
             size: r.size,
             path: r.path,
             conversation_id: r.conversation_id.and_then(|s| s.parse().ok()),
+            created_at: r.created_at,
+        }
+    }
+}
+
+impl From<MessageAttachmentFileRow> for FileRecord {
+    fn from(r: MessageAttachmentFileRow) -> Self {
+        FileRecord {
+            id: r.id.parse().unwrap_or_default(),
+            name: r.name,
+            mime_type: r.mime_type,
+            size: r.size,
+            path: r.path,
+            conversation_id: r.conversation_id.and_then(|id| id.parse().ok()),
             created_at: r.created_at,
         }
     }
@@ -2232,6 +2450,36 @@ struct GraphNeighborRow {
     label: String,
     node_type: String,
     node_properties: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct GraphContextNeighborRow {
+    root_id: String,
+    direction: String,
+    edge_id: String,
+    relation: String,
+    #[allow(dead_code)]
+    weight: f64,
+    node_id: String,
+    label: String,
+    node_type: String,
+    node_properties: String,
+}
+
+impl From<GraphContextNeighborRow> for GraphNeighbor {
+    fn from(r: GraphContextNeighborRow) -> Self {
+        GraphNeighbor {
+            edge_id: r.edge_id,
+            relation: r.relation,
+            direction: r.direction,
+            node: GraphNode {
+                id: r.node_id,
+                label: r.label,
+                node_type: r.node_type,
+                properties: serde_json::from_str(&r.node_properties).unwrap_or_default(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
@@ -3361,6 +3609,23 @@ mod tests {
                 .iter()
                 .any(|n| n.node.id == "robin" && n.direction == "incoming")
         );
+
+        let found = db
+            .graph_find_nodes_many(&["Robin".to_string(), "Apollo".to_string()], 10)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 2);
+        let typed = db
+            .graph_list_nodes_by_types(&["Person", "Project"], 10)
+            .await
+            .unwrap();
+        assert_eq!(typed.len(), 2);
+        let batched_neighbors = db
+            .graph_get_neighbors_many(&["robin".to_string(), "apollo".to_string()], 5)
+            .await
+            .unwrap();
+        assert_eq!(batched_neighbors["robin"][0].node.id, "apollo");
+        assert_eq!(batched_neighbors["apollo"][0].node.id, "robin");
     }
 
     #[tokio::test]
