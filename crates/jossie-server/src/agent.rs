@@ -436,7 +436,11 @@ struct PromptBundle {
 impl PromptBundle {
     fn cache_key(&self, model_scope: &str) -> String {
         let digest = Sha256::digest(self.stable.as_bytes());
-        format!("jossie:{model_scope}:{digest:x}")
+        let digest = format!("{digest:x}");
+        // The Responses API limits prompt_cache_key to 64 characters. A
+        // 192-bit prefix remains ample for cache bucketing while leaving room
+        // for a readable scope prefix.
+        format!("jossie:{model_scope}:{}", &digest[..48])
     }
 
     fn insert_into(self, messages: &mut Vec<Message>) {
@@ -4139,6 +4143,8 @@ mod tests {
 
         assert_eq!(first.cache_key("chat"), second.cache_key("chat"));
         assert_ne!(first.cache_key("chat"), second.cache_key("event"));
+        assert!(first.cache_key("chat").len() <= 64);
+        assert!(first.cache_key("event").len() <= 64);
     }
 
     #[test]
