@@ -44,7 +44,16 @@ export const request = async <T>(
   const text = await response.text()
 
   if (!response.ok) {
-    throw new Error(text || `Request failed with status ${response.status}`)
+    let message = (() => {
+      if (!text) return `Request failed with status ${response.status}`
+      try {
+        const error = JSON.parse(text) as { error?: unknown }
+        return typeof error.error === 'string' ? error.error : text
+      } catch {
+        return text
+      }
+    })()
+    throw new Error(message)
   }
 
   if (!text) {

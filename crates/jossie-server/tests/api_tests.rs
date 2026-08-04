@@ -55,7 +55,7 @@ async fn setup_app() -> axum::Router {
         pending_google_oauth: Arc::new(RwLock::new(HashMap::new())),
         event_tx,
         cors_origins: vec![],
-        max_request_body_bytes: 1024 * 1024,
+        max_request_body_bytes: jossie_core::config::DEFAULT_MAX_REQUEST_BODY_BYTES,
     });
 
     router(state)
@@ -125,6 +125,42 @@ async fn test_auth_middleware_authorized() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn text_file_uploads_can_exceed_the_old_100_kib_default() {
+    let app = setup_app().await;
+    let boundary = "jossie-upload-test-boundary";
+    let content = "a".repeat(128 * 1024);
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"history.txt\"\r\nContent-Type: text/plain\r\n\r\n{content}\r\n--{boundary}--\r\n"
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/files")
+                .header("Authorization", "Bearer test-token")
+                .header(
+                    "Content-Type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response_body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let uploaded: Value = serde_json::from_slice(&response_body).unwrap();
+    assert_eq!(uploaded["name"], "history.txt");
+    let file_id = uploaded["file_id"].as_str().unwrap();
+    tokio::fs::remove_file(format!("uploads/{file_id}"))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

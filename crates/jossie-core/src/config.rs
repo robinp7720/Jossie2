@@ -1,5 +1,7 @@
 use serde::Deserialize;
 
+pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 25 * 1024 * 1024;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub server: ServerConfig,
@@ -44,7 +46,7 @@ pub struct ServerConfig {
 }
 
 fn default_max_request_body_bytes() -> usize {
-    102_400 // 100KB
+    DEFAULT_MAX_REQUEST_BODY_BYTES
 }
 
 #[derive(Debug, Clone, Deserialize)]

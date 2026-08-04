@@ -40,6 +40,10 @@ auth_password_hash = ""
 # Example: "https://jossie.example.com"
 # public_base_url = "http://localhost:3000"
 
+# Maximum HTTP request size. The 25 MiB default leaves room for multipart
+# framing around the chat importer's 20 MiB export limit.
+max_request_body_bytes = 26214400
+
 # ----------------------------------------------------------------------------
 # LLM (Language Model) CONFIGURATION
 # ----------------------------------------------------------------------------
