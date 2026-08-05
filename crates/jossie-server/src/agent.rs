@@ -1131,9 +1131,6 @@ fn action_is_explicitly_authorized(
         "cancel_scheduled_task" => {
             contains_action_term(&user, &["cancel", "delete", "remove", "stop"])
         }
-        "memory_delete" | "graph_delete_node" | "graph_delete_relation" => {
-            contains_action_term(&user, &["delete", "remove", "forget"])
-        }
         "browser_fill_input" | "browser_click" | "browser_select_option" => contains_action_term(
             &user,
             &[
@@ -1189,15 +1186,6 @@ fn action_summary(call: &jossie_core::ToolCall) -> (String, String) {
         "cancel_scheduled_task" => (
             "Cancel scheduled work".to_string(),
             value("task_id").unwrap_or_else(|| "Cancel the selected task".to_string()),
-        ),
-        "memory_delete" | "graph_delete_node" | "graph_delete_relation" => (
-            "Delete saved context".to_string(),
-            value("key")
-                .or_else(|| value("id"))
-                .or_else(|| value("node_id"))
-                .or_else(|| value("edge_id"))
-                .map(|target| format!("Permanently remove {target}"))
-                .unwrap_or_else(|| "Permanently remove the selected private data".to_string()),
         ),
         "browser_fill_input" | "browser_click" | "browser_select_option" => (
             "Interact with a website".to_string(),
@@ -4360,25 +4348,6 @@ mod tests {
             &matching,
             "That draft looks good",
             &messages
-        ));
-    }
-
-    #[test]
-    fn inferred_destructive_actions_are_not_authorized() {
-        let call = jossie_core::ToolCall {
-            id: "call_1".to_string(),
-            name: "memory_delete".to_string(),
-            arguments: r#"{"key":"old"}"#.to_string(),
-        };
-        assert!(action_is_explicitly_authorized(
-            &call,
-            "Forget that old memory",
-            &[]
-        ));
-        assert!(!action_is_explicitly_authorized(
-            &call,
-            "Clean up my context",
-            &[]
         ));
     }
 }

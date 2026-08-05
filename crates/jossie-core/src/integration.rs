@@ -161,9 +161,9 @@ pub fn tool_metadata(tool_name: &str, arguments: &str) -> ToolMetadata {
         "browser_open_session" | "browser_close_session" => {
             ToolMetadata::local_write(CapabilityGroup::Web)
         }
-        "memory_delete" => ToolMetadata::action(CapabilityGroup::Memory, ToolEffect::Destructive),
+        "memory_delete" => ToolMetadata::local_write(CapabilityGroup::Memory),
         "graph_delete_node" | "graph_delete_relation" => {
-            ToolMetadata::action(CapabilityGroup::Knowledge, ToolEffect::Destructive)
+            ToolMetadata::local_write(CapabilityGroup::Knowledge)
         }
         "mail_send" | "email_send" | "gmail_send" => {
             ToolMetadata::action(CapabilityGroup::Mail, ToolEffect::ExternalWrite)
@@ -656,8 +656,8 @@ mod tests {
         assert!(!send.retry_transient);
 
         let delete = tool_metadata("memory_delete", r#"{"key":"old"}"#);
-        assert_eq!(delete.effect, ToolEffect::Destructive);
-        assert!(delete.effect.requires_explicit_authorization());
+        assert_eq!(delete.effect, ToolEffect::LocalWrite);
+        assert!(!delete.effect.requires_explicit_authorization());
     }
 
     #[test]
