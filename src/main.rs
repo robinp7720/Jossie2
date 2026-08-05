@@ -124,6 +124,14 @@ async fn main() -> Result<()> {
     ));
     tracing::info!("Registered browser integration");
 
+    // Tavily Integration (optional — only when API key is configured)
+    if !config.tavily.api_key.is_empty() {
+        registry.register(Arc::new(
+            jossie_integration_tavily::TavilyIntegration::new(&config.tavily.api_key),
+        ));
+        tracing::info!("Registered Tavily integration");
+    }
+
     // HTTP Integration
     registry.register(Arc::new(HttpIntegration::new(
         config.http.allowed_domains.clone(),
@@ -376,6 +384,11 @@ fn override_config_from_env(config: &mut AppConfig) {
     }
     if let Ok(val) = env::var("JOSSIE_GOOGLE_REFRESH_TOKEN") {
         config.google.refresh_token = val;
+    }
+
+    // Tavily
+    if let Ok(val) = env::var("JOSSIE_TAVILY_API_KEY") {
+        config.tavily.api_key = val;
     }
 }
 

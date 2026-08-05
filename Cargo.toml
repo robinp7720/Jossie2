@@ -14,6 +14,7 @@ members = [
     "crates/jossie-integration-memory",
     "crates/jossie-integration-files",
     "crates/jossie-integration-scheduler",
+    "crates/jossie-integration-tavily",
 ]
 resolver = "3"
 
@@ -33,6 +34,7 @@ jossie-integration-scheduler = { path = "crates/jossie-integration-scheduler" }
 
 jossie-integration-browser = { path = "crates/jossie-integration-browser" }
 jossie-integration-http = { path = "crates/jossie-integration-http" }
+jossie-integration-tavily = { path = "crates/jossie-integration-tavily" }
 
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "multipart"] }
@@ -97,4 +99,5 @@ jossie-integration-graph = { workspace = true }
 jossie-integration-browser = { workspace = true }
 jossie-integration-http = { workspace = true }
 jossie-integration-scheduler = { workspace = true }
+jossie-integration-tavily = { workspace = true }
 jossie-telegram = { workspace = true }
