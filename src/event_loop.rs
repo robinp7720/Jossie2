@@ -1,9 +1,11 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use croner::Cron;
 use jossie_core::types::{Message, Role};
 use jossie_db::IntegrationEvent;
 use jossie_server::AppState;
 use jossie_server::events::{ServerEvent, persist_message};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -1002,12 +1004,28 @@ async fn execute_scheduled_task(
                 .update_task_next_run(&task.id, &next_run.to_rfc3339(), true)
                 .await?;
         }
+        "cron" => {
+            let next_run = next_cron_occurrence(&task.schedule_value, Utc::now())?;
+            state
+                .db
+                .update_task_next_run(&task.id, &next_run.to_rfc3339(), true)
+                .await?;
+        }
         _ => {
             anyhow::bail!("Unknown schedule type: {}", task.schedule_type);
         }
     }
 
     Ok(())
+}
+
+/// Computes the next fire time for a cron-scheduled task. Standard 5-field cron
+/// expressions are accepted, and a 6-field form with a leading seconds field.
+fn next_cron_occurrence(cron_expression: &str, after: DateTime<Utc>) -> anyhow::Result<DateTime<Utc>> {
+    let cron = Cron::from_str(cron_expression)
+        .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", cron_expression, e))?;
+    cron.find_next_occurrence(&after, false)
+        .map_err(|e| anyhow::anyhow!("Could not compute next cron occurrence: {}", e))
 }
 
 async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
@@ -1244,5 +1262,31 @@ mod tests {
         assert_eq!(reduced.len(), 1);
         assert_eq!(omitted, 2);
         assert_eq!(reduced[0].id, new.id);
+    }
+
+    #[test]
+    fn cron_occurrence_advances_to_next_matching_minute() {
+        let after = DateTime::parse_from_rfc3339("2026-02-10T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        // Every day at 08:30.
+        let next = next_cron_occurrence("30 8 * * *", after).unwrap();
+        assert_eq!(next.to_rfc3339(), "2026-02-10T08:30:00+00:00");
+    }
+
+    #[test]
+    fn cron_occurrence_respects_day_of_week() {
+        // 2026-02-10 is a Tuesday; "weekday mornings" should skip to the next
+        // matching day once today's slot has already passed.
+        let after = DateTime::parse_from_rfc3339("2026-02-10T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let next = next_cron_occurrence("0 8 * * 1-5", after).unwrap();
+        assert_eq!(next.to_rfc3339(), "2026-02-11T08:00:00+00:00");
+    }
+
+    #[test]
+    fn cron_occurrence_rejects_invalid_expression() {
+        assert!(next_cron_occurrence("not a cron expression", Utc::now()).is_err());
     }
 }

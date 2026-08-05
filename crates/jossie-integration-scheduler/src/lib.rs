@@ -1,7 +1,9 @@
 use chrono::{DateTime, Duration, Utc};
+use croner::Cron;
 use jossie_core::integration::{Integration, ToolDefinition};
 use jossie_db::Database;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -179,6 +181,70 @@ impl SchedulerIntegration {
         ))
     }
 
+    async fn handle_schedule_cron_task(
+        &self,
+        args: &str,
+        conversation_id: Uuid,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            prompt: String,
+            cron_expression: String,
+            #[serde(default)]
+            max_runs: Option<i64>,
+            #[serde(default, rename = "__authorization_context")]
+            authorization_context: String,
+        }
+        let args: Args = serde_json::from_str(args)?;
+
+        let cron_expression = args.cron_expression.trim().to_string();
+        let cron = Cron::from_str(&cron_expression)
+            .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", cron_expression, e))?;
+        let next_run = cron
+            .find_next_occurrence(&Utc::now(), false)
+            .map_err(|e| anyhow::anyhow!("Could not compute the next run time: {}", e))?;
+
+        let task_data = serde_json::json!({
+            "prompt": args.prompt,
+            "authorization_context": args.authorization_context,
+        });
+
+        if let Some(existing_id) = self
+            .find_existing_agent_run_task(conversation_id, "cron", &cron_expression, &args.prompt)
+            .await?
+        {
+            return Ok(format!(
+                "A matching cron task already exists: {}",
+                existing_id
+            ));
+        }
+
+        let task_id = self
+            .db
+            .create_scheduled_task(
+                conversation_id,
+                "agent_run",
+                &task_data,
+                "cron",
+                &cron_expression,
+                Some(&next_run.to_rfc3339()),
+                args.max_runs,
+            )
+            .await?;
+
+        let max_info = args
+            .max_runs
+            .map(|n| format!(" (max {} runs)", n))
+            .unwrap_or_else(|| " (indefinitely)".to_string());
+        Ok(format!(
+            "Scheduled cron task {} ('{}'), next run {}{}",
+            task_id,
+            cron_expression,
+            next_run.format("%Y-%m-%d %H:%M:%S UTC"),
+            max_info
+        ))
+    }
+
     async fn handle_cancel_task(&self, args: &str) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -311,6 +377,29 @@ impl Integration for SchedulerIntegration {
                 }),
             },
             ToolDefinition {
+                name: "schedule_cron_task".to_string(),
+                description: "Schedule a recurring task on a cron expression (e.g. weekday mornings, the first of the month) instead of a fixed interval. Use this when the cadence follows a calendar pattern rather than a simple repeat interval; use schedule_recurring_task for plain fixed intervals.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "The prompt/task for the agent to execute on each run. Keep this focused on the actual work to do during one run."
+                        },
+                        "cron_expression": {
+                            "type": "string",
+                            "description": "Standard 5-field cron expression (minute hour day-of-month month day-of-week), e.g. '0 8 * * 1-5' for weekday mornings at 8am UTC. A 6-field form with a leading seconds field is also accepted."
+                        },
+                        "max_runs": {
+                            "type": "integer",
+                            "description": "Optional maximum number of runs before auto-completion. Omit for indefinite."
+                        }
+                    },
+                    "required": ["prompt", "cron_expression"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolDefinition {
                 name: "cancel_scheduled_task".to_string(),
                 description: "Cancel a previously scheduled task".to_string(),
                 parameters: serde_json::json!({
@@ -381,6 +470,7 @@ impl Integration for SchedulerIntegration {
                 self.handle_schedule_recurring_task(arguments, conv_id)
                     .await
             }
+            "schedule_cron_task" => self.handle_schedule_cron_task(arguments, conv_id).await,
             "cancel_scheduled_task" => self.handle_cancel_task(arguments).await,
             "list_scheduled_tasks" => self.handle_list_tasks(conv_id).await,
             "send_user_message" => self.handle_send_message(arguments, conv_id).await,

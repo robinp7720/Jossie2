@@ -62,6 +62,7 @@ sha2 = "0.10"
 headless_chrome = { version = "1.0", features = ["fetch"] }
 html2text = "0.6"
 scraper = "0.23"
+croner = "3.0.1"
 
 [package]
 name = "jossie2"
@@ -98,3 +99,4 @@ jossie-integration-browser = { workspace = true }
 jossie-integration-http = { workspace = true }
 jossie-integration-scheduler = { workspace = true }
 jossie-telegram = { workspace = true }
+croner = { workspace = true }

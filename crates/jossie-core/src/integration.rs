@@ -174,7 +174,7 @@ pub fn tool_metadata(tool_name: &str, arguments: &str) -> ToolMetadata {
         "browser_fill_input" | "browser_click" | "browser_select_option" => {
             ToolMetadata::action(CapabilityGroup::Web, ToolEffect::ExternalWrite)
         }
-        "schedule_task" | "schedule_recurring_task" | "send_user_message" => {
+        "schedule_task" | "schedule_recurring_task" | "schedule_cron_task" | "send_user_message" => {
             ToolMetadata::action(CapabilityGroup::Scheduler, ToolEffect::ExternalWrite)
         }
         "cancel_scheduled_task" => {
