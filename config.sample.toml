@@ -273,6 +273,24 @@ client_secret = ""
 # Wildcard subdomains are supported: ["*.example.com"]
 allowed_domains = ["*"]
 
+# ----------------------------------------------------------------------------
+# HEARTBEAT CONFIGURATION (Optional)
+# ----------------------------------------------------------------------------
+# Lets Jossie check in on its own initiative, independent of scheduled tasks
+# or inbound integration events. On each tick it reviews context (memory,
+# graph, upcoming scheduled items, pending approvals, and optionally
+# email/calendar via read tools) and decides for itself whether anything is
+# worth surfacing, using the same strict notify/skip triage as background
+# email/calendar notifications. Most heartbeats should produce nothing.
+[heartbeat]
+# Off by default. This is a distinct autonomy surface - Jossie speaking
+# without anything having arrived - and should be opted into deliberately.
+enabled = false
+
+# How often to consider checking in, in seconds. Enforced with a floor of
+# 900 (15 minutes) to avoid excessive LLM spend; default is 4 hours.
+interval_seconds = 14400
+
 # ============================================================================
 # NOTES
 # ============================================================================

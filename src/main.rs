@@ -36,6 +36,7 @@ async fn main() -> Result<()> {
     // Override secrets from environment variables
     override_config_from_env(&mut config);
     validate_llm_config(&mut config);
+    validate_heartbeat_config(&mut config);
 
     tracing::info!("Connecting to database...");
     let db = Database::new(&config.database.url).await?;
@@ -183,6 +184,8 @@ async fn main() -> Result<()> {
         google_integration,
         telegram_token: config.telegram.bot_token.clone(),
         enable_self_reflection: config.llm.enable_self_reflection,
+        heartbeat_enabled: config.heartbeat.enabled,
+        heartbeat_interval_secs: config.heartbeat.interval_seconds,
         active_conversations: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         cancelled_conversations: Arc::new(tokio::sync::RwLock::new(
             std::collections::HashSet::new(),
@@ -285,6 +288,19 @@ fn validate_llm_config(config: &mut AppConfig) {
         } else if normalized != *reasoning_context {
             *reasoning_context = normalized;
         }
+    }
+}
+
+fn validate_heartbeat_config(config: &mut AppConfig) {
+    const MIN_HEARTBEAT_INTERVAL_SECS: u64 = 900;
+
+    if config.heartbeat.interval_seconds < MIN_HEARTBEAT_INTERVAL_SECS {
+        tracing::warn!(
+            "heartbeat.interval_seconds={} is too low; clamping to {}",
+            config.heartbeat.interval_seconds,
+            MIN_HEARTBEAT_INTERVAL_SECS
+        );
+        config.heartbeat.interval_seconds = MIN_HEARTBEAT_INTERVAL_SECS;
     }
 }
 

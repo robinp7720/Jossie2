@@ -15,12 +15,37 @@ pub struct AppConfig {
     pub google: GoogleConfig,
     #[serde(default)]
     pub http: HttpConfig,
+    #[serde(default)]
+    pub heartbeat: HeartbeatConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct HttpConfig {
     #[serde(default)]
     pub allowed_domains: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HeartbeatConfig {
+    /// Off by default: this is a distinct autonomy surface (Jossie speaking without
+    /// any inbound trigger) and should be opted into deliberately.
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_heartbeat_interval_seconds")]
+    pub interval_seconds: u64,
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_seconds: default_heartbeat_interval_seconds(),
+        }
+    }
+}
+
+fn default_heartbeat_interval_seconds() -> u64 {
+    14_400
 }
 
 #[derive(Debug, Clone, Deserialize)]

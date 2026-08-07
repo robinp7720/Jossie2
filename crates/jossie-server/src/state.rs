@@ -35,6 +35,8 @@ pub struct AppState {
     pub google_integration: Option<Arc<GoogleIntegration>>,
     pub telegram_token: String,
     pub enable_self_reflection: bool,
+    pub heartbeat_enabled: bool,
+    pub heartbeat_interval_secs: u64,
     pub active_conversations: Arc<RwLock<HashSet<Uuid>>>,
     pub cancelled_conversations: Arc<RwLock<HashSet<Uuid>>>,
     pub pending_google_oauth: Arc<RwLock<HashMap<String, PendingGoogleOAuth>>>,

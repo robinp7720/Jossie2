@@ -50,6 +50,8 @@ async fn setup_app() -> axum::Router {
         google_integration: None,
         telegram_token: "".to_string(),
         enable_self_reflection: false,
+        heartbeat_enabled: false,
+        heartbeat_interval_secs: 14_400,
         active_conversations: Arc::new(RwLock::new(HashSet::new())),
         cancelled_conversations: Arc::new(RwLock::new(HashSet::new())),
         pending_google_oauth: Arc::new(RwLock::new(HashMap::new())),

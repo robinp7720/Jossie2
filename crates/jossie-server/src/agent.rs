@@ -27,6 +27,8 @@ const REFLECTION_CONTEXT_WINDOW: usize = 4;
 
 const INCOMING_NOTIFICATION_MODE_PROMPT: &str = "## Incoming Notification Mode\nThis is still Jossie: same judgment, same continuity, same general tool access as a normal conversation.\nThe difference is that you are deciding whether this newly arrived event deserves an interruption right now.\nDefault to quiet triage.\nNotify only if the event is urgent, time-sensitive, actionable, clearly relevant to the user, or materially changes their plans.\nSkip low-signal items such as newsletters, receipts, marketing mail, routine confirmations, automated churn, or minor non-actionable calendar edits.\nFor email batches, notify only when the batch as a whole suggests something worth surfacing now.\nInterpret this event independently as a fresh arrival.\nDo NOT imply that you made a prior mistake, correction, or retraction unless the event payload explicitly says so.\nFor `gmail_new_message` and `new_email_batch`, frame updates as newly arrived emails, even when similar to prior ones.\nUse tools normally when they materially improve confidence, especially before notifying about details hidden behind an email summary, snippet, attachment, or linked system.\nDo not claim room changes, schedule changes, requirement changes, or downstream consequences unless the email body or another checked source explicitly confirms them.\nIf an email mentions another system such as Moodle, an attachment, or a linked page that you did not verify, say only that the email mentions it.\nIf you notify, write it like Jossie: short, concrete, natural, and grounded in what you actually checked.\nBefore deciding, build a compact internal notification brief and use it to choose `notify` or `skip`.\nOnly notify when confidence and interrupt_score are both strong enough.\nReturn strict JSON only, with no markdown, in this exact shape:\n{\"action\":\"notify|skip\",\"message\":\"<short user-facing message>\",\"what_happened\":\"...\",\"why_now\":\"...\",\"what_changed\":\"...\",\"suggested_action\":\"...\",\"confidence\":0.0,\"interrupt_score\":0.0}";
 
+const HEARTBEAT_MODE_ADDENDUM: &str = "## Heartbeat Check\nThis particular pass was not triggered by anything arriving. Nothing necessarily happened. You are checking in on your own initiative because enough time has passed since the last check.\nTreat `skip` as the strong default outcome; most heartbeats should produce nothing.\nOnly notify if you have a genuinely good, concrete reason to reach out right now: something time-sensitive is coming up and has not been mentioned, something you said you would follow up on is now due, or a clear gap in continuity would otherwise go unnoticed.\nDo not manufacture a reason to speak. Restating known facts, a general check-in, or \"just wanted to say hi\" are not reasons to notify.\nYou may use the available read tools to look at memory, the knowledge graph, upcoming scheduled items, or calendar/email if that materially changes your judgment, but do not go looking for a problem to report if nothing prompted this pass.\nHold this to a stricter bar than a real inbound event.";
+
 #[derive(Clone, Copy)]
 enum PromptMemoryScope {
     Chat,
@@ -2712,6 +2714,7 @@ const EVENT_TOOL_READ_BATCH_EMAIL: &str = "event_read_batch_email";
 const EVENT_NOTIFICATION_HISTORY_LIMIT: usize = 3;
 const EVENT_NOTIFY_CONFIDENCE_THRESHOLD: f32 = 0.55;
 const EVENT_NOTIFY_INTERRUPT_THRESHOLD: f32 = 0.65;
+const HEARTBEAT_EVENT_TYPE: &str = "heartbeat_check";
 
 async fn generate_event_message_inner(
     state: &AppState,
@@ -2754,6 +2757,10 @@ async fn generate_event_message_inner(
     if !recent_notification_context.is_empty() {
         prompt.dynamic.push_str("\n\n");
         prompt.dynamic.push_str(&recent_notification_context);
+    }
+    if event.event_type == HEARTBEAT_EVENT_TYPE {
+        prompt.dynamic.push_str("\n\n");
+        prompt.dynamic.push_str(HEARTBEAT_MODE_ADDENDUM);
     }
 
     let prompt_cache_key = prompt.cache_key("event");
@@ -2878,12 +2885,22 @@ fn build_event_mode_tools(
     state: &AppState,
     event: &IntegrationEvent,
 ) -> Vec<jossie_core::ToolDefinition> {
-    let event_capability = match event.event_type.as_str() {
-        "new_email" | "gmail_new_message" | "new_email_batch" => Some(CapabilityGroup::Mail),
+    let event_capabilities: &[CapabilityGroup] = match event.event_type.as_str() {
+        "new_email" | "gmail_new_message" | "new_email_batch" => &[CapabilityGroup::Mail],
         "calendar_event" | "calendar_event_updated" | "calendar_event_batch" => {
-            Some(CapabilityGroup::Calendar)
+            &[CapabilityGroup::Calendar]
         }
-        _ => None,
+        // Self-initiated check-ins get no pre-fetched context; grant a broader (still
+        // read-only) set of tools so the model can look around before deciding, rather
+        // than judging from the bare heartbeat payload alone.
+        HEARTBEAT_EVENT_TYPE => &[
+            CapabilityGroup::Memory,
+            CapabilityGroup::Knowledge,
+            CapabilityGroup::Mail,
+            CapabilityGroup::Calendar,
+            CapabilityGroup::Scheduler,
+        ],
+        _ => &[],
     };
     let mut tools: Vec<jossie_core::ToolDefinition> = state
         .registry
@@ -2896,7 +2913,7 @@ fn build_event_mode_tools(
                 arguments: "{}".to_string(),
             });
             metadata.effect == jossie_core::integration::ToolEffect::Read
-                && event_capability == Some(metadata.capability)
+                && event_capabilities.contains(&metadata.capability)
         })
         .collect();
     if event_supports_trigger_email_read(event) {
