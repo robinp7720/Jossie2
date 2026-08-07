@@ -340,7 +340,7 @@ async fn handle_events_ws(
                     continue;
                 };
                 if let Some(filter) = conversation_filter {
-                    if event.conversation_id() != filter {
+                    if event.conversation_id().is_some_and(|conversation_id| conversation_id != filter) {
                         continue;
                     }
                 }

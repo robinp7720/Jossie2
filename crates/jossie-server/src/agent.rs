@@ -46,6 +46,7 @@ impl PromptMemoryScope {
 
 struct GoalTracker {
     primary_goal: String,
+    durable_goal: Option<jossie_db::GoalWithTasks>,
     completed_steps: Vec<String>,
     observations: Vec<String>,
     last_tool_batch_signature: Option<String>,
@@ -55,13 +56,16 @@ struct GoalTracker {
 impl GoalTracker {
     fn new(user_message: &str) -> Self {
         // Extract a concise goal from the user message (first 200 chars)
-        let goal = if user_message.len() > 200 {
-            format!("{}...", &user_message[..200])
+        let mut chars = user_message.chars();
+        let prefix = chars.by_ref().take(200).collect::<String>();
+        let goal = if chars.next().is_some() {
+            format!("{prefix}...")
         } else {
-            user_message.to_string()
+            prefix
         };
         Self {
             primary_goal: goal,
+            durable_goal: None,
             completed_steps: Vec::new(),
             observations: Vec::new(),
             last_tool_batch_signature: None,
@@ -154,6 +158,23 @@ impl GoalTracker {
 
     fn build_tracking_message(&self) -> String {
         let mut msg = format!("## Task State\nObjective: {}\n", self.primary_goal);
+        if let Some(goal) = &self.durable_goal {
+            msg.push_str(&format!(
+                "Tracked goal: {} ({}/{}) [{}]\n",
+                goal.goal.title, goal.completed_tasks, goal.total_tasks, goal.goal.status
+            ));
+            for task in &goal.tasks {
+                msg.push_str(&format!(
+                    "- id={} [{}] {}",
+                    task.id, task.status, task.title
+                ));
+                if let Some(blocker) = &task.blocker {
+                    msg.push_str(&format!(" — blocked: {blocker}"));
+                }
+                msg.push('\n');
+            }
+            msg.push_str("Update this plan with update_work_plan when an outcome starts, completes, fails, or becomes blocked. Tool execution alone is not outcome completion.\n");
+        }
         if !self.completed_steps.is_empty() {
             msg.push_str("Recent completed checks:\n");
             for step in &self.completed_steps {
@@ -416,6 +437,11 @@ pub struct AgentRunOptions {
     pub allow_oob_messages: bool,
     pub scheduled_execution: bool,
     pub authorization_context: Option<String>,
+    pub goal_id: Option<String>,
+    pub task_id: Option<String>,
+    pub work_source_type: Option<String>,
+    pub work_source_id: Option<String>,
+    pub work_summary: Option<String>,
 }
 
 impl Default for AgentRunOptions {
@@ -425,6 +451,11 @@ impl Default for AgentRunOptions {
             allow_oob_messages: true,
             scheduled_execution: false,
             authorization_context: None,
+            goal_id: None,
+            task_id: None,
+            work_source_type: None,
+            work_source_id: None,
+            work_summary: None,
         }
     }
 }
@@ -772,6 +803,7 @@ impl RunToolset {
             tools.retain(|tool| tool.name != "send_user_message");
         }
         tools.push(capability_activation_tool());
+        tools.push(work_plan_tool());
         tools
     }
 
@@ -858,6 +890,40 @@ fn capability_activation_tool() -> jossie_core::ToolDefinition {
     }
 }
 
+fn work_plan_tool() -> jossie_core::ToolDefinition {
+    jossie_core::ToolDefinition {
+        name: "update_work_plan".to_string(),
+        description: "Create or update durable user-visible progress for substantial work. Call this tool by itself. Use it when the request has at least two independently verifiable outcomes, is explicitly described as a goal, or spans deferred/recurring runs. Do not create a goal for ordinary questions or single-step actions. Keep task titles outcome-oriented and safe to show to the user.".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "goal_id": { "type": ["string", "null"] },
+                "title": { "type": "string" },
+                "objective": { "type": "string" },
+                "goal_status": { "type": "string", "enum": ["active", "blocked", "completed"] },
+                "blocker": { "type": ["string", "null"] },
+                "tasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": ["string", "null"] },
+                            "title": { "type": "string" },
+                            "status": { "type": "string", "enum": ["pending", "in_progress", "waiting", "blocked", "completed", "failed", "cancelled"] },
+                            "summary": { "type": ["string", "null"] },
+                            "blocker": { "type": ["string", "null"] }
+                        },
+                        "required": ["title", "status"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["title", "objective", "goal_status", "tasks"],
+            "additionalProperties": false
+        }),
+    }
+}
+
 async fn prepare_run_context(
     state: &AppState,
     conv_id: Uuid,
@@ -902,11 +968,14 @@ async fn prepare_run_context(
         ).with_name("scheduled_execution_mode".to_string()));
     }
 
+    let mut goal_tracker = GoalTracker::new(&last_user_msg);
+    goal_tracker.durable_goal = state.db.get_active_goal_for_conversation(conv_id).await?;
+
     Ok((
         toolset,
         messages,
         last_user_msg.clone(),
-        GoalTracker::new(&last_user_msg),
+        goal_tracker,
         if state.enable_self_reflection { 1 } else { 0 },
         prompt_cache_key,
     ))
@@ -1009,7 +1078,14 @@ async fn emit_stream_event(
     event: ServerEvent,
 ) {
     crate::events::persist_activity_event(&state.db, &event).await;
+    let work_events = crate::events::persist_work_event(&state.db, &event).await;
     let _ = state.event_tx.send(event.clone());
+    for work_event in work_events {
+        let _ = state.event_tx.send(work_event.clone());
+        if let Some(tx) = event_tx {
+            let _ = tx.send(work_event).await;
+        }
+    }
     if let Some(tx) = event_tx {
         let _ = tx.send(event).await;
     }
@@ -1040,6 +1116,7 @@ fn prepare_tool_calls_for_execution(
     tool_calls: &[jossie_core::ToolCall],
     conv_id: Uuid,
     authorization_context: &str,
+    goal: Option<&jossie_db::GoalWithTasks>,
 ) -> Vec<jossie_core::ToolCall> {
     tool_calls
         .iter()
@@ -1061,6 +1138,23 @@ fn prepare_tool_calls_for_execution(
                                 "__authorization_context".to_string(),
                                 serde_json::Value::String(authorization_context.to_string()),
                             );
+                            if let Some(goal) = goal {
+                                obj.insert(
+                                    "__goal_id".to_string(),
+                                    serde_json::Value::String(goal.goal.id.clone()),
+                                );
+                                if let Some(task) = goal.tasks.iter().find(|task| {
+                                    matches!(
+                                        task.status.as_str(),
+                                        "in_progress" | "waiting" | "pending"
+                                    )
+                                }) {
+                                    obj.insert(
+                                        "__goal_task_id".to_string(),
+                                        serde_json::Value::String(task.id.clone()),
+                                    );
+                                }
+                            }
                         }
                         if let Ok(json_str) = serde_json::to_string(&args) {
                             call_with_context.arguments = json_str;
@@ -1155,6 +1249,173 @@ async fn process_capability_activation(
         let tool_msg = Message::new(conv_id, Role::Tool, result.content)
             .with_tool_call_id(call.id.clone())
             .with_name(call.name.clone());
+        persist_message(state, &tool_msg).await?;
+        messages.push(tool_msg);
+    }
+    goal_tracker.record_tool_calls(tool_calls);
+    Ok(true)
+}
+
+async fn process_work_plan_updates(
+    state: &AppState,
+    conv_id: Uuid,
+    run_id: &str,
+    event_tx: Option<&tokio::sync::mpsc::Sender<ServerEvent>>,
+    tool_calls: &[jossie_core::ToolCall],
+    messages: &mut Vec<Message>,
+    goal_tracker: &mut GoalTracker,
+) -> anyhow::Result<bool> {
+    let Some(call) = tool_calls
+        .iter()
+        .find(|call| call.name == "update_work_plan")
+    else {
+        return Ok(false);
+    };
+
+    #[derive(Deserialize)]
+    struct TaskUpdate {
+        id: Option<String>,
+        title: String,
+        status: String,
+        summary: Option<String>,
+        blocker: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Args {
+        goal_id: Option<String>,
+        title: String,
+        objective: String,
+        goal_status: String,
+        blocker: Option<String>,
+        tasks: Vec<TaskUpdate>,
+    }
+
+    let result: anyhow::Result<jossie_db::GoalWithTasks> = async {
+        let args: Args = serde_json::from_str(&call.arguments)?;
+        if args.title.trim().is_empty() || args.objective.trim().is_empty() || args.tasks.is_empty()
+        {
+            anyhow::bail!("A tracked goal needs a title, objective, and at least one task");
+        }
+        let goal_id = if let Some(goal_id) = args.goal_id.as_deref() {
+            let existing = state
+                .db
+                .get_goal(goal_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Goal not found"))?;
+            if existing.conversation_id.as_deref() != Some(&conv_id.to_string()) {
+                anyhow::bail!("Goal belongs to a different conversation");
+            }
+            state
+                .db
+                .update_goal_metadata(
+                    goal_id,
+                    Some(args.title.trim()),
+                    Some(args.objective.trim()),
+                    Some(&args.goal_status),
+                    Some(args.blocker.as_deref()),
+                    None,
+                )
+                .await?;
+            goal_id.to_string()
+        } else {
+            state
+                .db
+                .create_goal(Some(conv_id), args.title.trim(), args.objective.trim(), &[])
+                .await?
+                .goal
+                .id
+        };
+
+        let existing_tasks = state.db.list_goal_tasks(&goal_id).await?;
+        for (position, task) in args.tasks.iter().enumerate() {
+            if task.title.trim().is_empty() {
+                anyhow::bail!("Task titles cannot be empty");
+            }
+            state
+                .db
+                .upsert_goal_task(
+                    &goal_id,
+                    task.id.as_deref().or_else(|| {
+                        existing_tasks
+                            .get(position)
+                            .map(|existing| existing.id.as_str())
+                    }),
+                    position as i64,
+                    task.title.trim(),
+                    &task.status,
+                    task.summary.as_deref(),
+                    task.blocker.as_deref(),
+                )
+                .await?;
+        }
+        state
+            .db
+            .get_goal_with_tasks(&goal_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Goal disappeared after update"))
+    }
+    .await;
+
+    let tool_result = match result {
+        Ok(goal) => {
+            let current_task_id = goal
+                .tasks
+                .iter()
+                .find(|task| matches!(task.status.as_str(), "in_progress" | "waiting" | "blocked"))
+                .map(|task| task.id.as_str());
+            state
+                .db
+                .link_work_run_goal(run_id, &goal.goal.id, current_task_id)
+                .await?;
+            goal_tracker.durable_goal = Some(goal.clone());
+            emit_stream_event(
+                state,
+                event_tx,
+                ServerEvent::GoalUpdated {
+                    conversation_id: conv_id,
+                    goal: goal.clone(),
+                },
+            )
+            .await;
+            if let Some(run) = state.db.get_work_run(run_id).await? {
+                let event = ServerEvent::WorkRunUpdated {
+                    conversation_id: Some(conv_id),
+                    run,
+                };
+                let _ = state.event_tx.send(event.clone());
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(event).await;
+                }
+            }
+            jossie_core::ToolResult {
+                tool_call_id: call.id.clone(),
+                content: format!(
+                    "Progress updated: {} of {} tasks complete.",
+                    goal.completed_tasks, goal.total_tasks
+                ),
+                is_error: false,
+            }
+        }
+        Err(error) => jossie_core::ToolResult {
+            tool_call_id: call.id.clone(),
+            content: format!("Could not update progress: {error}"),
+            is_error: true,
+        },
+    };
+    goal_tracker.record_tool_result(call, &tool_result);
+    let tool_msg = Message::new(conv_id, Role::Tool, tool_result.content)
+        .with_tool_call_id(call.id.clone())
+        .with_name(call.name.clone());
+    persist_message(state, &tool_msg).await?;
+    messages.push(tool_msg);
+    for other in tool_calls.iter().filter(|other| other.id != call.id) {
+        let tool_msg = Message::new(
+            conv_id,
+            Role::Tool,
+            "Update the work plan in a separate step before calling other tools.".to_string(),
+        )
+        .with_tool_call_id(other.id.clone())
+        .with_name(other.name.clone());
         persist_message(state, &tool_msg).await?;
         messages.push(tool_msg);
     }
@@ -1371,7 +1632,34 @@ pub async fn run_agent_loop_with_options(
     // Try to claim this conversation
     claim_conversation(state, conv_id).await?;
 
-    let result = AssertUnwindSafe(run_agent_loop_inner(state, conv_id, &options))
+    let run_id = Uuid::new_v4().to_string();
+    emit_stream_event(
+        state,
+        None,
+        ServerEvent::RunStarted {
+            conversation_id: conv_id,
+            run_id: run_id.clone(),
+            scheduled: options.scheduled_execution,
+        },
+    )
+    .await;
+    if let Err(error) = state
+        .db
+        .annotate_work_run(
+            &run_id,
+            options.goal_id.as_deref(),
+            options.task_id.as_deref(),
+            options.work_source_type.as_deref(),
+            options.work_source_id.as_deref(),
+            options.work_summary.as_deref(),
+            None,
+        )
+        .await
+    {
+        tracing::warn!("Failed to attach work metadata to run {run_id}: {error}");
+    }
+
+    let result = AssertUnwindSafe(run_agent_loop_inner(state, conv_id, &run_id, &options))
         .catch_unwind()
         .await;
 
@@ -1379,10 +1667,56 @@ pub async fn run_agent_loop_with_options(
     release_conversation(state, conv_id).await;
 
     match result {
-        Ok(result) => result,
+        Ok(Ok(response)) => {
+            let waiting = state
+                .db
+                .get_work_run(&run_id)
+                .await?
+                .is_some_and(|run| run.status == "waiting_for_approval");
+            if !waiting {
+                emit_stream_event(
+                    state,
+                    None,
+                    ServerEvent::RunCompleted {
+                        conversation_id: conv_id,
+                        run_id: run_id.clone(),
+                    },
+                )
+                .await;
+            }
+            Ok(response)
+        }
+        Ok(Err(error)) => {
+            let terminal = state.db.get_work_run(&run_id).await?.is_some_and(|run| {
+                matches!(run.status.as_str(), "cancelled" | "completed" | "failed")
+            });
+            if !terminal {
+                emit_stream_event(
+                    state,
+                    None,
+                    ServerEvent::Error {
+                        conversation_id: conv_id,
+                        run_id: Some(run_id.clone()),
+                        error: error.to_string(),
+                    },
+                )
+                .await;
+            }
+            Err(error)
+        }
         Err(payload) => {
             let panic_message = panic_payload_to_string(payload);
             tracing::error!("Agent loop panicked for conversation {conv_id}: {panic_message}");
+            emit_stream_event(
+                state,
+                None,
+                ServerEvent::Error {
+                    conversation_id: conv_id,
+                    run_id: Some(run_id),
+                    error: format!("Agent loop panicked: {panic_message}"),
+                },
+            )
+            .await;
             anyhow::bail!("Agent loop panicked: {panic_message}")
         }
     }
@@ -1446,9 +1780,9 @@ async fn complete_agent_iteration(
 async fn run_agent_loop_inner(
     state: &AppState,
     conv_id: Uuid,
+    run_id: &str,
     options: &AgentRunOptions,
 ) -> anyhow::Result<String> {
-    let run_id = Uuid::new_v4().to_string();
     let authorization_context = options
         .authorization_context
         .as_deref()
@@ -1465,7 +1799,7 @@ async fn run_agent_loop_inner(
     let mut chained_messages = Vec::new();
 
     for _iteration in 0..state.max_agent_iterations {
-        ensure_run_not_cancelled(state, conv_id, &run_id, None).await?;
+        ensure_run_not_cancelled(state, conv_id, run_id, None).await?;
         if _iteration > 0 {
             inject_goal_tracking_message(&mut messages, &goal_tracker);
             chained_messages.push(
@@ -1600,10 +1934,24 @@ async fn run_agent_loop_inner(
         messages.push(assistant_msg);
 
         let capability_message_start = messages.len();
+        if process_work_plan_updates(
+            state,
+            conv_id,
+            run_id,
+            None,
+            &tool_calls,
+            &mut messages,
+            &mut goal_tracker,
+        )
+        .await?
+        {
+            chained_messages.extend_from_slice(&messages[capability_message_start..]);
+            continue;
+        }
         if process_capability_activation(
             state,
             conv_id,
-            &run_id,
+            run_id,
             None,
             &mut toolset,
             &tool_calls,
@@ -1616,11 +1964,16 @@ async fn run_agent_loop_inner(
             continue;
         }
 
-        let prepared_calls = prepare_tool_calls_for_execution(&tool_calls, conv_id, &last_user_msg);
+        let prepared_calls = prepare_tool_calls_for_execution(
+            &tool_calls,
+            conv_id,
+            &last_user_msg,
+            goal_tracker.durable_goal.as_ref(),
+        );
         let (prepared_calls, pending_actions) = partition_authorized_calls(
             state,
             conv_id,
-            &run_id,
+            run_id,
             None,
             prepared_calls,
             authorization_context.unwrap_or(&last_user_msg),
@@ -1658,7 +2011,7 @@ async fn run_agent_loop_inner(
                 None,
                 ServerEvent::RunWaitingForApproval {
                     conversation_id: conv_id,
-                    run_id: run_id.clone(),
+                    run_id: run_id.to_string(),
                     batch_id: action.batch_id.clone(),
                 },
             )
@@ -2028,6 +2381,36 @@ async fn run_agent_loop_streaming_inner(
             messages.push(assistant_msg);
 
             let capability_message_start = messages.len();
+            match process_work_plan_updates(
+                state,
+                conv_id,
+                &run_id,
+                Some(&event_tx),
+                &tool_calls,
+                &mut messages,
+                &mut goal_tracker,
+            )
+            .await
+            {
+                Ok(true) => {
+                    chained_messages.extend_from_slice(&messages[capability_message_start..]);
+                    continue;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    emit_stream_event(
+                        state,
+                        Some(&event_tx),
+                        ServerEvent::Error {
+                            conversation_id: conv_id,
+                            run_id: Some(run_id.clone()),
+                            error: error.to_string(),
+                        },
+                    )
+                    .await;
+                    return;
+                }
+            }
             match process_capability_activation(
                 state,
                 conv_id,
@@ -2060,8 +2443,12 @@ async fn run_agent_loop_streaming_inner(
                 }
             }
 
-            let prepared_calls =
-                prepare_tool_calls_for_execution(&tool_calls, conv_id, &last_user_msg);
+            let prepared_calls = prepare_tool_calls_for_execution(
+                &tool_calls,
+                conv_id,
+                &last_user_msg,
+                goal_tracker.durable_goal.as_ref(),
+            );
             let (prepared_calls, pending_actions) = match partition_authorized_calls(
                 state,
                 conv_id,
@@ -2475,6 +2862,17 @@ async fn update_rolling_conversation_summary(
     if chunk.len() < SUMMARY_MIN_MESSAGES && chunk_chars < SUMMARY_MIN_CHARS {
         return;
     }
+    let _ = db
+        .upsert_worker_status(
+            "conversation_summary",
+            "Conversation summaries",
+            "running",
+            None,
+            Some("Updating conversation continuity"),
+            false,
+            None,
+        )
+        .await;
 
     let transcript = chunk
         .iter()
@@ -2524,10 +2922,58 @@ async fn update_rolling_conversation_summary(
                 .await
             {
                 tracing::warn!("Failed to save rolling conversation summary: {error}");
+                let _ = db
+                    .upsert_worker_status(
+                        "conversation_summary",
+                        "Conversation summaries",
+                        "degraded",
+                        None,
+                        Some("Latest summary failed"),
+                        false,
+                        Some(&error.to_string()),
+                    )
+                    .await;
+            } else {
+                let _ = db
+                    .upsert_worker_status(
+                        "conversation_summary",
+                        "Conversation summaries",
+                        "idle",
+                        None,
+                        Some("Ready"),
+                        true,
+                        None,
+                    )
+                    .await;
             }
         }
-        Ok(_) => {}
-        Err(error) => tracing::warn!("Rolling conversation summary failed: {error}"),
+        Ok(_) => {
+            let _ = db
+                .upsert_worker_status(
+                    "conversation_summary",
+                    "Conversation summaries",
+                    "idle",
+                    None,
+                    Some("No summary update was needed"),
+                    true,
+                    None,
+                )
+                .await;
+        }
+        Err(error) => {
+            tracing::warn!("Rolling conversation summary failed: {error}");
+            let _ = db
+                .upsert_worker_status(
+                    "conversation_summary",
+                    "Conversation summaries",
+                    "degraded",
+                    None,
+                    Some("Latest summary failed"),
+                    false,
+                    Some(&error.to_string()),
+                )
+                .await;
+        }
     }
 }
 
@@ -2542,6 +2988,17 @@ pub(crate) async fn spawn_knowledge_extraction(
         tracing::debug!("Skipping knowledge extraction for a low-signal turn");
         return;
     }
+    let _ = db
+        .upsert_worker_status(
+            "knowledge_extraction",
+            "Knowledge extraction",
+            "running",
+            None,
+            Some("Reviewing a completed conversation turn"),
+            false,
+            None,
+        )
+        .await;
 
     let prompt = format!(
         r#"Extract knowledge from this conversation turn.
@@ -2656,11 +3113,48 @@ If nothing to extract, output {{ "nodes": [], "edges": [] }}"#
                     if node_count > 0 || edge_count > 0 {
                         tracing::info!("Extracted {} nodes and {} edges", node_count, edge_count);
                     }
+                    let _ = db
+                        .upsert_worker_status(
+                            "knowledge_extraction",
+                            "Knowledge extraction",
+                            "idle",
+                            None,
+                            Some("Ready"),
+                            true,
+                            None,
+                        )
+                        .await;
                 }
-                Err(e) => tracing::warn!("Failed to parse KG extraction JSON: {e}"),
+                Err(e) => {
+                    tracing::warn!("Failed to parse KG extraction JSON: {e}");
+                    let _ = db
+                        .upsert_worker_status(
+                            "knowledge_extraction",
+                            "Knowledge extraction",
+                            "degraded",
+                            None,
+                            Some("Latest extraction could not be read"),
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
+                }
             }
         }
-        Err(e) => tracing::error!("KG Extraction LLM failed: {e}"),
+        Err(e) => {
+            tracing::error!("KG Extraction LLM failed: {e}");
+            let _ = db
+                .upsert_worker_status(
+                    "knowledge_extraction",
+                    "Knowledge extraction",
+                    "degraded",
+                    None,
+                    Some("Latest extraction failed"),
+                    false,
+                    Some(&e.to_string()),
+                )
+                .await;
+        }
     }
 }
 
@@ -4407,7 +4901,8 @@ mod tests {
             },
         ];
 
-        let prepared = prepare_tool_calls_for_execution(&calls, conv_id, "remind me to check in");
+        let prepared =
+            prepare_tool_calls_for_execution(&calls, conv_id, "remind me to check in", None);
         let scheduler_args: serde_json::Value =
             serde_json::from_str(&prepared[0].arguments).expect("scheduler args should be JSON");
 

@@ -167,6 +167,104 @@ CREATE INDEX IF NOT EXISTS idx_activity_events_created_at
 CREATE INDEX IF NOT EXISTS idx_activity_events_conversation
     ON activity_events(conversation_id, created_at DESC);
 
+-- Durable user-facing goals and operational work tracking. Goal tasks describe
+-- outcomes in the user's language; work runs/steps describe safe execution
+-- progress without retaining prompts, reasoning, or raw tool payloads.
+CREATE TABLE IF NOT EXISTS goals (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    objective TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    blocker TEXT,
+    archived_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_goals_status_updated
+    ON goals(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_goals_conversation
+    ON goals(conversation_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS goal_tasks (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    summary TEXT,
+    blocker TEXT,
+    source_type TEXT,
+    source_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_goal_tasks_goal_position
+    ON goal_tasks(goal_id, position);
+CREATE INDEX IF NOT EXISTS idx_goal_tasks_source
+    ON goal_tasks(source_type, source_id);
+
+CREATE TABLE IF NOT EXISTS work_runs (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT REFERENCES goals(id) ON DELETE SET NULL,
+    task_id TEXT REFERENCES goal_tasks(id) ON DELETE SET NULL,
+    conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+    kind TEXT NOT NULL,
+    source_type TEXT,
+    source_id TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    summary TEXT NOT NULL,
+    current_phase TEXT,
+    error TEXT,
+    visibility TEXT NOT NULL DEFAULT 'significant',
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT,
+    finished_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_runs_status_updated
+    ON work_runs(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_work_runs_goal_updated
+    ON work_runs(goal_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_work_runs_conversation_updated
+    ON work_runs(conversation_id, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_work_runs_source
+    ON work_runs(source_type, source_id)
+    WHERE source_type IS NOT NULL AND source_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS work_run_steps (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES work_runs(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    label TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    summary TEXT,
+    error TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_run_steps_run_sequence
+    ON work_run_steps(run_id, sequence);
+
+CREATE TABLE IF NOT EXISTS worker_status (
+    worker_key TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    status TEXT NOT NULL,
+    current_run_id TEXT REFERENCES work_runs(id) ON DELETE SET NULL,
+    detail TEXT,
+    last_started_at TEXT,
+    last_success_at TEXT,
+    last_error_at TEXT,
+    last_error TEXT,
+    updated_at TEXT NOT NULL
+);
+
 -- Consequential tool calls waiting for owner authorization. Tool arguments are
 -- retained server-side so an approved action can execute exactly once.
 CREATE TABLE IF NOT EXISTS pending_actions (

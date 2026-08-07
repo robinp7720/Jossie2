@@ -75,6 +75,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/memories", get(handlers::dashboard::memories_handler))
         .route("/api/activity", get(handlers::dashboard::activity_handler))
+        .route("/api/work", get(handlers::work::work_summary))
+        .route(
+            "/api/goals/{id}",
+            get(handlers::work::goal_detail).patch(handlers::work::update_goal),
+        )
+        .route("/api/goals/{id}/pause", post(handlers::work::pause_goal))
+        .route("/api/goals/{id}/resume", post(handlers::work::resume_goal))
+        .route("/api/goals/{id}/cancel", post(handlers::work::cancel_goal))
+        .route("/api/work/runs/{id}", get(handlers::work::run_detail))
+        .route("/api/work/runs", get(handlers::work::list_runs))
+        .route(
+            "/api/work/runs/{id}/cancel",
+            post(handlers::work::cancel_run),
+        )
         .route(
             "/api/actions/pending",
             get(handlers::actions::list_pending_actions),

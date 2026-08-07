@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use uuid::Uuid;
 
+mod work;
+pub use work::*;
+
 pub struct Database {
     pool: SqlitePool,
     url: String,
@@ -1833,6 +1836,17 @@ impl Database {
         Ok(())
     }
 
+    pub async fn mark_running_scheduled_tasks_interrupted(&self) -> anyhow::Result<u64> {
+        let now = Utc::now().to_rfc3339();
+        Ok(sqlx::query(
+            "UPDATE scheduled_tasks SET status = 'failed', last_error = 'Interrupted by server restart; not retried automatically', updated_at = ? WHERE status = 'running'",
+        )
+        .bind(&now)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
+    }
+
     pub async fn cancel_scheduled_task(&self, id: &str) -> anyhow::Result<()> {
         let now_str = Utc::now().to_rfc3339();
         sqlx::query("UPDATE scheduled_tasks SET status = 'cancelled', updated_at = ? WHERE id = ?")
@@ -2245,6 +2259,17 @@ impl Database {
                     memories_saved, nodes_saved, edges_saved, error, created_at, updated_at
              FROM chat_imports WHERE status = 'queued' ORDER BY created_at ASC",
         )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn list_recent_chat_imports(&self, limit: usize) -> anyhow::Result<Vec<ChatImport>> {
+        Ok(sqlx::query_as::<_, ChatImport>(
+            "SELECT id, file_id, format, status, total_messages, analyzed_messages,
+                    memories_saved, nodes_saved, edges_saved, error, created_at, updated_at
+             FROM chat_imports ORDER BY updated_at DESC LIMIT ?",
+        )
+        .bind(limit.clamp(1, 100) as i64)
         .fetch_all(&self.pool)
         .await?)
     }

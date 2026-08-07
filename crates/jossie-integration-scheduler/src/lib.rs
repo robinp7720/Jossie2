@@ -65,6 +65,10 @@ impl SchedulerIntegration {
             run_at: String,
             #[serde(default, rename = "__authorization_context")]
             authorization_context: String,
+            #[serde(default, rename = "__goal_id")]
+            goal_id: Option<String>,
+            #[serde(default, rename = "__goal_task_id")]
+            goal_task_id: Option<String>,
         }
         let args: Args = serde_json::from_str(args)?;
 
@@ -92,6 +96,8 @@ impl SchedulerIntegration {
         let task_data = serde_json::json!({
             "prompt": args.prompt,
             "authorization_context": args.authorization_context,
+            "goal_id": args.goal_id,
+            "goal_task_id": args.goal_task_id,
         });
 
         let task_id = self
@@ -106,6 +112,11 @@ impl SchedulerIntegration {
                 Some(1),
             )
             .await?;
+        if let Some(goal_task_id) = args.goal_task_id.as_deref() {
+            self.db
+                .link_goal_task_source(goal_task_id, "scheduled_task", &task_id)
+                .await?;
+        }
 
         Ok(format!(
             "Scheduled task {} to run at {}",
@@ -127,6 +138,10 @@ impl SchedulerIntegration {
             max_runs: Option<i64>,
             #[serde(default, rename = "__authorization_context")]
             authorization_context: String,
+            #[serde(default, rename = "__goal_id")]
+            goal_id: Option<String>,
+            #[serde(default, rename = "__goal_task_id")]
+            goal_task_id: Option<String>,
         }
         let args: Args = serde_json::from_str(args)?;
 
@@ -137,6 +152,8 @@ impl SchedulerIntegration {
         let task_data = serde_json::json!({
             "prompt": args.prompt,
             "authorization_context": args.authorization_context,
+            "goal_id": args.goal_id,
+            "goal_task_id": args.goal_task_id,
         });
 
         // Calculate first run time
@@ -170,6 +187,11 @@ impl SchedulerIntegration {
                 args.max_runs,
             )
             .await?;
+        if let Some(goal_task_id) = args.goal_task_id.as_deref() {
+            self.db
+                .link_goal_task_source(goal_task_id, "scheduled_task", &task_id)
+                .await?;
+        }
 
         let max_info = args
             .max_runs
@@ -194,6 +216,10 @@ impl SchedulerIntegration {
             max_runs: Option<i64>,
             #[serde(default, rename = "__authorization_context")]
             authorization_context: String,
+            #[serde(default, rename = "__goal_id")]
+            goal_id: Option<String>,
+            #[serde(default, rename = "__goal_task_id")]
+            goal_task_id: Option<String>,
         }
         let args: Args = serde_json::from_str(args)?;
 
@@ -207,6 +233,8 @@ impl SchedulerIntegration {
         let task_data = serde_json::json!({
             "prompt": args.prompt,
             "authorization_context": args.authorization_context,
+            "goal_id": args.goal_id,
+            "goal_task_id": args.goal_task_id,
         });
 
         if let Some(existing_id) = self
@@ -231,6 +259,11 @@ impl SchedulerIntegration {
                 args.max_runs,
             )
             .await?;
+        if let Some(goal_task_id) = args.goal_task_id.as_deref() {
+            self.db
+                .link_goal_task_source(goal_task_id, "scheduled_task", &task_id)
+                .await?;
+        }
 
         let max_info = args
             .max_runs

@@ -104,10 +104,26 @@ pub enum ServerEvent {
         run_id: Option<String>,
         error: String,
     },
+    GoalUpdated {
+        conversation_id: Uuid,
+        goal: jossie_db::GoalWithTasks,
+    },
+    WorkRunUpdated {
+        conversation_id: Option<Uuid>,
+        run: jossie_db::WorkRun,
+    },
+    WorkStepUpdated {
+        conversation_id: Option<Uuid>,
+        run_id: String,
+        step: jossie_db::WorkRunStep,
+    },
+    WorkerStatusUpdated {
+        worker: jossie_db::WorkerStatus,
+    },
 }
 
 impl ServerEvent {
-    pub fn conversation_id(&self) -> Uuid {
+    pub fn conversation_id(&self) -> Option<Uuid> {
         match self {
             ServerEvent::RunStarted {
                 conversation_id, ..
@@ -163,7 +179,17 @@ impl ServerEvent {
             }
             | ServerEvent::Error {
                 conversation_id, ..
+            }
+            | ServerEvent::GoalUpdated {
+                conversation_id, ..
+            } => Some(*conversation_id),
+            ServerEvent::WorkRunUpdated {
+                conversation_id, ..
+            }
+            | ServerEvent::WorkStepUpdated {
+                conversation_id, ..
             } => *conversation_id,
+            ServerEvent::WorkerStatusUpdated { .. } => None,
         }
     }
 }
@@ -176,6 +202,294 @@ pub fn preview_text(content: &str, max_len: usize) -> String {
         trimmed
     } else {
         format!("{preview}...")
+    }
+}
+
+/// Convert the execution event stream into durable, privacy-safe work state.
+/// Raw arguments, model reasoning, and raw tool results are intentionally not stored.
+pub async fn persist_work_event(db: &jossie_db::Database, event: &ServerEvent) -> Vec<ServerEvent> {
+    let result: anyhow::Result<Vec<ServerEvent>> = async {
+        let mut derived = Vec::new();
+        match event {
+            ServerEvent::RunStarted {
+                conversation_id,
+                run_id,
+                scheduled,
+            } => {
+                db.create_work_run(jossie_db::NewWorkRun {
+                    id: Some(run_id),
+                    goal_id: None,
+                    task_id: None,
+                    conversation_id: Some(*conversation_id),
+                    kind: if *scheduled { "scheduled" } else { "chat" },
+                    source_type: None,
+                    source_id: None,
+                    summary: if *scheduled {
+                        "Scheduled work"
+                    } else {
+                        "Conversation request"
+                    },
+                    visibility: "significant",
+                })
+                .await?;
+                db.update_work_run(run_id, "running", Some("Planning the next step"), None)
+                    .await?;
+                if let Some(run) = db.get_work_run(run_id).await? {
+                    derived.push(ServerEvent::WorkRunUpdated {
+                        conversation_id: Some(*conversation_id),
+                        run,
+                    });
+                }
+            }
+            ServerEvent::AssistantThinking {
+                conversation_id,
+                run_id,
+                iteration,
+            } => {
+                db.update_work_run(
+                    run_id,
+                    "running",
+                    Some(if *iteration == 0 {
+                        "Understanding the request"
+                    } else {
+                        "Considering the next step"
+                    }),
+                    None,
+                )
+                .await?;
+                if let Some(run) = db.get_work_run(run_id).await? {
+                    derived.push(ServerEvent::WorkRunUpdated {
+                        conversation_id: Some(*conversation_id),
+                        run,
+                    });
+                }
+            }
+            ServerEvent::CapabilitiesActivated {
+                conversation_id,
+                run_id,
+                capabilities,
+            } => {
+                let label = if capabilities.is_empty() {
+                    "Prepared capabilities".to_string()
+                } else {
+                    format!("Prepared {}", capabilities.join(", "))
+                };
+                let step = db
+                    .complete_instant_work_run_step(run_id, "capability", &label, None)
+                    .await?;
+                derived.push(ServerEvent::WorkStepUpdated {
+                    conversation_id: Some(*conversation_id),
+                    run_id: run_id.clone(),
+                    step,
+                });
+            }
+            ServerEvent::ToolStarted {
+                conversation_id,
+                run_id,
+                call_id,
+                tool,
+            } => {
+                let label = format!("Using {}", tool.replace('_', " "));
+                db.update_work_run(run_id, "running", Some(&label), None)
+                    .await?;
+                let step = db
+                    .create_work_run_step(run_id, Some(call_id), "capability", &label)
+                    .await?;
+                derived.push(ServerEvent::WorkStepUpdated {
+                    conversation_id: Some(*conversation_id),
+                    run_id: run_id.clone(),
+                    step,
+                });
+            }
+            ServerEvent::ToolFinished {
+                conversation_id,
+                run_id,
+                call_id,
+                tool,
+                is_error,
+                ..
+            } => {
+                let status = if *is_error { "failed" } else { "completed" };
+                let summary = if *is_error {
+                    Some("Capability reported an error")
+                } else {
+                    Some("Capability completed")
+                };
+                db.finish_work_run_step(
+                    call_id,
+                    status,
+                    summary,
+                    if *is_error {
+                        Some("Capability needs attention")
+                    } else {
+                        None
+                    },
+                )
+                .await?;
+                if let Some(step) = db
+                    .list_work_run_steps(run_id)
+                    .await?
+                    .into_iter()
+                    .find(|step| step.id == *call_id)
+                {
+                    derived.push(ServerEvent::WorkStepUpdated {
+                        conversation_id: Some(*conversation_id),
+                        run_id: run_id.clone(),
+                        step,
+                    });
+                }
+                db.update_work_run(
+                    run_id,
+                    "running",
+                    Some(&format!("Finished using {}", tool.replace('_', " "))),
+                    None,
+                )
+                .await?;
+            }
+            ServerEvent::ReflectionRetry {
+                conversation_id,
+                run_id,
+                ..
+            } => {
+                let step = db
+                    .complete_instant_work_run_step(
+                        run_id,
+                        "reflection",
+                        "Refined the response",
+                        None,
+                    )
+                    .await?;
+                derived.push(ServerEvent::WorkStepUpdated {
+                    conversation_id: Some(*conversation_id),
+                    run_id: run_id.clone(),
+                    step,
+                });
+            }
+            ServerEvent::ActionApprovalRequired {
+                conversation_id,
+                run_id,
+                action,
+            } => {
+                db.update_work_run(run_id, "waiting_for_approval", Some(&action.title), None)
+                    .await?;
+                if let Some(run) = db.get_work_run(run_id).await? {
+                    derived.push(ServerEvent::WorkRunUpdated {
+                        conversation_id: Some(*conversation_id),
+                        run,
+                    });
+                }
+            }
+            ServerEvent::ActionResolved {
+                conversation_id,
+                run_id,
+                action_id,
+                status,
+                title,
+            } => {
+                let batch_resolved = if let Some(action) = db.get_pending_action(action_id).await? {
+                    db.pending_action_batch_is_resolved(&action.batch_id)
+                        .await?
+                } else {
+                    true
+                };
+                let phase = match status.as_str() {
+                    "completed" => format!("Completed approved action: {title}"),
+                    "rejected" => format!("Action declined: {title}"),
+                    _ => format!("Action needs attention: {title}"),
+                };
+                db.update_work_run(
+                    run_id,
+                    if batch_resolved {
+                        "completed"
+                    } else {
+                        "waiting_for_approval"
+                    },
+                    Some(&phase),
+                    (status == "failed").then_some("Approved action failed"),
+                )
+                .await?;
+                if let Some(run) = db.get_work_run(run_id).await? {
+                    derived.push(ServerEvent::WorkRunUpdated {
+                        conversation_id: Some(*conversation_id),
+                        run,
+                    });
+                }
+            }
+            ServerEvent::RunWaitingForApproval {
+                conversation_id,
+                run_id,
+                ..
+            } => {
+                db.update_work_run(
+                    run_id,
+                    "waiting_for_approval",
+                    Some("Waiting for your approval"),
+                    None,
+                )
+                .await?;
+                if let Some(run) = db.get_work_run(run_id).await? {
+                    derived.push(ServerEvent::WorkRunUpdated {
+                        conversation_id: Some(*conversation_id),
+                        run,
+                    });
+                }
+            }
+            ServerEvent::RunCompleted {
+                conversation_id,
+                run_id,
+            } => {
+                db.update_work_run(run_id, "completed", Some("Finished"), None)
+                    .await?;
+                if let Some(run) = db.get_work_run(run_id).await? {
+                    derived.push(ServerEvent::WorkRunUpdated {
+                        conversation_id: Some(*conversation_id),
+                        run,
+                    });
+                }
+            }
+            ServerEvent::RunCancelled {
+                conversation_id,
+                run_id,
+            } => {
+                db.update_work_run(run_id, "cancelled", Some("Cancelled"), None)
+                    .await?;
+                if let Some(run) = db.get_work_run(run_id).await? {
+                    derived.push(ServerEvent::WorkRunUpdated {
+                        conversation_id: Some(*conversation_id),
+                        run,
+                    });
+                }
+            }
+            ServerEvent::Error {
+                conversation_id,
+                run_id: Some(run_id),
+                error,
+            } => {
+                db.update_work_run(
+                    run_id,
+                    "failed",
+                    Some("Needs attention"),
+                    Some(&preview_text(error, 240)),
+                )
+                .await?;
+                if let Some(run) = db.get_work_run(run_id).await? {
+                    derived.push(ServerEvent::WorkRunUpdated {
+                        conversation_id: Some(*conversation_id),
+                        run,
+                    });
+                }
+            }
+            _ => {}
+        }
+        Ok(derived)
+    }
+    .await;
+    match result {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::warn!("Failed to persist work progress: {error}");
+            Vec::new()
+        }
     }
 }
 

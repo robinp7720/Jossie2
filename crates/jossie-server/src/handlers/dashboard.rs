@@ -24,6 +24,10 @@ pub struct DashboardStats {
     pub knowledge_nodes: i64,
     pub knowledge_edges: i64,
     pub pending_tasks: usize,
+    pub active_goals: usize,
+    pub active_runs: usize,
+    pub waiting_work: usize,
+    pub blocked_goals: usize,
 }
 
 #[derive(Serialize)]
@@ -43,6 +47,8 @@ pub async fn dashboard_handler(
         recent_conversations,
         upcoming_tasks,
         graph_nodes,
+        goals,
+        active_runs,
     ) = tokio::try_join!(
         state.db.memory_stats(),
         state.db.graph_counts(),
@@ -51,6 +57,8 @@ pub async fn dashboard_handler(
         state.db.list_conversations(),
         state.db.list_upcoming_scheduled_tasks(4),
         state.db.graph_central_nodes(5),
+        state.db.list_goals(false),
+        state.db.list_active_work_runs(None),
     )?;
 
     Ok(Json(DashboardResponse {
@@ -60,6 +68,19 @@ pub async fn dashboard_handler(
             knowledge_nodes: graph_counts.0,
             knowledge_edges: graph_counts.1,
             pending_tasks: upcoming_tasks.len(),
+            active_goals: goals
+                .iter()
+                .filter(|goal| matches!(goal.goal.status.as_str(), "active" | "blocked" | "paused"))
+                .count(),
+            active_runs: active_runs.len(),
+            waiting_work: active_runs
+                .iter()
+                .filter(|run| run.status == "waiting_for_approval")
+                .count(),
+            blocked_goals: goals
+                .iter()
+                .filter(|goal| goal.goal.status == "blocked")
+                .count(),
         },
         recent_memories,
         recent_activity,

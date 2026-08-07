@@ -222,6 +222,24 @@ The server redirects to Google and later receives the callback on `/oauth/callba
 
 Public OAuth callback endpoint. On success it stores a Google integration account in the database and returns a small HTML success/error page.
 
+### Goals And Work Progress
+
+#### `GET /api/work`
+
+Return open goals, active and significant recent runs, worker health, upcoming schedules, and recent chat imports. Optional query parameters include `conversation_id`, `before`, `limit`, `include_quiet`, and `include_archived`.
+
+#### `GET /api/goals/{id}` / `PATCH /api/goals/{id}`
+
+Read a goal with its outcome tasks and run history, or rename/archive it.
+
+#### `POST /api/goals/{id}/pause|resume|cancel`
+
+Control future and currently executing work for a goal. Cancellation does not undo effects that already completed.
+
+#### `GET /api/work/runs` / `GET /api/work/runs/{id}` / `POST /api/work/runs/{id}/cancel`
+
+List significant run history with cursor, kind, and status filters; read the safe execution timeline for one run; or request that an active run stop at its next safe boundary.
+
 ### Health
 
 #### `GET /api/health`
@@ -242,6 +260,8 @@ Response:
 ### `GET /api/chat/stream`
 
 WebSocket endpoint for streaming chat responses.
+
+The authenticated `/api/events` WebSocket also publishes `goal_updated`, `work_run_updated`, `work_step_updated`, and degraded `worker_status_updated` events. These contain user-visible summaries rather than hidden reasoning or raw tool payloads.
 
 Authentication is typically passed as `?token=...`.
 

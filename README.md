@@ -306,6 +306,10 @@ See [WEB_API.md](WEB_API.md) for full HTTP and WebSocket API documentation.
 - `POST /api/chat` - Send a message (blocking)
 - `GET /api/conversations` - List all conversations
 - `GET /api/conversations/{id}/messages` - Get conversation history
+- `GET /api/work` - Get goals, active runs, schedules, imports, and worker health
+- `GET /api/goals/{id}` - Get a goal, its outcome tasks, and run history
+- `POST /api/goals/{id}/pause|resume|cancel` - Control tracked work
+- `GET /api/work/runs/{id}` - Get a safe per-run progress timeline
 - `GET /api/graph` - Get knowledge graph nodes and edges
 - `GET /api/onboarding` - Check integration status
 - `GET /api/config/accounts` - List configured accounts

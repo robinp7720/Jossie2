@@ -114,10 +114,109 @@ impl ChatExportImporter {
             }
         }
 
+        let run_id = format!("chat-import-{import_id}");
+        let _ = self
+            .db
+            .create_work_run(jossie_db::NewWorkRun {
+                id: Some(&run_id),
+                goal_id: None,
+                task_id: None,
+                conversation_id: None,
+                kind: "import",
+                source_type: Some("chat_import"),
+                source_id: Some(&import_id),
+                summary: "Learn from chat export",
+                visibility: "significant",
+            })
+            .await;
+        let _ = self
+            .db
+            .update_work_run(
+                &run_id,
+                "running",
+                Some("Reading and validating the export"),
+                None,
+            )
+            .await;
+        let _ = self
+            .db
+            .upsert_worker_status(
+                "chat_imports",
+                "Chat imports",
+                "running",
+                Some(&run_id),
+                Some("Analyzing an authorized chat export"),
+                false,
+                None,
+            )
+            .await;
+
         if let Err(error) = self.process(&import_id).await {
             tracing::warn!("Chat import {import_id} failed: {error:#}");
             let error_message = truncate_chars(&format!("{error:#}"), 1_000);
             let _ = self.db.fail_chat_import(&import_id, &error_message).await;
+            if self
+                .db
+                .is_work_run_cancel_requested(&run_id)
+                .await
+                .unwrap_or(false)
+            {
+                let _ = self
+                    .db
+                    .update_work_run(&run_id, "cancelled", Some("Import cancelled"), None)
+                    .await;
+                let _ = self
+                    .db
+                    .upsert_worker_status(
+                        "chat_imports",
+                        "Chat imports",
+                        "idle",
+                        None,
+                        Some("Ready"),
+                        true,
+                        None,
+                    )
+                    .await;
+            } else {
+                let _ = self
+                    .db
+                    .update_work_run(
+                        &run_id,
+                        "failed",
+                        Some("Import needs attention"),
+                        Some(&error_message),
+                    )
+                    .await;
+                let _ = self
+                    .db
+                    .upsert_worker_status(
+                        "chat_imports",
+                        "Chat imports",
+                        "degraded",
+                        None,
+                        Some("The latest import failed"),
+                        false,
+                        Some(&error_message),
+                    )
+                    .await;
+            }
+        } else {
+            let _ = self
+                .db
+                .update_work_run(&run_id, "completed", Some("Import completed"), None)
+                .await;
+            let _ = self
+                .db
+                .upsert_worker_status(
+                    "chat_imports",
+                    "Chat imports",
+                    "idle",
+                    None,
+                    Some("Ready"),
+                    true,
+                    None,
+                )
+                .await;
         }
     }
 
@@ -159,6 +258,21 @@ impl ChatExportImporter {
                 analyzed_messages,
             )
             .await?;
+        let run_id = format!("chat-import-{import_id}");
+        if self.db.is_work_run_cancel_requested(&run_id).await? {
+            anyhow::bail!("Chat import cancelled by user");
+        }
+        self.db
+            .update_work_run(
+                &run_id,
+                "running",
+                Some(&format!(
+                    "Analyzing {analyzed_messages} of {} messages",
+                    parsed.messages.len()
+                )),
+                None,
+            )
+            .await?;
         let extraction_results = stream::iter(selected_chunks.into_iter().enumerate())
             .map(|(index, chunk)| {
                 let llm = self.llm.clone();
@@ -180,9 +294,20 @@ impl ChatExportImporter {
             !extractions.is_empty(),
             "The model could not extract knowledge from any export chunk"
         );
+        if self.db.is_work_run_cancel_requested(&run_id).await? {
+            anyhow::bail!("Chat import cancelled by user");
+        }
 
         let counts = self
             .save_extractions(import_id, &file.name, extractions)
+            .await?;
+        self.db
+            .update_work_run(
+                &run_id,
+                "running",
+                Some("Saving durable memories and connections"),
+                None,
+            )
             .await?;
         self.db
             .complete_chat_import(

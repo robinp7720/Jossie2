@@ -28,6 +28,43 @@ struct BackgroundTarget {
 pub async fn start_event_loop(state: Arc<AppState>) -> anyhow::Result<()> {
     recover_stale_processing_events(&state).await?;
 
+    for (key, label) in [
+        ("integration_events", "Integration event triage"),
+        ("scheduled_tasks", "Scheduled work"),
+        ("out_of_band", "Message delivery"),
+        ("chat_imports", "Chat imports"),
+        ("knowledge_extraction", "Knowledge extraction"),
+        ("conversation_summary", "Conversation summaries"),
+    ] {
+        if let Ok(worker) = state
+            .db
+            .ensure_worker_status(key, label, "idle", Some("Ready"))
+            .await
+        {
+            let _ = state
+                .event_tx
+                .send(ServerEvent::WorkerStatusUpdated { worker });
+        }
+    }
+    update_worker(
+        &state,
+        "heartbeat",
+        "Heartbeat checks",
+        if state.heartbeat_enabled {
+            "idle"
+        } else {
+            "disabled"
+        },
+        Some(if state.heartbeat_enabled {
+            "Ready"
+        } else {
+            "Disabled in configuration"
+        }),
+        false,
+        None,
+    )
+    .await;
+
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(
         BACKGROUND_WORK_INTERVAL_SECS,
     ));
@@ -40,30 +77,232 @@ pub async fn start_event_loop(state: Arc<AppState>) -> anyhow::Result<()> {
         if now >= next_integration_poll {
             tracing::info!("Event loop iteration");
             for integration in state.registry.get_integrations() {
-                if let Err(e) = integration.poll().await {
-                    tracing::error!("Poll failed for integration {}: {}", integration.name(), e);
+                let key = format!("poll:{}", integration.name());
+                let label = format!("{} polling", integration.name());
+                update_worker(
+                    &state,
+                    &key,
+                    &label,
+                    "running",
+                    Some("Checking for updates"),
+                    false,
+                    None,
+                )
+                .await;
+                match integration.poll().await {
+                    Ok(()) => {
+                        update_worker(
+                            &state,
+                            &key,
+                            &label,
+                            "idle",
+                            Some("Last check succeeded"),
+                            true,
+                            None,
+                        )
+                        .await
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Poll failed for integration {}: {}",
+                            integration.name(),
+                            e
+                        );
+                        update_worker(
+                            &state,
+                            &key,
+                            &label,
+                            "degraded",
+                            Some("Latest check failed"),
+                            false,
+                            Some(&e.to_string()),
+                        )
+                        .await;
+                    }
                 }
             }
             next_integration_poll = now + integration_poll_interval;
         }
 
-        if let Err(e) = process_pending_events(&state).await {
-            tracing::error!("Event processing failed: {e}");
+        update_worker(
+            &state,
+            "integration_events",
+            "Integration event triage",
+            "running",
+            Some("Checking queued events"),
+            false,
+            None,
+        )
+        .await;
+        match process_pending_events(&state).await {
+            Ok(()) => {
+                update_worker(
+                    &state,
+                    "integration_events",
+                    "Integration event triage",
+                    "idle",
+                    Some("Queue checked"),
+                    true,
+                    None,
+                )
+                .await
+            }
+            Err(e) => {
+                tracing::error!("Event processing failed: {e}");
+                update_worker(
+                    &state,
+                    "integration_events",
+                    "Integration event triage",
+                    "degraded",
+                    Some("Processing failed"),
+                    false,
+                    Some(&e.to_string()),
+                )
+                .await;
+            }
         }
 
-        if let Err(e) = process_scheduled_tasks(&state).await {
-            tracing::error!("Scheduled task processing failed: {e}");
+        update_worker(
+            &state,
+            "scheduled_tasks",
+            "Scheduled work",
+            "running",
+            Some("Checking due work"),
+            false,
+            None,
+        )
+        .await;
+        match process_scheduled_tasks(&state).await {
+            Ok(()) => {
+                update_worker(
+                    &state,
+                    "scheduled_tasks",
+                    "Scheduled work",
+                    "idle",
+                    Some("Schedule checked"),
+                    true,
+                    None,
+                )
+                .await
+            }
+            Err(e) => {
+                tracing::error!("Scheduled task processing failed: {e}");
+                update_worker(
+                    &state,
+                    "scheduled_tasks",
+                    "Scheduled work",
+                    "degraded",
+                    Some("Processing failed"),
+                    false,
+                    Some(&e.to_string()),
+                )
+                .await;
+            }
         }
 
-        if let Err(e) = process_oob_messages(&state).await {
-            tracing::error!("OOB message processing failed: {e}");
+        update_worker(
+            &state,
+            "out_of_band",
+            "Message delivery",
+            "running",
+            Some("Checking queued messages"),
+            false,
+            None,
+        )
+        .await;
+        match process_oob_messages(&state).await {
+            Ok(()) => {
+                update_worker(
+                    &state,
+                    "out_of_band",
+                    "Message delivery",
+                    "idle",
+                    Some("Delivery queue checked"),
+                    true,
+                    None,
+                )
+                .await
+            }
+            Err(e) => {
+                tracing::error!("OOB message processing failed: {e}");
+                update_worker(
+                    &state,
+                    "out_of_band",
+                    "Message delivery",
+                    "degraded",
+                    Some("Delivery failed"),
+                    false,
+                    Some(&e.to_string()),
+                )
+                .await;
+            }
         }
 
-        if let Err(e) = maybe_run_heartbeat(&state).await {
-            tracing::error!("Heartbeat check failed: {e}");
+        if state.heartbeat_enabled {
+            update_worker(
+                &state,
+                "heartbeat",
+                "Heartbeat checks",
+                "running",
+                Some("Checking whether a heartbeat is due"),
+                false,
+                None,
+            )
+            .await;
+            match maybe_run_heartbeat(&state).await {
+                Ok(()) => {
+                    update_worker(
+                        &state,
+                        "heartbeat",
+                        "Heartbeat checks",
+                        "idle",
+                        Some("Heartbeat check succeeded"),
+                        true,
+                        None,
+                    )
+                    .await
+                }
+                Err(e) => {
+                    tracing::error!("Heartbeat check failed: {e}");
+                    update_worker(
+                        &state,
+                        "heartbeat",
+                        "Heartbeat checks",
+                        "degraded",
+                        Some("Heartbeat failed"),
+                        false,
+                        Some(&e.to_string()),
+                    )
+                    .await;
+                }
+            }
         }
 
         interval.tick().await;
+    }
+}
+
+async fn update_worker(
+    state: &Arc<AppState>,
+    key: &str,
+    label: &str,
+    status: &str,
+    detail: Option<&str>,
+    success: bool,
+    error: Option<&str>,
+) {
+    match state
+        .db
+        .upsert_worker_status(key, label, status, None, detail, success, error)
+        .await
+    {
+        Ok(worker) if matches!(worker.status.as_str(), "degraded" | "disabled") => {
+            let _ = state
+                .event_tx
+                .send(ServerEvent::WorkerStatusUpdated { worker });
+        }
+        Ok(_) => {}
+        Err(db_error) => tracing::warn!("Failed to update worker status for {key}: {db_error}"),
     }
 }
 
@@ -199,16 +438,89 @@ async fn handle_event(
         return Ok(());
     }
 
+    let work_run_id = format!("integration-event-{}", event.id);
+    state
+        .db
+        .create_work_run(jossie_db::NewWorkRun {
+            id: Some(&work_run_id),
+            goal_id: None,
+            task_id: None,
+            conversation_id: Some(target.conversation_id),
+            kind: "integration_event",
+            source_type: Some("integration_event"),
+            source_id: Some(&event.id),
+            summary: "Review an incoming integration event",
+            visibility: "quiet",
+        })
+        .await?;
+    state
+        .db
+        .update_work_run(
+            &work_run_id,
+            "running",
+            Some("Reviewing whether this needs attention"),
+            None,
+        )
+        .await?;
+
     // If we fail anywhere below, reset the event status to 'new' so it can be retried
     let result = process_event_inner(state, target, event).await;
 
     match result {
-        Ok(()) => Ok(()),
+        Ok(surfaced) => {
+            state
+                .db
+                .annotate_work_run(
+                    &work_run_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    surfaced.then_some("significant"),
+                )
+                .await?;
+            state
+                .db
+                .update_work_run(
+                    &work_run_id,
+                    "completed",
+                    Some(if surfaced {
+                        "Update surfaced"
+                    } else {
+                        "No action needed"
+                    }),
+                    None,
+                )
+                .await?;
+            Ok(())
+        }
         Err(e) => {
             // Reset event to 'new' status on failure so it can be retried
             state
                 .db
                 .mark_integration_event_failed(&event.id, &e.to_string())
+                .await?;
+            state
+                .db
+                .annotate_work_run(
+                    &work_run_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some("significant"),
+                )
+                .await?;
+            state
+                .db
+                .update_work_run(
+                    &work_run_id,
+                    "failed",
+                    Some("Event review failed"),
+                    Some(&e.to_string()),
+                )
                 .await?;
             Err(e)
         }
@@ -219,7 +531,7 @@ async fn process_event_inner(
     state: &Arc<AppState>,
     target: &BackgroundTarget,
     event: &IntegrationEvent,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     // NEW: Extract entities from event and enrich with graph context
     let entities = extract_event_entities(event);
     for entity in &entities {
@@ -245,7 +557,7 @@ async fn process_event_inner(
                     target.conversation_id
                 );
                 state.db.mark_integration_event_new(&event.id).await?;
-                return Ok(());
+                return Ok(false);
             }
             Err(e) => return Err(e),
         };
@@ -253,7 +565,7 @@ async fn process_event_inner(
     tracing::info!("Generated message: {:?}", message);
     let Some(message) = message else {
         state.db.mark_integration_event_processed(&event.id).await?;
-        return Ok(());
+        return Ok(false);
     };
 
     if target.telegram_chat_id.is_some() && !state.telegram_token.trim().is_empty() {
@@ -283,7 +595,7 @@ async fn process_event_inner(
         message: assistant_msg.content.clone(),
     });
     state.db.mark_integration_event_processed(&event.id).await?;
-    Ok(())
+    Ok(true)
 }
 
 async fn handle_email_event_batch(
@@ -956,6 +1268,19 @@ async fn execute_scheduled_task(
                         .get("authorization_context")
                         .and_then(|value| value.as_str())
                         .map(str::to_string),
+                    goal_id: task
+                        .task_data
+                        .get("goal_id")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string),
+                    task_id: task
+                        .task_data
+                        .get("goal_task_id")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string),
+                    work_source_type: Some("scheduled_task".to_string()),
+                    work_source_id: Some(format!("{}:{}", task.id, task.run_count + 1)),
+                    work_summary: Some(prompt.to_string()),
                 },
             )
             .await
@@ -1029,7 +1354,10 @@ async fn execute_scheduled_task(
 
 /// Computes the next fire time for a cron-scheduled task. Standard 5-field cron
 /// expressions are accepted, and a 6-field form with a leading seconds field.
-fn next_cron_occurrence(cron_expression: &str, after: DateTime<Utc>) -> anyhow::Result<DateTime<Utc>> {
+fn next_cron_occurrence(
+    cron_expression: &str,
+    after: DateTime<Utc>,
+) -> anyhow::Result<DateTime<Utc>> {
     let cron = Cron::from_str(cron_expression)
         .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", cron_expression, e))?;
     cron.find_next_occurrence(&after, false)
@@ -1044,6 +1372,25 @@ async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
         tracing::info!("Sending OOB message: {}", msg.id);
 
         let conversation_id: Uuid = msg.conversation_id.parse()?;
+        let work_run_id = format!("out-of-band-{}", msg.id);
+        state
+            .db
+            .create_work_run(jossie_db::NewWorkRun {
+                id: Some(&work_run_id),
+                goal_id: None,
+                task_id: None,
+                conversation_id: Some(conversation_id),
+                kind: "delivery",
+                source_type: Some("out_of_band_message"),
+                source_id: Some(&msg.id),
+                summary: "Deliver a queued update",
+                visibility: "significant",
+            })
+            .await?;
+        state
+            .db
+            .update_work_run(&work_run_id, "running", Some("Delivering an update"), None)
+            .await?;
 
         // Resolve chat id for the specific conversation (cached for this batch).
         let chat_id = if let Some(cached) = chat_cache.get(&conversation_id) {
@@ -1069,6 +1416,15 @@ async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
                         state
                             .db
                             .mark_oob_message_failed(&msg.id, &e.to_string())
+                            .await?;
+                        state
+                            .db
+                            .update_work_run(
+                                &work_run_id,
+                                "failed",
+                                Some("Delivery failed"),
+                                Some(&e.to_string()),
+                            )
                             .await?;
                         tracing::error!("Failed to send OOB message {}: {}", msg.id, e);
                         continue;
@@ -1102,6 +1458,10 @@ async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
             message: assistant_msg.content.clone(),
         });
         state.db.mark_oob_message_sent(&msg.id).await?;
+        state
+            .db
+            .update_work_run(&work_run_id, "completed", Some("Delivered"), None)
+            .await?;
     }
 
     Ok(())
@@ -1122,7 +1482,11 @@ async fn maybe_run_heartbeat(state: &Arc<AppState>) -> anyhow::Result<()> {
         .db
         .get_integration_setting(HEARTBEAT_SETTINGS_NAMESPACE, HEARTBEAT_LAST_RUN_KEY)
         .await?;
-    if !heartbeat_is_due(last_run.as_deref(), state.heartbeat_interval_secs, Utc::now()) {
+    if !heartbeat_is_due(
+        last_run.as_deref(),
+        state.heartbeat_interval_secs,
+        Utc::now(),
+    ) {
         return Ok(());
     }
 
@@ -1155,6 +1519,30 @@ async fn maybe_run_heartbeat(state: &Arc<AppState>) -> anyhow::Result<()> {
     }
 
     let event = build_heartbeat_event(state, target.conversation_id).await?;
+    let work_run_id = format!("heartbeat-{}", event.id);
+    state
+        .db
+        .create_work_run(jossie_db::NewWorkRun {
+            id: Some(&work_run_id),
+            goal_id: None,
+            task_id: None,
+            conversation_id: Some(target.conversation_id),
+            kind: "heartbeat",
+            source_type: Some("heartbeat"),
+            source_id: Some(&event.id),
+            summary: "Proactive continuity check",
+            visibility: "quiet",
+        })
+        .await?;
+    state
+        .db
+        .update_work_run(
+            &work_run_id,
+            "running",
+            Some("Checking whether anything needs attention"),
+            None,
+        )
+        .await?;
 
     let message =
         match jossie_server::agent::generate_event_message(state, target.conversation_id, &event)
@@ -1166,15 +1554,68 @@ async fn maybe_run_heartbeat(state: &Arc<AppState>) -> anyhow::Result<()> {
                     "Deferring heartbeat check - conversation {} is busy",
                     target.conversation_id
                 );
+                state
+                    .db
+                    .update_work_run(
+                        &work_run_id,
+                        "cancelled",
+                        Some("Deferred because the conversation is busy"),
+                        None,
+                    )
+                    .await?;
                 return Ok(());
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                state
+                    .db
+                    .annotate_work_run(
+                        &work_run_id,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some("significant"),
+                    )
+                    .await?;
+                state
+                    .db
+                    .update_work_run(
+                        &work_run_id,
+                        "failed",
+                        Some("Heartbeat failed"),
+                        Some(&e.to_string()),
+                    )
+                    .await?;
+                return Err(e);
+            }
         };
 
     tracing::info!("Heartbeat check result: {:?}", message);
     let Some(message) = message else {
+        state
+            .db
+            .update_work_run(
+                &work_run_id,
+                "completed",
+                Some("Nothing needed attention"),
+                None,
+            )
+            .await?;
         return Ok(());
     };
+    state
+        .db
+        .annotate_work_run(
+            &work_run_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("significant"),
+        )
+        .await?;
 
     maybe_send_telegram_message(state, target.telegram_chat_id, &message).await?;
 
@@ -1196,6 +1637,15 @@ async fn maybe_run_heartbeat(state: &Arc<AppState>) -> anyhow::Result<()> {
         source: "heartbeat".to_string(),
         message: assistant_msg.content.clone(),
     });
+    state
+        .db
+        .update_work_run(
+            &work_run_id,
+            "completed",
+            Some("Proactive update surfaced"),
+            None,
+        )
+        .await?;
 
     Ok(())
 }

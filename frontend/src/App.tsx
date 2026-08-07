@@ -11,6 +11,7 @@ import {
   getDashboard,
   getMessages,
   getSession,
+  getWork,
   listAccounts,
   listActivity,
   listConversations,
@@ -36,13 +37,15 @@ import type {
   Message,
   OnboardingStatus,
   PendingAction,
+  WorkRun,
 } from './types'
 import { KnowledgeGraph } from './components/KnowledgeGraph'
 import { AgentRunStatus } from './components/AgentRunStatus'
 import type { RunStep } from './components/AgentRunStatus'
+import { WorkPage } from './components/WorkPage'
 
 const api: ApiConfig = { baseUrl: '', token: '' }
-type Page = 'overview' | 'chat' | 'memories' | 'knowledge' | 'activity' | 'connections'
+type Page = 'overview' | 'work' | 'chat' | 'memories' | 'knowledge' | 'activity' | 'connections'
 
 const formatDate = (value?: string | null) => {
   if (!value) return 'Not scheduled'
@@ -141,7 +144,7 @@ function Workspace({ onLogout }: { onLogout: () => void }) {
   }
 
   const navigation: Array<[Page, string, string]> = [
-    ['overview', 'Overview', '◌'], ['chat', 'Chat', '✦'], ['memories', 'Memories', '◫'],
+    ['overview', 'Overview', '◌'], ['work', 'Work', '◉'], ['chat', 'Chat', '✦'], ['memories', 'Memories', '◫'],
     ['knowledge', 'Knowledge', '⌘'], ['activity', 'Activity', '↗'], ['connections', 'Connections', '◎'],
   ]
 
@@ -159,6 +162,7 @@ function Workspace({ onLogout }: { onLogout: () => void }) {
     <main className="main-stage">
       {error && <div className="toast-error">{error}<button onClick={() => setError(null)}>×</button></div>}
       {page === 'overview' && <Overview dashboard={dashboard} onNavigate={setPage} />}
+      {page === 'work' && <WorkPage api={api} />}
       {page === 'chat' && <Chat conversations={conversations} onRefresh={refresh} />}
       {page === 'memories' && <Memories />}
       {page === 'knowledge' && <Knowledge />}
@@ -177,7 +181,7 @@ function Overview({ dashboard, onNavigate }: { dashboard: Dashboard | null; onNa
     <section className="metric-grid">
       <Metric label="Memories" value={dashboard.stats.memories} detail={`${dashboard.stats.prompt_ready_memories} in active context`} mark="◫" />
       <Metric label="Knowledge" value={dashboard.stats.knowledge_nodes} detail={`${dashboard.stats.knowledge_edges} relationships`} mark="⌘" />
-      <Metric label="Current work" value={dashboard.stats.pending_tasks} detail="scheduled items" mark="◌" />
+      <Metric label="Current work" value={dashboard.stats.active_goals + dashboard.stats.active_runs} detail={`${dashboard.stats.active_runs} running · ${dashboard.stats.waiting_work + dashboard.stats.blocked_goals} need attention`} mark="◌" />
       <Metric label="Recent activity" value={dashboard.recent_activity.length} detail="latest moments" mark="↗" />
     </section>
     <div className="overview-grid">
@@ -223,6 +227,7 @@ function Chat({ conversations, onRefresh }: { conversations: Conversation[]; onR
   const [pendingActions, setPendingActions] = useState<PendingAction[]>([])
   const [actionError, setActionError] = useState<string | null>(null)
   const [runSteps, setRunSteps] = useState<RunStep[]>([])
+  const [activeRuns, setActiveRuns] = useState<WorkRun[]>([])
   const visibleMessages = useMemo(() => {
     const entries: Array<Message & { contextSources: string[] }> = []
     let pendingSources: string[] = []
@@ -247,12 +252,14 @@ function Chat({ conversations, onRefresh }: { conversations: Conversation[]; onR
   }, [messages])
 
   const refreshConversation = async (conversationId: string) => {
-    const [nextMessages, nextActions] = await Promise.all([
+    const [nextMessages, nextActions, nextWork] = await Promise.all([
       getMessages(api, conversationId, 100),
       listPendingActions(api, conversationId),
+      getWork(api, conversationId),
     ])
     setMessages(nextMessages)
     setPendingActions(nextActions)
+    setActiveRuns(nextWork.active_runs)
   }
 
   useEffect(() => {
@@ -260,14 +267,14 @@ function Chat({ conversations, onRefresh }: { conversations: Conversation[]; onR
   }, [activeId, conversations])
   useEffect(() => {
     if (activeId) void refreshConversation(activeId).catch(() => { setMessages([]); setPendingActions([]) })
-    else { setMessages([]); setPendingActions([]) }
+    else { setMessages([]); setPendingActions([]); setActiveRuns([]) }
   }, [activeId])
   useEffect(() => {
     if (!activeId) return
     const events = new WebSocket(buildWebSocketUrl(api, `/api/events?conversation_id=${encodeURIComponent(activeId)}`))
     events.onmessage = (event) => {
       const payload = JSON.parse(event.data) as { type?: string }
-      if (['action_approval_required', 'action_resolved', 'message_created'].includes(payload.type ?? '')) {
+      if (['action_approval_required', 'action_resolved', 'message_created', 'work_run_updated', 'work_step_updated', 'goal_updated'].includes(payload.type ?? '')) {
         void refreshConversation(activeId)
       }
     }
@@ -292,6 +299,12 @@ function Chat({ conversations, onRefresh }: { conversations: Conversation[]; onR
     socket.onmessage = (event) => {
       const payload = JSON.parse(event.data) as Record<string, unknown>
       if (payload.type === 'run_started' && typeof payload.conversation_id === 'string') { conversationId = payload.conversation_id; setActiveId(conversationId) }
+      if (payload.type === 'work_run_updated' && payload.run && typeof payload.run === 'object') {
+        const run = payload.run as WorkRun
+        setActiveRuns((runs) => ['queued', 'running', 'waiting_for_approval'].includes(run.status)
+          ? [...runs.filter((item) => item.id !== run.id), run]
+          : runs.filter((item) => item.id !== run.id))
+      }
       if (payload.type === 'assistant_thinking') setActivity('Jossie is considering the next step…')
       if (payload.type === 'capabilities_activated' && Array.isArray(payload.capabilities)) {
         const label = `Prepared ${payload.capabilities.join(', ')}`
@@ -343,7 +356,7 @@ function Chat({ conversations, onRefresh }: { conversations: Conversation[]; onR
       <aside className="thread-list"><p className="list-label">RECENT CONVERSATIONS</p>{conversations.map((conversation) => <button key={conversation.id} className={conversation.id === activeId ? 'thread selected' : 'thread'} onClick={() => setActiveId(conversation.id)}><strong>{conversation.title || 'Untitled conversation'}</strong><small>{relativeDate(conversation.updated_at)}</small></button>)}</aside>
       <div className="chat-panel">
         <div className="message-feed">{visibleMessages.length ? visibleMessages.map((message) => <article key={message.id} className={`message ${message.role}`}><span className="message-author">{message.role === 'user' ? 'You' : 'Jossie'}</span><div className="message-body"><ReactMarkdown>{message.content}</ReactMarkdown></div>{message.role === 'assistant' && message.contextSources.length > 0 && <details className="chat-context"><summary>Context used for this reply</summary><ul>{message.contextSources.map((source) => <li key={source}>{source}</li>)}</ul></details>}</article>) : <div className="chat-empty"><span className="brand-orb">J</span><h2>What’s on your mind?</h2><p>Jossie keeps the thread, the context, and the useful details together.</p></div>}</div>
-        <AgentRunStatus steps={runSteps} actions={pendingActions} onDecision={(action, approve) => void decide(action, approve)} />
+        <AgentRunStatus steps={runSteps} runs={activeRuns} actions={pendingActions} onDecision={(action, approve) => void decide(action, approve)} />
         {actionError && <p className="chat-action-error" role="alert">{actionError}</p>}
         <form className="composer-new" onSubmit={submit}><div className="attachment-row">{files.map((file) => <span key={file.id} className="attachment">{file.name}<button type="button" onClick={() => setFiles((prev) => prev.filter((item) => item.id !== file.id))}>×</button></span>)}</div><textarea value={input} onChange={(e) => setInput(e.target.value)} placeholder="Message Jossie…" rows={2} /><div className="composer-foot"><label className="attach-control">Attach<input type="file" onChange={(e) => void attach(e.target.files?.[0])} /></label><span>{activity}</span><button className="button primary" disabled={sending || !input.trim()}>{sending ? 'Working…' : 'Send'}</button></div></form>
         {sending && activeId && <button className="cancel-run" onClick={() => void cancelConversation(api, activeId)}>Stop current run</button>}

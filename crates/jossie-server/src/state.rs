@@ -49,12 +49,29 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub async fn publish_durable_event(&self, event: ServerEvent) {
+        crate::events::persist_activity_event(&self.db, &event).await;
+        let work_events = crate::events::persist_work_event(&self.db, &event).await;
+        let _ = self.event_tx.send(event);
+        for work_event in work_events {
+            let _ = self.event_tx.send(work_event);
+        }
+    }
+
     pub fn publish_event(&self, event: ServerEvent) {
         let activity_db = self.db.clone();
         let activity_event = event.clone();
+        let work_db = self.db.clone();
+        let work_event = event.clone();
+        let work_tx = self.event_tx.clone();
         let _ = self.event_tx.send(event);
         tokio::spawn(async move {
             crate::events::persist_activity_event(&activity_db, &activity_event).await;
+        });
+        tokio::spawn(async move {
+            for derived in crate::events::persist_work_event(&work_db, &work_event).await {
+                let _ = work_tx.send(derived);
+            }
         });
     }
 

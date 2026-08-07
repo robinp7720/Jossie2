@@ -192,6 +192,80 @@ async fn pending_actions_are_authenticated_and_empty_by_default() {
 }
 
 #[tokio::test]
+async fn work_summary_is_authenticated_and_empty_by_default() {
+    let app = setup_app().await;
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/work")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/work")
+                .header("Authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["goals"], serde_json::json!([]));
+    assert_eq!(value["active_runs"], serde_json::json!([]));
+    assert_eq!(value["recent_runs"], serde_json::json!([]));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/work/runs?kind=chat&status=completed")
+                .header("Authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["items"],
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
+async fn unknown_goal_and_run_return_not_found() {
+    let app = setup_app().await;
+    for uri in ["/api/goals/missing", "/api/work/runs/missing"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[tokio::test]
 async fn approving_an_unknown_action_is_not_found() {
     let app = setup_app().await;
     let response = app

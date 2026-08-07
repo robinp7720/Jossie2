@@ -1,4 +1,4 @@
-import type { PendingAction } from '../types'
+import type { PendingAction, WorkRun } from '../types'
 
 export type RunStep = {
   id: string
@@ -8,16 +8,21 @@ export type RunStep = {
 
 export function AgentRunStatus({
   steps,
+  runs = [],
   actions,
   onDecision,
 }: {
   steps: RunStep[]
+  runs?: WorkRun[]
   actions: PendingAction[]
   onDecision: (action: PendingAction, approve: boolean) => void
 }) {
   return <>
-    {steps.length > 0 && <div className="run-timeline" aria-label="Current run">
+    {(steps.length > 0 || runs.length > 0) && <div className="run-timeline" aria-label="Current run" aria-live="polite">
       <p>Jossie at work</p>
+      {runs.map((run) => <div key={run.id} className={`run-step ${run.status === 'waiting_for_approval' ? 'error' : 'running'}`}>
+        <i />{run.current_phase || run.summary}<span>{run.status === 'waiting_for_approval' ? 'Waiting for you' : run.cancel_requested ? 'Stopping' : 'Working'}</span>
+      </div>)}
       {steps.slice(-6).map((step) => <div key={step.id} className={`run-step ${step.status}`}>
         <i />{step.label}<span>{step.status === 'running' ? 'Working' : step.status === 'error' ? 'Needs attention' : 'Done'}</span>
       </div>)}

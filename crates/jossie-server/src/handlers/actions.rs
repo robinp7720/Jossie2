@@ -122,12 +122,14 @@ pub async fn decide_action_deferred(
             name: action.tool_name.clone(),
             arguments: action.arguments.clone(),
         };
-        state.publish_event(ServerEvent::ToolStarted {
-            conversation_id: action.conversation_id,
-            run_id: action.run_id.clone(),
-            call_id: action.call_id.clone(),
-            tool: action.tool_name.clone(),
-        });
+        state
+            .publish_durable_event(ServerEvent::ToolStarted {
+                conversation_id: action.conversation_id,
+                run_id: action.run_id.clone(),
+                call_id: action.call_id.clone(),
+                tool: action.tool_name.clone(),
+            })
+            .await;
         let result = state.registry.execute(&call).await;
         let status = if result.is_error {
             "failed"
@@ -140,14 +142,16 @@ pub async fn decide_action_deferred(
             .with_name(action.tool_name.clone());
         persist_message(&state, &tool_message).await?;
         state.db.resolve_pending_action(&id, status, error).await?;
-        state.publish_event(ServerEvent::ToolFinished {
-            conversation_id: action.conversation_id,
-            run_id: action.run_id.clone(),
-            call_id: action.call_id.clone(),
-            tool: action.tool_name.clone(),
-            result_preview: crate::events::preview_text(&result.content, 220),
-            is_error: result.is_error,
-        });
+        state
+            .publish_durable_event(ServerEvent::ToolFinished {
+                conversation_id: action.conversation_id,
+                run_id: action.run_id.clone(),
+                call_id: action.call_id.clone(),
+                tool: action.tool_name.clone(),
+                result_preview: crate::events::preview_text(&result.content, 220),
+                is_error: result.is_error,
+            })
+            .await;
         status
     } else {
         let output = "The user did not approve this action. Do not attempt it again unless they make a new explicit request.";
@@ -162,13 +166,15 @@ pub async fn decide_action_deferred(
         "rejected"
     };
 
-    state.publish_event(ServerEvent::ActionResolved {
-        conversation_id: action.conversation_id,
-        run_id: action.run_id.clone(),
-        action_id: action.id.clone(),
-        status: terminal_status.to_string(),
-        title: action.title.clone(),
-    });
+    state
+        .publish_durable_event(ServerEvent::ActionResolved {
+            conversation_id: action.conversation_id,
+            run_id: action.run_id.clone(),
+            action_id: action.id.clone(),
+            status: terminal_status.to_string(),
+            title: action.title.clone(),
+        })
+        .await;
     let batch_resolved = state
         .db
         .pending_action_batch_is_resolved(&action.batch_id)

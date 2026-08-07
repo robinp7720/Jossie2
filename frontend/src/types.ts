@@ -134,7 +134,98 @@ export type ScheduledTask = {
   schedule_value: string
   status: string
   next_run_at: string | null
+  last_run_at?: string | null
+  run_count?: number
+  max_runs?: number | null
+  last_error?: string | null
 }
+
+export type GoalTask = {
+  id: string
+  goal_id: string
+  position: number
+  title: string
+  status: 'pending' | 'in_progress' | 'waiting' | 'blocked' | 'completed' | 'failed' | 'cancelled' | string
+  summary?: string | null
+  blocker?: string | null
+  source_type?: string | null
+  source_id?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type Goal = {
+  id: string
+  conversation_id?: string | null
+  title: string
+  objective: string
+  status: 'active' | 'paused' | 'blocked' | 'completed' | 'cancelled' | string
+  blocker?: string | null
+  archived_at?: string | null
+  created_at: string
+  updated_at: string
+  tasks: GoalTask[]
+  completed_tasks: number
+  total_tasks: number
+}
+
+export type WorkRun = {
+  id: string
+  goal_id?: string | null
+  task_id?: string | null
+  conversation_id?: string | null
+  kind: string
+  source_type?: string | null
+  source_id?: string | null
+  status: 'queued' | 'running' | 'waiting_for_approval' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | string
+  summary: string
+  current_phase?: string | null
+  error?: string | null
+  visibility: string
+  cancel_requested: boolean
+  started_at?: string | null
+  finished_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type WorkRunStep = {
+  id: string
+  run_id: string
+  sequence: number
+  kind: string
+  label: string
+  status: string
+  summary?: string | null
+  error?: string | null
+  started_at: string
+  finished_at?: string | null
+}
+
+export type WorkerStatus = {
+  worker_key: string
+  label: string
+  status: 'idle' | 'running' | 'degraded' | 'disabled' | string
+  current_run_id?: string | null
+  detail?: string | null
+  last_started_at?: string | null
+  last_success_at?: string | null
+  last_error_at?: string | null
+  last_error?: string | null
+  updated_at: string
+}
+
+export type WorkSummary = {
+  goals: Goal[]
+  active_runs: WorkRun[]
+  recent_runs: WorkRun[]
+  workers: WorkerStatus[]
+  scheduled_tasks: ScheduledTask[]
+  chat_imports: ChatImport[]
+}
+
+export type GoalDetail = Goal & { runs: WorkRun[] }
+export type WorkRunDetail = WorkRun & { steps: WorkRunStep[] }
 
 export type Dashboard = {
   stats: {
@@ -143,6 +234,10 @@ export type Dashboard = {
     knowledge_nodes: number
     knowledge_edges: number
     pending_tasks: number
+    active_goals: number
+    active_runs: number
+    waiting_work: number
+    blocked_goals: number
   }
   recent_memories: Memory[]
   recent_activity: ActivityEvent[]

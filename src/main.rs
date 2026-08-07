@@ -42,6 +42,16 @@ async fn main() -> Result<()> {
     tracing::info!("Connecting to database...");
     let db = Database::new(&config.database.url).await?;
     db.migrate().await?;
+    let interrupted_runs = db.mark_running_work_interrupted().await?;
+    if interrupted_runs > 0 {
+        tracing::warn!("Marked {interrupted_runs} interrupted work run(s) after restart");
+    }
+    let interrupted_schedules = db.mark_running_scheduled_tasks_interrupted().await?;
+    if interrupted_schedules > 0 {
+        tracing::warn!(
+            "Marked {interrupted_schedules} interrupted scheduled task(s) as failed without retrying"
+        );
+    }
     let interrupted_actions = db.mark_interrupted_actions_uncertain().await?;
     if interrupted_actions > 0 {
         tracing::warn!(

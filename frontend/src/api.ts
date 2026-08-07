@@ -1,4 +1,4 @@
-import type { Account, ActivityEvent, ChatImport, Conversation, Dashboard, Memory, Message, OnboardingStatus, PendingAction } from './types'
+import type { Account, ActivityEvent, ChatImport, Conversation, Dashboard, Goal, GoalDetail, Memory, Message, OnboardingStatus, PendingAction, WorkRun, WorkRunDetail, WorkSummary } from './types'
 
 export type ApiConfig = {
   baseUrl: string
@@ -224,3 +224,30 @@ export const rejectAction = (config: ApiConfig, actionId: string) =>
   request<{ action_id: string; status: string }>(config, `/api/actions/${actionId}/reject`, {
     method: 'POST',
   })
+
+export const getWork = (config: ApiConfig, conversationId?: string, includeQuiet = false) =>
+  request<WorkSummary>(config, `/api/work?include_quiet=${includeQuiet}${conversationId ? `&conversation_id=${encodeURIComponent(conversationId)}` : ''}`)
+
+export const getGoal = (config: ApiConfig, goalId: string) =>
+  request<GoalDetail>(config, `/api/goals/${encodeURIComponent(goalId)}`)
+
+export const updateGoal = (config: ApiConfig, goalId: string, payload: { title?: string; archived?: boolean }) =>
+  request<Goal>(config, `/api/goals/${encodeURIComponent(goalId)}`, { method: 'PATCH', body: JSON.stringify(payload) })
+
+export const controlGoal = (config: ApiConfig, goalId: string, action: 'pause' | 'resume' | 'cancel') =>
+  request<Goal>(config, `/api/goals/${encodeURIComponent(goalId)}/${action}`, { method: 'POST' })
+
+export const getWorkRun = (config: ApiConfig, runId: string) =>
+  request<WorkRunDetail>(config, `/api/work/runs/${encodeURIComponent(runId)}`)
+
+export const listWorkRuns = (config: ApiConfig, filters: { before?: string; kind?: string; status?: string; includeQuiet?: boolean } = {}) => {
+  const query = new URLSearchParams()
+  if (filters.before) query.set('before', filters.before)
+  if (filters.kind) query.set('kind', filters.kind)
+  if (filters.status) query.set('status', filters.status)
+  if (filters.includeQuiet) query.set('include_quiet', 'true')
+  return request<{ items: WorkRun[]; next_cursor: string | null }>(config, `/api/work/runs?${query.toString()}`)
+}
+
+export const cancelWorkRun = (config: ApiConfig, runId: string) =>
+  request<WorkRun>(config, `/api/work/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })

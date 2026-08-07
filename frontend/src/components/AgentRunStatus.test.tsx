@@ -32,4 +32,20 @@ describe('AgentRunStatus', () => {
     expect(screen.getByText('Verify this action manually before retrying.')).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
   })
+
+  it('restores persisted run progress after a refresh', () => {
+    render(<AgentRunStatus
+      steps={[]}
+      runs={[{
+        id: 'run-1', conversation_id: 'conversation-1', kind: 'chat', status: 'running',
+        summary: 'Conversation request', current_phase: 'Checking the calendar',
+        visibility: 'significant', cancel_requested: false,
+        created_at: '2026-08-07T12:00:00Z', updated_at: '2026-08-07T12:00:01Z',
+      }]}
+      actions={[]}
+      onDecision={() => undefined}
+    />)
+    expect(screen.getByText('Checking the calendar')).toBeTruthy()
+    expect(screen.getByText('Working')).toBeTruthy()
+  })
 })
