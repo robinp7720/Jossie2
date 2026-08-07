@@ -202,6 +202,8 @@ url = "sqlite:jossie.db?mode=rwc"
 [telegram]
 bot_token = "your-bot-token"
 allowed_user_id = 123456789  # Optional: restrict to one user
+max_download_bytes = 20000000
+ffmpeg_path = "ffmpeg"       # Required for Telegram voice notes
 ```
 
 #### Email (Optional)
@@ -235,6 +237,8 @@ You can override any config value with environment variables:
 - `JOSSIE_LLM_API_KEY`
 - `JOSSIE_LLM_SYSTEM_PROMPT`
 - `JOSSIE_TELEGRAM_BOT_TOKEN`
+- `JOSSIE_TELEGRAM_MAX_DOWNLOAD_BYTES`, `JOSSIE_TELEGRAM_FFMPEG_PATH`
+- `JOSSIE_LLM_TRANSCRIPTION_MODEL`, `JOSSIE_LLM_MAX_ATTACHMENT_BYTES_PER_REQUEST`
 - `JOSSIE_EMAIL_USERNAME`, `JOSSIE_EMAIL_PASSWORD`
 - `JOSSIE_GOOGLE_CLIENT_ID`, `JOSSIE_GOOGLE_CLIENT_SECRET`
 
@@ -329,7 +333,20 @@ Jossie can run as a Telegram bot:
 3. Optionally set `allowed_user_id` to restrict access
 4. Run Jossie—the bot starts automatically
 
-Telegram conversations are stored in the database like any other conversation.
+Telegram conversations are stored in the database like any other conversation. The bot is
+designed for private chats and supports text, photo albums, PDFs and common office/text/code
+documents, voice notes, and uploaded audio. Voice notes use the configured FFmpeg executable
+to convert Telegram's OGG/Opus recording before transcription.
+
+While Jossie is thinking or using tools, Telegram's native typing status is refreshed until the
+reply is ready. Long replies are split safely, and actions that require consent are shown with
+Approve/Reject buttons while still accepting clear typed decisions.
+
+Commands:
+
+- `/start` and `/help` show usage
+- `/new` starts a fresh linked conversation
+- `/cancel` requests cancellation of the current run
 
 ## 🧪 Development
 

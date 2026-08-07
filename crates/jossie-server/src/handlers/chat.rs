@@ -50,12 +50,12 @@ async fn get_or_create_conversation_id(
 }
 
 #[derive(Clone, Copy)]
-enum PendingReply {
+pub enum PendingReply {
     Approve,
     Reject,
 }
 
-fn pending_reply(message: &str, action_count: usize) -> Option<PendingReply> {
+pub fn pending_reply(message: &str, action_count: usize) -> Option<PendingReply> {
     let normalized = message
         .trim()
         .to_lowercase()
@@ -148,6 +148,7 @@ pub async fn chat_handler(
                     name: record.name,
                     mime_type: record.mime_type,
                     size: record.size,
+                    data: None,
                 });
             }
         }
@@ -290,6 +291,7 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
                         name: record.name,
                         mime_type: record.mime_type,
                         size: record.size,
+                        data: None,
                     });
                 }
             }

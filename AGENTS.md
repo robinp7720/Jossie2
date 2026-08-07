@@ -38,7 +38,7 @@ Jossie2/
 | `jossie-llm` | Non-streaming and streaming Responses API client |
 | `jossie-db` | Conversations, messages, memory, graph, accounts, events, scheduler, OOB queue |
 | `jossie-server` | Authenticated REST + WS API, static frontend hosting, agent loop |
-| `jossie-telegram` | Real Telegram chat frontend backed by the shared agent loop |
+| `jossie-telegram` | Private Telegram frontend with media, voice transcription, approvals, commands, and sustained typing status |
 | `integration-memory` | `memory_save`, `memory_search`, `memory_list_keys`, `memory_list_all` |
 | `integration-graph` | graph node/edge mutation and query tools |
 | `integration-email` | account listing, IMAP search/read, SMTP send, folder listing |
@@ -175,6 +175,10 @@ Environment overrides implemented in [`src/main.rs`](/home/robin/Development/07-
 - `JOSSIE_LLM_MAX_CONTEXT_MESSAGES`
 - `JOSSIE_LLM_EVENT_MAX_CONTEXT_MESSAGES`
 - `JOSSIE_TELEGRAM_BOT_TOKEN`
+- `JOSSIE_TELEGRAM_MAX_DOWNLOAD_BYTES`
+- `JOSSIE_TELEGRAM_FFMPEG_PATH`
+- `JOSSIE_LLM_TRANSCRIPTION_MODEL`
+- `JOSSIE_LLM_MAX_ATTACHMENT_BYTES_PER_REQUEST`
 - `JOSSIE_EMAIL_USERNAME`
 - `JOSSIE_EMAIL_PASSWORD`
 - `JOSSIE_EMAIL_IMAP_HOST`
@@ -200,7 +204,7 @@ Other runtime knobs worth knowing:
 | Browser | Implemented | headless page reading and search; useful for JS-heavy pages |
 | HTTP | Implemented | outbound requests with host/IP validation and optional allow-list |
 | Scheduler | Implemented | scheduled agent runs + queued user notifications |
-| Telegram | Implemented | teloxide bot, chat linking, message splitting, background task trigger path |
+| Telegram | Implemented | private-chat bot, chat linking, typing status, commands, media/albums, voice transcription, approvals, proactive delivery |
 
 ## Testing And Build
 

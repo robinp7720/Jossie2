@@ -408,6 +408,7 @@ impl Database {
                             name: f.name,
                             mime_type: f.mime_type,
                             size: f.size,
+                            data: None,
                         })
                         .collect(),
                 );
@@ -2026,6 +2027,14 @@ impl Database {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(Into::into))
+    }
+
+    pub async fn delete_file_record(&self, id: &Uuid) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM files WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn list_files_for_conversation(

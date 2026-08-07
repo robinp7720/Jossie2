@@ -22,6 +22,14 @@ pub struct ActionDecisionResponse {
     status: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct DeferredActionDecision {
+    pub response: ActionDecisionResponse,
+    pub conversation_id: Uuid,
+    pub batch_id: String,
+    pub batch_resolved: bool,
+}
+
 pub async fn list_pending_actions(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PendingActionQuery>,
@@ -66,6 +74,18 @@ pub async fn decide_action(
     id: String,
     approve: bool,
 ) -> Result<ActionDecisionResponse, AppError> {
+    let outcome = decide_action_deferred(state.clone(), id, approve).await?;
+    if outcome.batch_resolved {
+        resume_batch_when_ready(state, outcome.batch_id, outcome.conversation_id);
+    }
+    Ok(outcome.response)
+}
+
+pub async fn decide_action_deferred(
+    state: Arc<AppState>,
+    id: String,
+    approve: bool,
+) -> Result<DeferredActionDecision, AppError> {
     let action = match state.db.claim_pending_action(&id).await? {
         Some(action) => action,
         None => {
@@ -78,9 +98,16 @@ pub async fn decide_action(
                 existing.status.as_str(),
                 "completed" | "failed" | "rejected" | "uncertain"
             ) {
-                return Ok(ActionDecisionResponse {
-                    action_id: existing.id,
-                    status: existing.status,
+                return Ok(DeferredActionDecision {
+                    response: ActionDecisionResponse {
+                        action_id: existing.id,
+                        status: existing.status,
+                    },
+                    conversation_id: existing.conversation_id,
+                    batch_id: existing.batch_id,
+                    // This request did not resolve anything, so callers must not
+                    // resume an already-finished batch a second time.
+                    batch_resolved: false,
                 });
             }
             return Err(AppError::conflict(anyhow::anyhow!(
@@ -142,10 +169,18 @@ pub async fn decide_action(
         status: terminal_status.to_string(),
         title: action.title.clone(),
     });
-    resume_batch_when_ready(state, action.batch_id, action.conversation_id);
+    let batch_resolved = state
+        .db
+        .pending_action_batch_is_resolved(&action.batch_id)
+        .await?;
 
-    Ok(ActionDecisionResponse {
-        action_id: action.id,
-        status: terminal_status.to_string(),
+    Ok(DeferredActionDecision {
+        response: ActionDecisionResponse {
+            action_id: action.id,
+            status: terminal_status.to_string(),
+        },
+        conversation_id: action.conversation_id,
+        batch_id: action.batch_id,
+        batch_resolved,
     })
 }

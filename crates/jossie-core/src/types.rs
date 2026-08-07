@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -47,6 +48,10 @@ pub struct Attachment {
     pub name: String,
     pub mime_type: Option<String>,
     pub size: i64,
+    /// File bytes hydrated only for the current model request. This is never
+    /// serialized to API clients or persisted in message JSON.
+    #[serde(skip, default)]
+    pub data: Option<Arc<[u8]>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

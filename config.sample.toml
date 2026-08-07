@@ -197,6 +197,13 @@ max_context_chars = 120000
 context_compact_target_chars = 80000
 context_keep_recent_dialogue_messages = 12
 
+# Recorded voice/audio model. Set to an empty string to disable transcription.
+transcription_model = "gpt-transcribe"
+
+# Maximum combined attachment bytes hydrated into one model request.
+# Newest attachments are preferred when conversation history exceeds this budget.
+max_attachment_bytes_per_request = 26214400
+
 # ----------------------------------------------------------------------------
 # DATABASE CONFIGURATION
 # ----------------------------------------------------------------------------
@@ -219,6 +226,14 @@ bot_token = ""
 # Find your user ID: https://t.me/userinfobot
 # Leave commented out to allow any user to chat with the bot
 # allowed_user_id = 123456789
+
+# Telegram's hosted Bot API currently limits downloads to 20 MB.
+# Lower this value if you want a stricter local limit; larger values are clamped.
+max_download_bytes = 20000000
+
+# Required for Telegram OGG/Opus voice notes. Supported uploaded audio formats
+# are sent directly to the transcription endpoint when possible.
+ffmpeg_path = "ffmpeg"
 
 # ----------------------------------------------------------------------------
 # EMAIL CONFIGURATION (Optional)

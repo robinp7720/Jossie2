@@ -36,6 +36,7 @@ async fn main() -> Result<()> {
     // Override secrets from environment variables
     override_config_from_env(&mut config);
     validate_llm_config(&mut config);
+    validate_telegram_config(&mut config);
     validate_heartbeat_config(&mut config);
 
     tracing::info!("Connecting to database...");
@@ -58,6 +59,8 @@ async fn main() -> Result<()> {
     llm.set_reasoning_context(config.llm.reasoning_context.clone());
     llm.set_enable_web_search(config.llm.enable_web_search);
     llm.set_service_tier(config.llm.service_tier.clone());
+    llm.set_transcription_model(config.llm.transcription_model.clone());
+    llm.set_max_attachment_bytes_per_request(config.llm.max_attachment_bytes_per_request);
 
     // Initialize KG LLM client - use cheaper model if configured, otherwise use primary model
     let kg_llm = if let Some(kg_model) = &config.llm.kg_model {
@@ -180,9 +183,12 @@ async fn main() -> Result<()> {
         max_context_chars: config.llm.max_context_chars,
         context_compact_target_chars: config.llm.context_compact_target_chars,
         context_keep_recent_dialogue_messages: config.llm.context_keep_recent_dialogue_messages,
+        max_attachment_bytes_per_request: config.llm.max_attachment_bytes_per_request,
         google_config: config.google.clone(),
         google_integration,
         telegram_token: config.telegram.bot_token.clone(),
+        telegram_max_download_bytes: config.telegram.max_download_bytes,
+        telegram_ffmpeg_path: config.telegram.ffmpeg_path.clone(),
         enable_self_reflection: config.llm.enable_self_reflection,
         heartbeat_enabled: config.heartbeat.enabled,
         heartbeat_interval_secs: config.heartbeat.interval_seconds,
@@ -233,6 +239,8 @@ fn validate_llm_config(config: &mut AppConfig) {
     const MIN_EVENT_CONTEXT_MESSAGES: usize = 8;
     const MIN_CONTEXT_CHARS: usize = 20_000;
     const MIN_RECENT_DIALOGUE_MESSAGES: usize = 4;
+    const MIN_ATTACHMENT_BYTES: usize = 1024 * 1024;
+    const MAX_ATTACHMENT_BYTES: usize = 50_000_000;
 
     if config.llm.max_context_messages < MIN_CHAT_CONTEXT_MESSAGES {
         tracing::warn!(
@@ -271,6 +279,19 @@ fn validate_llm_config(config: &mut AppConfig) {
         .llm
         .context_keep_recent_dialogue_messages
         .max(MIN_RECENT_DIALOGUE_MESSAGES);
+    config.llm.max_attachment_bytes_per_request = config
+        .llm
+        .max_attachment_bytes_per_request
+        .clamp(MIN_ATTACHMENT_BYTES, MAX_ATTACHMENT_BYTES);
+
+    if let Some(model) = &mut config.llm.transcription_model {
+        let normalized = model.trim().to_string();
+        if normalized.is_empty() {
+            config.llm.transcription_model = None;
+        } else {
+            *model = normalized;
+        }
+    }
 
     if let Some(service_tier) = &mut config.llm.service_tier {
         let normalized = service_tier.trim().to_string();
@@ -288,6 +309,17 @@ fn validate_llm_config(config: &mut AppConfig) {
         } else if normalized != *reasoning_context {
             *reasoning_context = normalized;
         }
+    }
+}
+
+fn validate_telegram_config(config: &mut AppConfig) {
+    config.telegram.max_download_bytes = config
+        .telegram
+        .max_download_bytes
+        .clamp(1, jossie_core::config::DEFAULT_TELEGRAM_MAX_DOWNLOAD_BYTES);
+    config.telegram.ffmpeg_path = config.telegram.ffmpeg_path.trim().to_string();
+    if config.telegram.ffmpeg_path.is_empty() {
+        config.telegram.ffmpeg_path = "ffmpeg".to_string();
     }
 }
 
@@ -365,8 +397,24 @@ fn override_config_from_env(config: &mut AppConfig) {
             config.llm.context_keep_recent_dialogue_messages = parsed;
         }
     }
+    if let Ok(val) = env::var("JOSSIE_LLM_TRANSCRIPTION_MODEL") {
+        config.llm.transcription_model = Some(val);
+    }
+    if let Ok(val) = env::var("JOSSIE_LLM_MAX_ATTACHMENT_BYTES_PER_REQUEST") {
+        if let Ok(parsed) = val.parse::<usize>() {
+            config.llm.max_attachment_bytes_per_request = parsed;
+        }
+    }
     if let Ok(val) = env::var("JOSSIE_TELEGRAM_BOT_TOKEN") {
         config.telegram.bot_token = val.trim().to_string();
+    }
+    if let Ok(val) = env::var("JOSSIE_TELEGRAM_MAX_DOWNLOAD_BYTES") {
+        if let Ok(parsed) = val.parse::<usize>() {
+            config.telegram.max_download_bytes = parsed;
+        }
+    }
+    if let Ok(val) = env::var("JOSSIE_TELEGRAM_FFMPEG_PATH") {
+        config.telegram.ffmpeg_path = val;
     }
 
     // Email

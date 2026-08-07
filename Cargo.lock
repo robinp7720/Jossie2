@@ -2043,6 +2043,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
+ "base64",
  "chrono",
  "futures",
  "jossie-core",
@@ -2092,6 +2094,7 @@ name = "jossie-telegram"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "jossie-core",
  "jossie-db",

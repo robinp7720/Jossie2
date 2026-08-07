@@ -41,6 +41,7 @@ async fn setup_app() -> axum::Router {
         max_context_chars: 120_000,
         context_compact_target_chars: 80_000,
         context_keep_recent_dialogue_messages: 12,
+        max_attachment_bytes_per_request: 25 * 1024 * 1024,
         google_config: jossie_core::config::GoogleConfig {
             client_id: "".to_string(),
             client_secret: "".to_string(),
@@ -49,6 +50,8 @@ async fn setup_app() -> axum::Router {
         },
         google_integration: None,
         telegram_token: "".to_string(),
+        telegram_max_download_bytes: 20_000_000,
+        telegram_ffmpeg_path: "ffmpeg".to_string(),
         enable_self_reflection: false,
         heartbeat_enabled: false,
         heartbeat_interval_secs: 14_400,

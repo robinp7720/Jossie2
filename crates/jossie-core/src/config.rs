@@ -1,6 +1,8 @@
 use serde::Deserialize;
 
 pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 25 * 1024 * 1024;
+pub const DEFAULT_MAX_ATTACHMENT_BYTES_PER_REQUEST: usize = 25 * 1024 * 1024;
+pub const DEFAULT_TELEGRAM_MAX_DOWNLOAD_BYTES: usize = 20_000_000;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
@@ -107,6 +109,18 @@ pub struct LlmConfig {
     pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub reasoning_context: Option<String>,
+    #[serde(default = "default_transcription_model")]
+    pub transcription_model: Option<String>,
+    #[serde(default = "default_max_attachment_bytes_per_request")]
+    pub max_attachment_bytes_per_request: usize,
+}
+
+fn default_transcription_model() -> Option<String> {
+    Some("gpt-transcribe".to_string())
+}
+
+fn default_max_attachment_bytes_per_request() -> usize {
+    DEFAULT_MAX_ATTACHMENT_BYTES_PER_REQUEST
 }
 
 fn default_max_context_messages() -> usize {
@@ -231,12 +245,35 @@ pub struct DatabaseConfig {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TelegramConfig {
     #[serde(default)]
     pub bot_token: String,
     #[serde(default)]
     pub allowed_user_id: Option<i64>,
+    #[serde(default = "default_telegram_max_download_bytes")]
+    pub max_download_bytes: usize,
+    #[serde(default = "default_telegram_ffmpeg_path")]
+    pub ffmpeg_path: String,
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            bot_token: String::new(),
+            allowed_user_id: None,
+            max_download_bytes: default_telegram_max_download_bytes(),
+            ffmpeg_path: default_telegram_ffmpeg_path(),
+        }
+    }
+}
+
+fn default_telegram_max_download_bytes() -> usize {
+    DEFAULT_TELEGRAM_MAX_DOWNLOAD_BYTES
+}
+
+fn default_telegram_ffmpeg_path() -> String {
+    "ffmpeg".to_string()
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

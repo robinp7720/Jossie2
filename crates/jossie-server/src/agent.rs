@@ -570,9 +570,18 @@ async fn build_system_prompt(
     }
 
     if !files.is_empty() {
-        dynamic.push_str("\n\n## Attached Files\nThe following files are shared in this conversation. Use `read_file` or `ingest_chat_export` to access them:\n");
+        dynamic.push_str("\n\n## Attached Files\nSupported images and documents are included directly while they remain in the model attachment budget. Use `read_file` for UTF-8 text or `ingest_chat_export` for chat exports. Audio is represented by its transcript in the user message:\n");
         for file in files {
-            dynamic.push_str(&format!("- `{}` (ID: {})\n", file.name, file.id));
+            let kind = if file
+                .mime_type
+                .as_deref()
+                .is_some_and(|mime| mime.starts_with("audio/"))
+            {
+                "audio; see transcript"
+            } else {
+                "attachment"
+            };
+            dynamic.push_str(&format!("- `{}` (ID: {}; {})\n", file.name, file.id, kind));
         }
     }
 
@@ -883,6 +892,7 @@ async fn prepare_run_context(
         state.context_compact_target_chars,
         state.context_keep_recent_dialogue_messages,
     );
+    hydrate_attachment_payloads(state, &mut messages).await;
     let prompt_cache_key =
         prepend_system_prompt(state, Some(conv_id), &mut messages, Some(&last_user_msg)).await;
     if options.scheduled_execution {
@@ -900,6 +910,86 @@ async fn prepare_run_context(
         if state.enable_self_reflection { 1 } else { 0 },
         prompt_cache_key,
     ))
+}
+
+async fn hydrate_attachment_payloads(state: &AppState, messages: &mut [Message]) {
+    let mut remaining = state.max_attachment_bytes_per_request;
+    for attachment in messages
+        .iter_mut()
+        .rev()
+        .filter_map(|message| message.attachments.as_mut())
+        .flat_map(|attachments| attachments.iter_mut().rev())
+    {
+        if remaining == 0 || !model_supports_attachment(attachment) {
+            continue;
+        }
+        let Ok(size) = usize::try_from(attachment.size) else {
+            continue;
+        };
+        if size > remaining {
+            continue;
+        }
+        let record = match state.db.get_file_record(&attachment.id).await {
+            Ok(Some(record)) => record,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(attachment_id = %attachment.id, "Failed to load attachment metadata: {error}");
+                continue;
+            }
+        };
+        match tokio::fs::read(&record.path).await {
+            Ok(data) if data.len() <= remaining => {
+                remaining -= data.len();
+                attachment.data = Some(std::sync::Arc::from(data));
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                attachment_id = %attachment.id,
+                "Failed to hydrate attachment bytes: {error}"
+            ),
+        }
+    }
+}
+
+fn model_supports_attachment(attachment: &jossie_core::types::Attachment) -> bool {
+    let mime = attachment.mime_type.as_deref().unwrap_or_default();
+    if matches!(
+        mime,
+        "image/jpeg"
+            | "image/png"
+            | "image/webp"
+            | "image/gif"
+            | "application/pdf"
+            | "application/json"
+            | "application/xml"
+    ) || mime.starts_with("text/")
+    {
+        return true;
+    }
+    let extension = std::path::Path::new(&attachment.name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "jpg"
+            | "jpeg"
+            | "png"
+            | "webp"
+            | "gif"
+            | "pdf"
+            | "doc"
+            | "docx"
+            | "rtf"
+            | "odt"
+            | "ppt"
+            | "pptx"
+            | "csv"
+            | "tsv"
+            | "xls"
+            | "xlsx"
+    )
 }
 
 fn inject_goal_tracking_message(messages: &mut Vec<Message>, goal_tracker: &GoalTracker) {

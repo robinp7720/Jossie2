@@ -1,6 +1,7 @@
 .idea
 .vite
 /target
+/uploads/
 *.swp
 *.swo
 .env
