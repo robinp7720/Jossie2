@@ -4,13 +4,17 @@ use jossie_server::handlers::chat::{PendingReply, pending_reply};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use teloxide::RequestError;
+use teloxide::errors::ApiError;
 use teloxide::net::Download;
 use teloxide::prelude::*;
 use teloxide::types::{
     CallbackQuery, ChatAction, FileId, InlineKeyboardButton, InlineKeyboardMarkup, MessageId,
     ReplyParameters,
 };
+use teloxide::update_listeners::{self, UpdateListener};
 use teloxide::utils::command::BotCommands;
 use tokio::sync::{Mutex, oneshot};
 use uuid::Uuid;
@@ -158,9 +162,46 @@ impl TelegramBot {
         tracing::info!(instance_id = %Uuid::new_v4(), "Starting Telegram bot");
         bot.delete_webhook().await?;
         bot.set_my_commands(Command::bot_commands()).await?;
-        Dispatcher::builder(bot, handler).build().dispatch().await;
+
+        let mut listener = update_listeners::polling_default(bot.clone()).await;
+        let stop_token = listener.stop_token();
+        let polling_conflict = Arc::new(AtomicBool::new(false));
+        let conflict_seen = polling_conflict.clone();
+        let listener_error_handler = Arc::new(move |error: RequestError| {
+            let stop_token = stop_token.clone();
+            let conflict_seen = conflict_seen.clone();
+            async move {
+                if is_polling_conflict(&error) {
+                    conflict_seen.store(true, Ordering::Release);
+                    tracing::error!(
+                        "Telegram polling stopped because another process is using this bot token; stop the other bot instance or configure a unique token"
+                    );
+                    stop_token.stop();
+                } else {
+                    tracing::warn!(error = ?error, "Telegram update listener error; polling will retry");
+                }
+            }
+        });
+
+        Dispatcher::builder(bot, handler)
+            .build()
+            .dispatch_with_listener(listener, listener_error_handler)
+            .await;
+
+        if polling_conflict.load(Ordering::Acquire) {
+            anyhow::bail!(
+                "another Telegram getUpdates consumer is using this bot token; only one polling instance may run"
+            );
+        }
         Ok(())
     }
+}
+
+fn is_polling_conflict(error: &RequestError) -> bool {
+    matches!(
+        error,
+        RequestError::Api(ApiError::TerminatedByOtherGetUpdates)
+    )
 }
 
 async fn queue_album(
@@ -1183,6 +1224,16 @@ fn split_message(text: &str, max_chars: usize) -> Vec<String> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn identifies_competing_get_updates_as_a_terminal_polling_conflict() {
+        assert!(is_polling_conflict(&RequestError::Api(
+            ApiError::TerminatedByOtherGetUpdates
+        )));
+        assert!(!is_polling_conflict(&RequestError::Api(
+            ApiError::InvalidToken
+        )));
+    }
 
     #[test]
     fn split_message_uses_character_limit_and_word_boundaries() {
