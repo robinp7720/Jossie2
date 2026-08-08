@@ -419,6 +419,16 @@ impl Database {
         blocker: Option<&str>,
     ) -> anyhow::Result<GoalTask> {
         let now = Utc::now().to_rfc3339();
+        if let Some(id) = id
+            && let Some(existing_goal_id) =
+                sqlx::query_scalar::<_, String>("SELECT goal_id FROM goal_tasks WHERE id = ?")
+                    .bind(id)
+                    .fetch_optional(&self.pool)
+                    .await?
+            && existing_goal_id != goal_id
+        {
+            anyhow::bail!("Task belongs to a different goal");
+        }
         let id = id
             .map(str::to_string)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -1170,5 +1180,43 @@ mod tests {
             .unwrap();
         assert_eq!(checkpoint.run_id, run.id);
         assert!(checkpoint.state_json.contains("List every expenditure"));
+    }
+
+    #[tokio::test]
+    async fn task_id_cannot_be_reused_by_a_different_goal() {
+        let db = test_db().await;
+        let first = db
+            .create_goal(
+                None,
+                "First",
+                "First objective",
+                &["First task".to_string()],
+            )
+            .await
+            .unwrap();
+        let second = db
+            .create_goal(None, "Second", "Second objective", &[])
+            .await
+            .unwrap();
+
+        let error = db
+            .upsert_goal_task(
+                &second.goal.id,
+                Some(&first.tasks[0].id),
+                0,
+                "Foreign task",
+                "completed",
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("different goal"));
+        assert!(
+            db.list_goal_tasks(&second.goal.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

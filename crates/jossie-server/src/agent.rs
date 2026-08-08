@@ -48,6 +48,7 @@ impl PromptMemoryScope {
 struct GoalTracker {
     primary_goal: String,
     durable_goal: Option<jossie_db::GoalWithTasks>,
+    locked_goal_id: Option<String>,
     completed_steps: Vec<String>,
     observations: Vec<String>,
     last_tool_batch_signature: Option<String>,
@@ -69,6 +70,7 @@ impl GoalTracker {
         Self {
             primary_goal: goal,
             durable_goal: None,
+            locked_goal_id: None,
             completed_steps: Vec::new(),
             observations: Vec::new(),
             last_tool_batch_signature: None,
@@ -213,8 +215,12 @@ impl GoalTracker {
         let mut msg = format!("## Task State\nObjective: {}\n", self.primary_goal);
         if let Some(goal) = &self.durable_goal {
             msg.push_str(&format!(
-                "Tracked goal: {} ({}/{}) [{}]\n",
-                goal.goal.title, goal.completed_tasks, goal.total_tasks, goal.goal.status
+                "Tracked goal: id={} {} ({}/{}) [{}]\n",
+                goal.goal.id,
+                goal.goal.title,
+                goal.completed_tasks,
+                goal.total_tasks,
+                goal.goal.status
             ));
             for task in &goal.tasks {
                 msg.push_str(&format!(
@@ -227,6 +233,9 @@ impl GoalTracker {
                 msg.push('\n');
             }
             msg.push_str("Update this plan with update_work_plan when an outcome starts, completes, fails, or becomes blocked. Tool execution alone is not outcome completion.\n");
+            if self.locked_goal_id.is_some() {
+                msg.push_str("This run is locked to the tracked goal above. Update that goal only; never create a replacement goal.\n");
+            }
         }
         if !self.completed_steps.is_empty() {
             msg.push_str("Recent completed checks:\n");
@@ -1051,7 +1060,20 @@ async fn prepare_run_context(
     }
 
     let mut goal_tracker = GoalTracker::new(&last_user_msg);
-    goal_tracker.durable_goal = state.db.get_active_goal_for_conversation(conv_id).await?;
+    goal_tracker.locked_goal_id = options.goal_id.clone();
+    goal_tracker.durable_goal = if let Some(goal_id) = options.goal_id.as_deref() {
+        let goal = state
+            .db
+            .get_goal_with_tasks(goal_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Tracked goal disappeared before the run started"))?;
+        if goal.goal.conversation_id.as_deref() != Some(&conv_id.to_string()) {
+            anyhow::bail!("Tracked goal belongs to a different conversation");
+        }
+        Some(goal)
+    } else {
+        state.db.get_active_goal_for_conversation(conv_id).await?
+    };
 
     Ok((
         toolset,
@@ -1452,7 +1474,14 @@ async fn process_work_plan_updates(
         {
             anyhow::bail!("A tracked goal needs a title, objective, and at least one task");
         }
-        let goal_id = if let Some(goal_id) = args.goal_id.as_deref() {
+        if args.tasks.iter().any(|task| task.title.trim().is_empty()) {
+            anyhow::bail!("Task titles cannot be empty");
+        }
+        let requested_goal_id = effective_plan_goal_id(
+            goal_tracker.locked_goal_id.as_deref(),
+            args.goal_id.as_deref(),
+        );
+        let goal_id = if let Some(goal_id) = requested_goal_id {
             let existing = state
                 .db
                 .get_goal(goal_id)
@@ -1474,28 +1503,33 @@ async fn process_work_plan_updates(
                 .await?;
             goal_id.to_string()
         } else {
-            state
+            let goal = state
                 .db
                 .create_goal(Some(conv_id), args.title.trim(), args.objective.trim(), &[])
-                .await?
-                .goal
-                .id
+                .await?;
+            state
+                .db
+                .update_goal_metadata(
+                    &goal.goal.id,
+                    None,
+                    None,
+                    Some(&args.goal_status),
+                    Some(args.blocker.as_deref()),
+                    None,
+                )
+                .await?;
+            goal.goal.id
         };
 
         let existing_tasks = state.db.list_goal_tasks(&goal_id).await?;
         for (position, task) in args.tasks.iter().enumerate() {
-            if task.title.trim().is_empty() {
-                anyhow::bail!("Task titles cannot be empty");
-            }
+            let requested_task_id =
+                effective_plan_task_id(task.id.as_deref(), &existing_tasks, position);
             state
                 .db
                 .upsert_goal_task(
                     &goal_id,
-                    task.id.as_deref().or_else(|| {
-                        existing_tasks
-                            .get(position)
-                            .map(|existing| existing.id.as_str())
-                    }),
+                    requested_task_id,
                     position as i64,
                     task.title.trim(),
                     &task.status,
@@ -1577,6 +1611,27 @@ async fn process_work_plan_updates(
     }
     goal_tracker.record_tool_calls(tool_calls);
     Ok(true)
+}
+
+fn effective_plan_goal_id<'a>(
+    locked: Option<&'a str>,
+    requested: Option<&'a str>,
+) -> Option<&'a str> {
+    locked.or(requested)
+}
+
+fn effective_plan_task_id<'a>(
+    requested: Option<&'a str>,
+    existing_tasks: &'a [jossie_db::GoalTask],
+    position: usize,
+) -> Option<&'a str> {
+    requested
+        .filter(|task_id| {
+            existing_tasks
+                .iter()
+                .any(|existing| existing.id == *task_id)
+        })
+        .or_else(|| existing_tasks.get(position).map(|task| task.id.as_str()))
 }
 
 fn contains_action_term(text: &str, terms: &[&str]) -> bool {
@@ -5400,6 +5455,40 @@ mod tests {
         assert!(!tracker.should_stop_for_repetition());
         assert!(tracker.note_tool_batch(&calls).is_some());
         assert!(tracker.should_stop_for_repetition());
+    }
+
+    #[test]
+    fn resumed_plan_updates_stay_locked_to_the_original_goal() {
+        assert_eq!(
+            effective_plan_goal_id(Some("original"), None),
+            Some("original")
+        );
+        assert_eq!(
+            effective_plan_goal_id(Some("original"), Some("replacement")),
+            Some("original")
+        );
+
+        let mut tracker = GoalTracker::new("continue");
+        tracker.locked_goal_id = Some("original".to_string());
+        tracker.durable_goal = Some(jossie_db::GoalWithTasks {
+            goal: jossie_db::Goal {
+                id: "original".to_string(),
+                conversation_id: None,
+                title: "Original goal".to_string(),
+                objective: "Finish it".to_string(),
+                status: "active".to_string(),
+                blocker: None,
+                archived_at: None,
+                created_at: "now".to_string(),
+                updated_at: "now".to_string(),
+            },
+            tasks: Vec::new(),
+            completed_tasks: 0,
+            total_tasks: 0,
+        });
+        let tracking = tracker.build_tracking_message();
+        assert!(tracking.contains("id=original"));
+        assert!(tracking.contains("never create a replacement goal"));
     }
 
     #[test]
