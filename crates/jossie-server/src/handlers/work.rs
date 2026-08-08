@@ -223,7 +223,7 @@ async fn control_goal(
                     ..crate::agent::AgentRunOptions::default()
                 };
                 if let Err(error) =
-                    crate::agent::run_agent_loop_with_options(&state, conversation_id, options)
+                    crate::agent::run_agent_loop_when_available(&state, conversation_id, options)
                         .await
                 {
                     tracing::warn!("Resumed goal {goal_id} did not complete: {error}");
@@ -234,7 +234,9 @@ async fn control_goal(
                             None,
                             None,
                             Some("paused"),
-                            Some(Some("Resume attempt failed; checkpoint remains available")),
+                            Some(Some(
+                                "Resume attempt could not start; use Continue now to retry",
+                            )),
                             None,
                         )
                         .await;

@@ -24,6 +24,8 @@ const MAX_EVENT_PROMPT_MEMORY_MATCHES: usize = 4;
 const LOOP_GUARD_WARN_THRESHOLD: usize = 2;
 const LOOP_GUARD_STOP_THRESHOLD: usize = 3;
 const PREMATURE_GOAL_FINAL_LIMIT: usize = 3;
+const CONVERSATION_BUSY_RETRY_ATTEMPTS: usize = 30;
+const CONVERSATION_BUSY_RETRY_DELAY_MS: u64 = 500;
 const LIVE_STANCE_MESSAGE_WINDOW: usize = 6;
 const REFLECTION_CONTEXT_WINDOW: usize = 4;
 
@@ -1989,6 +1991,32 @@ pub async fn run_agent_loop_with_options(
             anyhow::bail!("Agent loop panicked: {panic_message}")
         }
     }
+}
+
+pub async fn run_agent_loop_when_available(
+    state: &AppState,
+    conv_id: Uuid,
+    options: AgentRunOptions,
+) -> anyhow::Result<String> {
+    for attempt in 0..CONVERSATION_BUSY_RETRY_ATTEMPTS {
+        match run_agent_loop_with_options(state, conv_id, options.clone()).await {
+            Ok(response) => return Ok(response),
+            Err(error)
+                if error.to_string().contains("already being processed")
+                    && attempt + 1 < CONVERSATION_BUSY_RETRY_ATTEMPTS =>
+            {
+                if attempt == 0 {
+                    tracing::info!(
+                        conversation_id = %conv_id,
+                        "Waiting for current conversation work before resuming its goal"
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(CONVERSATION_BUSY_RETRY_DELAY_MS)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the resume retry loop always returns")
 }
 
 fn initial_llm_request_options(

@@ -637,7 +637,7 @@ async fn continue_tracked_goal(
         .iter()
         .find(|task| !matches!(task.status.as_str(), "completed" | "cancelled"))
         .map(|task| task.id.clone());
-    let result = jossie_server::agent::run_agent_loop_with_options(
+    let result = jossie_server::agent::run_agent_loop_when_available(
         state,
         conversation_id,
         jossie_server::agent::AgentRunOptions {
