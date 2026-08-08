@@ -83,7 +83,7 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
-dotenvy = "0.15"
+dotenvy = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
@@ -92,7 +92,7 @@ jossie-db = { workspace = true }
 jossie-llm = { workspace = true }
 jossie-server = { workspace = true }
 jossie-integration-memory = { workspace = true }
-jossie-integration-files = { path = "crates/jossie-integration-files" }
+jossie-integration-files = { workspace = true }
 jossie-integration-email = { workspace = true }
 jossie-integration-mail = { workspace = true }
 jossie-integration-google = { workspace = true }

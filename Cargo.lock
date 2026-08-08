@@ -1886,7 +1886,6 @@ dependencies = [
  "headless_chrome",
  "html2text",
  "jossie-core",
- "jossie-db",
  "reqwest",
  "scraper",
  "serde",

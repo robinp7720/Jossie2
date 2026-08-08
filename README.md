@@ -142,7 +142,7 @@ The server will start on `http://0.0.0.0:3000` by default.
 1. **Access the Web UI**: Navigate to `http://localhost:3000` in your browser
 2. **Authenticate**: Use the `auth_token` from your `config.toml`
 3. **Chat with Jossie**: Start a conversation!
-4. **View Knowledge Graph**: Visit `http://localhost:3000/graph` to visualize relationships
+4. **View Knowledge Graph**: Open the Knowledge page in the authenticated web UI
 
 ### Terminal Chat Helper
 
@@ -385,8 +385,6 @@ See [AGENTS.md](AGENTS.md) for detailed development guidelines.
 
 - **[AGENTS.md](AGENTS.md)** - Developer guide, architecture, conventions
 - **[WEB_API.md](WEB_API.md)** - HTTP/WebSocket API reference
-- **[KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md)** - Knowledge graph implementation details
-- **[FUTURE_INTEGRATIONS.md](FUTURE_INTEGRATIONS.md)** - Roadmap for future integrations
 - **[config.sample.toml](config.sample.toml)** - Annotated configuration example
 
 ## 🛣️ Roadmap
@@ -412,8 +410,6 @@ See [AGENTS.md](AGENTS.md) for detailed development guidelines.
 - 🔲 Local filesystem access
 - 🔲 Database query interface
 - 🔲 Comprehensive test suite
-
-See [FUTURE_INTEGRATIONS.md](FUTURE_INTEGRATIONS.md) for the full roadmap.
 
 ## 🐳 Docker Deployment
 
