@@ -34,6 +34,8 @@ enum Command {
     New,
     #[command(description = "stop the current run")]
     Cancel,
+    #[command(description = "show what we're currently working on")]
+    Status,
     #[command(description = "resume the latest safely paused goal")]
     Resume,
 }
@@ -268,7 +270,7 @@ async fn handle_command(
 ) {
     match command {
         Command::Start | Command::Help => {
-            let text = "Send me a message, photo, document, voice note, or audio file.\n\n/new — start a fresh conversation\n/cancel — stop the current run\n/resume — continue paused work\n/help — show this message";
+            let text = "Send me a message, photo, document, voice note, or audio file.\n\n/status — see what we're working on\n/new — start a fresh conversation\n/cancel — stop the current run\n/resume — continue paused work\n/help — show this message";
             let _ = send_reply(&bot, msg.chat.id, Some(msg.id), text, None).await;
         }
         Command::New => {
@@ -345,6 +347,33 @@ async fn handle_command(
                 let _ = send_generic_error(&bot, &msg).await;
             }
         },
+        Command::Status => {
+            let reply = match state.db.get_telegram_conversation(msg.chat.id.0).await {
+                Ok(Some(conversation_id)) => match state
+                    .db
+                    .list_active_goals_for_conversation(conversation_id)
+                    .await
+                {
+                    Ok(goals) => conversational_goals_status(&goals),
+                    Err(error) => {
+                        tracing::error!(
+                            chat_id = msg.chat.id.0,
+                            "Failed to load Telegram goal status: {error}"
+                        );
+                        "I couldn't check our ongoing work just now.".to_string()
+                    }
+                },
+                Ok(None) => "I don't have any ongoing work in this conversation yet.".to_string(),
+                Err(error) => {
+                    tracing::error!(
+                        chat_id = msg.chat.id.0,
+                        "Failed to inspect Telegram conversation: {error}"
+                    );
+                    "I couldn't check our ongoing work just now.".to_string()
+                }
+            };
+            let _ = send_reply(&bot, msg.chat.id, Some(msg.id), &reply, None).await;
+        }
         Command::Resume => {
             if !try_activate_chat(&runtime, msg.chat.id.0).await {
                 let _ = send_reply(
@@ -361,6 +390,7 @@ async fn handle_command(
             let reply_to = msg.id;
             let numeric_chat_id = msg.chat.id.0;
             tokio::spawn(async move {
+                let typing = spawn_typing(bot.clone(), chat_id);
                 let result: anyhow::Result<String> = async {
                     let conversation_id = state
                         .db
@@ -373,20 +403,6 @@ async fn handle_command(
                         .await?
                         .filter(|goal| goal.goal.status == "paused")
                         .ok_or_else(|| anyhow::anyhow!("No paused goal is available"))?;
-                    let checkpoint = state
-                        .db
-                        .latest_available_checkpoint_for_goal(&goal.goal.id)
-                        .await?
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("No continuation checkpoint is available")
-                        })?;
-                    if !state
-                        .db
-                        .set_goal_control_state(&goal.goal.id, "resume")
-                        .await?
-                    {
-                        anyhow::bail!("The goal can no longer be resumed");
-                    }
                     let message = JossieMessage::new(
                         conversation_id,
                         Role::User,
@@ -394,32 +410,84 @@ async fn handle_command(
                     )
                     .with_name("goal_resume".to_string());
                     state.db.save_message(&message).await?;
-                    let task_id = goal
-                        .tasks
-                        .iter()
-                        .find(|task| !matches!(task.status.as_str(), "completed" | "cancelled"))
-                        .map(|task| task.id.clone());
-                    jossie_server::agent::run_agent_loop_with_options(
-                        &state,
-                        conversation_id,
-                        jossie_server::agent::AgentRunOptions {
-                            goal_id: Some(goal.goal.id),
-                            task_id,
-                            work_summary: Some(goal.goal.title),
-                            resume_checkpoint_run_id: Some(checkpoint.run_id),
-                            ..jossie_server::agent::AgentRunOptions::default()
-                        },
-                    )
-                    .await
+                    continue_tracked_goal(&state, conversation_id, &goal, true).await
                 }
                 .await;
                 let reply = match result {
                     Ok(response) => response,
-                    Err(error) => error.to_string(),
+                    Err(error) => conversational_resume_error(&error),
                 };
+                let _ = typing.send(());
                 let _ = send_reply(&bot, chat_id, Some(reply_to), &reply, None).await;
                 release_chat(&runtime, numeric_chat_id).await;
             });
+        }
+    }
+}
+
+async fn continue_tracked_goal(
+    state: &Arc<AppState>,
+    conversation_id: Uuid,
+    goal: &jossie_db::GoalWithTasks,
+    require_checkpoint: bool,
+) -> anyhow::Result<String> {
+    let checkpoint = if require_checkpoint {
+        Some(
+            state
+                .db
+                .latest_available_checkpoint_for_goal(&goal.goal.id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("No continuation checkpoint is available"))?,
+        )
+    } else {
+        None
+    };
+    if !state
+        .db
+        .set_goal_control_state(&goal.goal.id, "resume")
+        .await?
+    {
+        anyhow::bail!("The goal can no longer be resumed");
+    }
+    let task_id = goal
+        .tasks
+        .iter()
+        .find(|task| !matches!(task.status.as_str(), "completed" | "cancelled"))
+        .map(|task| task.id.clone());
+    let result = jossie_server::agent::run_agent_loop_with_options(
+        state,
+        conversation_id,
+        jossie_server::agent::AgentRunOptions {
+            goal_id: Some(goal.goal.id.clone()),
+            task_id,
+            work_summary: Some(goal.goal.title.clone()),
+            resume_checkpoint_run_id: checkpoint.map(|checkpoint| checkpoint.run_id),
+            ..jossie_server::agent::AgentRunOptions::default()
+        },
+    )
+    .await;
+    match result {
+        Ok(response) => {
+            let after = state.db.get_goal_with_tasks(&goal.goal.id).await?;
+            Ok(with_conversational_goal_update(
+                response,
+                Some(goal),
+                after.as_ref(),
+            ))
+        }
+        Err(error) => {
+            let _ = state
+                .db
+                .update_goal_metadata(
+                    &goal.goal.id,
+                    None,
+                    None,
+                    Some(&goal.goal.status),
+                    Some(goal.goal.blocker.as_deref()),
+                    None,
+                )
+                .await;
+            Err(error)
         }
     }
 }
@@ -501,10 +569,22 @@ async fn process_turn_inner(
                 keyboard: None,
             });
         }
+        let goal_before = state
+            .db
+            .get_active_goal_for_conversation(conversation_id)
+            .await?;
         let response = jossie_server::run_agent_loop(state, conversation_id).await?;
+        let goal_after = goal_after_run(state, conversation_id, goal_before.as_ref()).await?;
         let remaining = pending_actions(state, conversation_id).await?;
         return Ok(TurnResult::Reply {
-            text: approval_text(response, &remaining),
+            text: approval_text(
+                with_conversational_goal_update(
+                    response,
+                    goal_before.as_ref(),
+                    goal_after.as_ref(),
+                ),
+                &remaining,
+            ),
             keyboard: (!remaining.is_empty()).then(|| pending_keyboard(&remaining)),
         });
     }
@@ -544,7 +624,20 @@ async fn process_turn_inner(
         cleanup_local_media(state, &local_media).await;
         return Err(error);
     }
-    let response = jossie_server::run_agent_loop(state, conversation_id).await?;
+    let goal_before = state
+        .db
+        .get_active_goal_for_conversation(conversation_id)
+        .await?;
+    let response = if let Some(goal) = goal_before.as_ref().filter(|goal| {
+        matches!(goal.goal.status.as_str(), "paused" | "blocked")
+            && should_continue_tracked_goal(goal, &user_message.content, !local_media.is_empty())
+    }) {
+        continue_tracked_goal(state, conversation_id, goal, goal.goal.status == "paused").await?
+    } else {
+        let response = jossie_server::run_agent_loop(state, conversation_id).await?;
+        let goal_after = goal_after_run(state, conversation_id, goal_before.as_ref()).await?;
+        with_conversational_goal_update(response, goal_before.as_ref(), goal_after.as_ref())
+    };
     let pending = pending_actions(state, conversation_id).await?;
     Ok(TurnResult::Reply {
         text: approval_text(response, &pending),
@@ -602,6 +695,244 @@ fn approval_text(response: String, actions: &[jossie_db::PendingAction]) -> Stri
         .collect::<Vec<_>>()
         .join("\n");
     format!("{response}\n\nPending actions:\n{details}")
+}
+
+async fn goal_after_run(
+    state: &AppState,
+    conversation_id: Uuid,
+    before: Option<&jossie_db::GoalWithTasks>,
+) -> anyhow::Result<Option<jossie_db::GoalWithTasks>> {
+    if let Some(active) = state
+        .db
+        .get_active_goal_for_conversation(conversation_id)
+        .await?
+    {
+        return Ok(Some(active));
+    }
+    match before {
+        Some(goal) => state.db.get_goal_with_tasks(&goal.goal.id).await,
+        None => Ok(None),
+    }
+}
+
+fn with_conversational_goal_update(
+    response: String,
+    before: Option<&jossie_db::GoalWithTasks>,
+    after: Option<&jossie_db::GoalWithTasks>,
+) -> String {
+    if !goal_state_changed(before, after) {
+        return response;
+    }
+    let Some(after) = after else {
+        return response;
+    };
+    let status = conversational_goal_status(Some(after));
+    if response.trim().is_empty() {
+        status
+    } else {
+        format!("{}\n\n{}", response.trim_end(), status)
+    }
+}
+
+fn goal_state_changed(
+    before: Option<&jossie_db::GoalWithTasks>,
+    after: Option<&jossie_db::GoalWithTasks>,
+) -> bool {
+    match (before, after) {
+        (None, Some(_)) | (Some(_), None) => true,
+        (None, None) => false,
+        (Some(before), Some(after)) => {
+            before.goal.id != after.goal.id
+                || before.goal.status != after.goal.status
+                || before.goal.blocker != after.goal.blocker
+                || before.completed_tasks != after.completed_tasks
+                || before.total_tasks != after.total_tasks
+                || before
+                    .tasks
+                    .iter()
+                    .map(|task| (&task.id, &task.status, &task.blocker))
+                    .ne(after
+                        .tasks
+                        .iter()
+                        .map(|task| (&task.id, &task.status, &task.blocker)))
+        }
+    }
+}
+
+fn conversational_goal_status(goal: Option<&jossie_db::GoalWithTasks>) -> String {
+    let Some(goal) = goal else {
+        return "I don't have any ongoing work at the moment.".to_string();
+    };
+    let title = &goal.goal.title;
+    let progress = if goal.total_tasks == 0 {
+        String::new()
+    } else {
+        format!(
+            " I've finished {} of {} parts.",
+            goal.completed_tasks, goal.total_tasks
+        )
+    };
+    let next = goal
+        .tasks
+        .iter()
+        .find(|task| {
+            matches!(
+                task.status.as_str(),
+                "in_progress" | "waiting" | "blocked" | "pending"
+            )
+        })
+        .map(|task| task.title.as_str());
+    match goal.goal.status.as_str() {
+        "blocked" => {
+            let blocker = goal
+                .goal
+                .blocker
+                .as_deref()
+                .or_else(|| {
+                    goal.tasks
+                        .iter()
+                        .find(|task| task.status == "blocked")
+                        .and_then(|task| task.blocker.as_deref())
+                })
+                .unwrap_or("I need one more piece of information before I can continue");
+            format!(
+                "I've kept our place on “{title}”.{progress} I'm waiting on: {} Once you send that, I can pick it up from there.",
+                jossie_server::events::preview_text(blocker, 320)
+            )
+        }
+        "paused" => format!(
+            "I've saved my place on “{title}”.{progress} Just say “continue” whenever you want me to pick it back up."
+        ),
+        "completed" => format!("That also finishes “{title}”.{progress}"),
+        "cancelled" => format!("I've stopped working on “{title}”."),
+        _ => match next {
+            Some(next) => format!("I'm keeping track of “{title}”.{progress} Next up: {next}."),
+            None => format!("I'm keeping track of “{title}”.{progress}"),
+        },
+    }
+}
+
+fn conversational_goals_status(goals: &[jossie_db::GoalWithTasks]) -> String {
+    if goals.is_empty() {
+        return conversational_goal_status(None);
+    }
+    if goals.len() == 1 {
+        return conversational_goal_status(goals.first());
+    }
+    let details = goals
+        .iter()
+        .map(|goal| {
+            let progress = if goal.total_tasks == 0 {
+                String::new()
+            } else {
+                format!(
+                    " — {}/{} parts done",
+                    goal.completed_tasks, goal.total_tasks
+                )
+            };
+            let state = match goal.goal.status.as_str() {
+                "blocked" => goal
+                    .goal
+                    .blocker
+                    .as_deref()
+                    .map(|blocker| {
+                        format!(
+                            "; waiting on {}",
+                            jossie_server::events::preview_text(blocker, 180)
+                        )
+                    })
+                    .unwrap_or_else(|| "; waiting for more information".to_string()),
+                "paused" => "; I've saved my place and can continue when you say so".to_string(),
+                _ => goal
+                    .tasks
+                    .iter()
+                    .find(|task| matches!(task.status.as_str(), "in_progress" | "pending"))
+                    .map(|task| format!("; next is {}", task.title))
+                    .unwrap_or_default(),
+            };
+            format!("• {}{progress}{state}", goal.goal.title)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "I'm keeping track of {} things with you:\n{details}",
+        goals.len()
+    )
+}
+
+fn should_continue_tracked_goal(
+    goal: &jossie_db::GoalWithTasks,
+    content: &str,
+    has_attachment: bool,
+) -> bool {
+    if has_attachment {
+        return true;
+    }
+    let normalized = content
+        .trim()
+        .trim_matches(|character: char| character.is_ascii_punctuation())
+        .to_ascii_lowercase();
+    let explicit = matches!(
+        normalized.as_str(),
+        "continue"
+            | "resume"
+            | "go on"
+            | "keep going"
+            | "carry on"
+            | "pick it up"
+            | "please continue"
+            | "yes continue"
+            | "yes, continue"
+    ) || (!normalized.contains("don't continue")
+        && !normalized.contains("do not continue")
+        && ["continue", "resume", "keep going", "carry on"]
+            .iter()
+            .any(|phrase| normalized.starts_with(phrase) || normalized.ends_with(phrase)));
+    if explicit {
+        return true;
+    }
+    if goal.goal.status != "blocked" {
+        return false;
+    }
+    let mut blocker_text = goal.goal.blocker.clone().unwrap_or_default();
+    for task in goal.tasks.iter().filter(|task| task.status == "blocked") {
+        blocker_text.push(' ');
+        blocker_text.push_str(task.blocker.as_deref().unwrap_or(&task.title));
+    }
+    blocker_text
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|word| {
+            word.len() >= 4
+                && !matches!(
+                    word.as_str(),
+                    "that"
+                        | "this"
+                        | "with"
+                        | "from"
+                        | "more"
+                        | "need"
+                        | "send"
+                        | "once"
+                        | "before"
+                        | "continue"
+                        | "information"
+                )
+        })
+        .any(|word| normalized.contains(&word))
+}
+
+fn conversational_resume_error(error: &anyhow::Error) -> String {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("no paused goal") {
+        "I don't have paused work to continue right now.".to_string()
+    } else if message.contains("checkpoint") {
+        "I can see the paused work, but its saved continuation is no longer available. Tell me what you want to pick up and I'll reconstruct it from our conversation.".to_string()
+    } else if message.contains("already") || message.contains("can no longer be resumed") {
+        "That work is already being continued or has changed since you asked.".to_string()
+    } else {
+        "I couldn't pick that work back up just now. I've kept its previous state so we can try again.".to_string()
+    }
 }
 
 async fn handle_callback(
@@ -665,8 +996,24 @@ async fn handle_callback(
                 let _ = edit.reply_markup(pending_keyboard(&remaining)).await;
             }
             if outcome.batch_resolved {
+                let goal_before = state
+                    .db
+                    .get_active_goal_for_conversation(outcome.conversation_id)
+                    .await
+                    .ok()
+                    .flatten();
                 match jossie_server::run_agent_loop(&state, outcome.conversation_id).await {
                     Ok(response) => {
+                        let goal_after =
+                            goal_after_run(&state, outcome.conversation_id, goal_before.as_ref())
+                                .await
+                                .ok()
+                                .flatten();
+                        let response = with_conversational_goal_update(
+                            response,
+                            goal_before.as_ref(),
+                            goal_after.as_ref(),
+                        );
                         let pending = pending_actions(&state, outcome.conversation_id)
                             .await
                             .unwrap_or_default();
@@ -1227,6 +1574,7 @@ fn command_from_message(msg: &teloxide::types::Message) -> Option<Command> {
         "/help" => Some(Command::Help),
         "/new" => Some(Command::New),
         "/cancel" => Some(Command::Cancel),
+        "/status" | "/goals" => Some(Command::Status),
         "/resume" => Some(Command::Resume),
         _ => None,
     }
@@ -1304,6 +1652,38 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    fn sample_goal(status: &str, completed: bool) -> jossie_db::GoalWithTasks {
+        let task_status = if completed { "completed" } else { "blocked" };
+        jossie_db::GoalWithTasks {
+            goal: jossie_db::Goal {
+                id: "goal-1".to_string(),
+                conversation_id: None,
+                title: "Finish the expense review".to_string(),
+                objective: "List every expense".to_string(),
+                status: status.to_string(),
+                blocker: (status == "blocked").then(|| "the July bank export".to_string()),
+                archived_at: None,
+                created_at: "now".to_string(),
+                updated_at: "now".to_string(),
+            },
+            tasks: vec![jossie_db::GoalTask {
+                id: "task-1".to_string(),
+                goal_id: "goal-1".to_string(),
+                position: 0,
+                title: "Match the remaining transactions".to_string(),
+                status: task_status.to_string(),
+                summary: None,
+                blocker: (!completed).then(|| "the July bank export".to_string()),
+                source_type: None,
+                source_id: None,
+                created_at: "now".to_string(),
+                updated_at: "now".to_string(),
+            }],
+            completed_tasks: usize::from(completed),
+            total_tasks: 1,
+        }
+    }
+
     #[test]
     fn identifies_competing_get_updates_as_a_terminal_polling_conflict() {
         assert!(is_polling_conflict(&RequestError::Api(
@@ -1343,6 +1723,75 @@ mod tests {
         let id = Uuid::new_v4().to_string();
         assert!(format!("pa:y:{id}").len() <= 64);
         assert!(format!("pa:n:{id}").len() <= 64);
+    }
+
+    #[test]
+    fn goal_status_reads_like_conversation_not_internal_state() {
+        let goal = sample_goal("blocked", false);
+        let status = conversational_goal_status(Some(&goal));
+        assert!(status.contains("I've kept our place"));
+        assert!(status.contains("the July bank export"));
+        assert!(status.contains("Once you send that"));
+        assert!(!status.contains("goal_id"));
+        assert!(!status.contains("blocked:"));
+    }
+
+    #[test]
+    fn status_can_summarize_more_than_one_ongoing_goal() {
+        let blocked = sample_goal("blocked", false);
+        let mut active = sample_goal("active", false);
+        active.goal.id = "goal-2".to_string();
+        active.goal.title = "Plan the trip".to_string();
+        let status = conversational_goals_status(&[blocked, active]);
+        assert!(status.contains("2 things"));
+        assert!(status.contains("Finish the expense review"));
+        assert!(status.contains("Plan the trip"));
+    }
+
+    #[test]
+    fn meaningful_goal_changes_are_added_to_the_chat_reply_once() {
+        let before = sample_goal("active", false);
+        let after = sample_goal("blocked", false);
+        let reply = with_conversational_goal_update(
+            "I found most of the transactions.".to_string(),
+            Some(&before),
+            Some(&after),
+        );
+        assert!(reply.starts_with("I found most of the transactions."));
+        assert!(reply.contains("I've kept our place"));
+
+        let unchanged = with_conversational_goal_update(
+            "Still checking.".to_string(),
+            Some(&after),
+            Some(&after),
+        );
+        assert_eq!(unchanged, "Still checking.");
+    }
+
+    #[test]
+    fn natural_continuation_and_requested_files_resume_work() {
+        let goal = sample_goal("blocked", false);
+        assert!(should_continue_tracked_goal(&goal, "continue", false));
+        assert!(should_continue_tracked_goal(
+            &goal,
+            "Please continue!",
+            false
+        ));
+        assert!(should_continue_tracked_goal(
+            &goal,
+            "here is the bank export",
+            false
+        ));
+        assert!(should_continue_tracked_goal(
+            &goal,
+            "here is the export",
+            true
+        ));
+        assert!(!should_continue_tracked_goal(
+            &goal,
+            "what is the weather?",
+            false
+        ));
     }
 
     #[tokio::test]

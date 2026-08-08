@@ -203,6 +203,37 @@ impl Database {
         }))
     }
 
+    pub async fn list_active_goals_for_conversation(
+        &self,
+        conversation_id: Uuid,
+    ) -> anyhow::Result<Vec<GoalWithTasks>> {
+        let goals = sqlx::query_as::<_, Goal>(
+            "SELECT id, conversation_id, title, objective, status, blocker, archived_at, created_at, updated_at
+             FROM goals
+             WHERE conversation_id = ? AND archived_at IS NULL AND status IN ('active','blocked','paused')
+             ORDER BY updated_at DESC",
+        )
+        .bind(conversation_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut result = Vec::with_capacity(goals.len());
+        for goal in goals {
+            let tasks = self.list_goal_tasks(&goal.id).await?;
+            let completed_tasks = tasks
+                .iter()
+                .filter(|task| task.status == "completed")
+                .count();
+            let total_tasks = tasks.len();
+            result.push(GoalWithTasks {
+                goal,
+                tasks,
+                completed_tasks,
+                total_tasks,
+            });
+        }
+        Ok(result)
+    }
+
     pub async fn link_work_run_goal(
         &self,
         run_id: &str,
