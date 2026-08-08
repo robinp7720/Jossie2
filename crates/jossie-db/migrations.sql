@@ -268,6 +268,12 @@ CREATE TABLE IF NOT EXISTS work_run_checkpoints (
 CREATE INDEX IF NOT EXISTS idx_work_run_checkpoints_goal_status
     ON work_run_checkpoints(goal_id, status, updated_at DESC);
 
+CREATE TABLE IF NOT EXISTS telegram_goal_notifications (
+    goal_id TEXT PRIMARY KEY REFERENCES goals(id) ON DELETE CASCADE,
+    fingerprint TEXT NOT NULL,
+    notified_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS worker_status (
     worker_key TEXT PRIMARY KEY,
     label TEXT NOT NULL,

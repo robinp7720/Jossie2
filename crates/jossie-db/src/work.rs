@@ -897,6 +897,37 @@ impl Database {
         Ok(created)
     }
 
+    pub async fn telegram_goal_notification_fingerprint(
+        &self,
+        goal_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT fingerprint FROM telegram_goal_notifications WHERE goal_id = ?",
+        )
+        .bind(goal_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn mark_telegram_goal_notification(
+        &self,
+        goal_id: &str,
+        fingerprint: &str,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO telegram_goal_notifications (goal_id, fingerprint, notified_at)
+             VALUES (?, ?, ?)
+             ON CONFLICT(goal_id) DO UPDATE SET fingerprint=excluded.fingerprint,
+             notified_at=excluded.notified_at",
+        )
+        .bind(goal_id)
+        .bind(fingerprint)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn upsert_worker_status(
         &self,
         key: &str,
@@ -1323,6 +1354,41 @@ mod tests {
         assert_eq!(
             db.get_goal(&goal.goal.id).await.unwrap().unwrap().status,
             "active"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_goal_notification_fingerprint_is_durable() {
+        let db = test_db().await;
+        let goal = db
+            .create_goal(None, "Notify me", "Surface blockers", &[])
+            .await
+            .unwrap();
+        assert!(
+            db.telegram_goal_notification_fingerprint(&goal.goal.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        db.mark_telegram_goal_notification(&goal.goal.id, "blocked:v1")
+            .await
+            .unwrap();
+        assert_eq!(
+            db.telegram_goal_notification_fingerprint(&goal.goal.id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("blocked:v1")
+        );
+        db.mark_telegram_goal_notification(&goal.goal.id, "completed:v2")
+            .await
+            .unwrap();
+        assert_eq!(
+            db.telegram_goal_notification_fingerprint(&goal.goal.id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("completed:v2")
         );
     }
 }
