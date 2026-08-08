@@ -174,7 +174,10 @@ pub fn tool_metadata(tool_name: &str, arguments: &str) -> ToolMetadata {
         "browser_fill_input" | "browser_click" | "browser_select_option" => {
             ToolMetadata::action(CapabilityGroup::Web, ToolEffect::ExternalWrite)
         }
-        "schedule_task" | "schedule_recurring_task" | "schedule_cron_task" | "send_user_message" => {
+        "schedule_task"
+        | "schedule_recurring_task"
+        | "schedule_cron_task"
+        | "send_user_message" => {
             ToolMetadata::action(CapabilityGroup::Scheduler, ToolEffect::ExternalWrite)
         }
         "cancel_scheduled_task" => {
@@ -467,7 +470,7 @@ impl IntegrationRegistry {
         };
 
         const MAX_RETRIES: usize = 2;
-        const MAX_OUTPUT_SIZE: usize = 100_000;
+        const MAX_OUTPUT_SIZE: usize = 32_000;
         let backoff_ms = [500, 1000];
 
         let mut last_error = String::new();
@@ -484,7 +487,7 @@ impl IntegrationRegistry {
                 .await
             {
                 Ok(content) => {
-                    let original_len = content.len();
+                    let original_len = content.chars().count();
                     let mut final_content = content;
 
                     if original_len > MAX_OUTPUT_SIZE {
@@ -494,7 +497,7 @@ impl IntegrationRegistry {
                             original_len,
                             MAX_OUTPUT_SIZE
                         );
-                        final_content.truncate(MAX_OUTPUT_SIZE);
+                        final_content = final_content.chars().take(MAX_OUTPUT_SIZE).collect();
                         final_content.push_str(&format!(
                             "\n\n[NOTICE: Output truncated to {} characters for efficiency. Original size: {} chars. If essential information is missing, please try a more specific query.]",
                             MAX_OUTPUT_SIZE,

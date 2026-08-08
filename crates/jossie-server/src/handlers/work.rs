@@ -171,6 +171,7 @@ async fn control_goal(
                 .as_deref()
                 .and_then(|value| Uuid::parse_str(value).ok())
         {
+            let checkpoint = state.db.latest_available_checkpoint_for_goal(id).await?;
             let state = Arc::clone(state);
             let goal_id = id.to_string();
             let task_id = goal_with_tasks
@@ -200,6 +201,7 @@ async fn control_goal(
                     goal_id: Some(goal_id.clone()),
                     task_id,
                     work_summary: Some(title),
+                    resume_checkpoint_run_id: checkpoint.map(|item| item.run_id),
                     ..crate::agent::AgentRunOptions::default()
                 };
                 if let Err(error) =
@@ -207,6 +209,17 @@ async fn control_goal(
                         .await
                 {
                     tracing::warn!("Resumed goal {goal_id} did not complete: {error}");
+                    let _ = state
+                        .db
+                        .update_goal_metadata(
+                            &goal_id,
+                            None,
+                            None,
+                            Some("paused"),
+                            Some(Some("Resume attempt failed; checkpoint remains available")),
+                            None,
+                        )
+                        .await;
                 }
             });
         }

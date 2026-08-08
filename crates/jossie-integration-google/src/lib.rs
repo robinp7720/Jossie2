@@ -838,7 +838,7 @@ impl GoogleIntegration {
             #[serde(rename = "nextPageToken")]
             next_page_token: Option<String>,
         }
-        #[derive(Deserialize, Serialize)]
+        #[derive(Clone, Deserialize, Serialize)]
         struct MessageRef {
             id: String,
             #[serde(rename = "threadId")]
@@ -854,34 +854,48 @@ impl GoogleIntegration {
             }))?);
         }
 
-        // Fetch snippet for each message
-        let mut results = Vec::new();
-        for msg_ref in list.messages.iter() {
-            let url = format!(
-                "https://gmail.googleapis.com/gmail/v1/users/me/messages/{}",
-                msg_ref.id
-            );
-            let resp = self
-                .client
-                .get(&url)
-                .bearer_auth(&token)
-                .query(&[
-                    ("format", "metadata"),
-                    ("metadataHeaders", "From"),
-                    ("metadataHeaders", "Subject"),
-                    ("metadataHeaders", "Date"),
-                ])
-                .send()
-                .await?;
-
-            if let Ok(msg) = resp.json::<serde_json::Value>().await {
-                results.push(serde_json::json!({
-                    "id": msg_ref.id,
-                    "snippet": msg.get("snippet").and_then(|s| s.as_str()).unwrap_or(""),
-                    "headers": msg.pointer("/payload/headers"),
-                }));
-            }
-        }
+        // Fetch metadata concurrently, but keep bounded pressure on Gmail and
+        // restore provider order before returning results.
+        use futures::{StreamExt, stream};
+        let client = &self.client;
+        let token_ref = &token;
+        let mut indexed = stream::iter(list.messages.into_iter().enumerate())
+            .map(|(index, msg_ref)| async move {
+                let url = format!(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/messages/{}",
+                    msg_ref.id
+                );
+                let response = client
+                    .get(&url)
+                    .bearer_auth(token_ref)
+                    .query(&[
+                        ("format", "metadata"),
+                        ("metadataHeaders", "From"),
+                        ("metadataHeaders", "Subject"),
+                        ("metadataHeaders", "Date"),
+                    ])
+                    .send()
+                    .await
+                    .ok()?;
+                let msg = response.json::<serde_json::Value>().await.ok()?;
+                Some((
+                    index,
+                    serde_json::json!({
+                        "id": msg_ref.id,
+                        "snippet": msg.get("snippet").and_then(|s| s.as_str()).unwrap_or(""),
+                        "headers": msg.pointer("/payload/headers"),
+                    }),
+                ))
+            })
+            .buffer_unordered(8)
+            .filter_map(|item| async move { item })
+            .collect::<Vec<_>>()
+            .await;
+        indexed.sort_by_key(|(index, _)| *index);
+        let results = indexed
+            .into_iter()
+            .map(|(_, message)| message)
+            .collect::<Vec<_>>();
 
         Ok(serde_json::to_string_pretty(&serde_json::json!({
             "messages": results,
@@ -1539,7 +1553,7 @@ fn choose_preferred_body(text: String, html: String) -> String {
     let text_trimmed = text.trim();
     let html_trimmed = html.trim();
     if text_trimmed.is_empty() && !html_trimmed.is_empty() {
-        return html;
+        return jossie_core::text::html_to_text(&html);
     }
     if html_trimmed.is_empty() {
         return text;
@@ -1552,7 +1566,7 @@ fn choose_preferred_body(text: String, html: String) -> String {
     if html_visible_len > text_len.saturating_mul(2)
         || (text_len < 200 && html_visible_len > text_len)
     {
-        return html;
+        return jossie_core::text::html_to_text(&html);
     }
 
     text

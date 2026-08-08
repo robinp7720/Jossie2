@@ -115,6 +115,7 @@ export function WorkPage({ api }: { api: ApiConfig }) {
           <p className="muted-copy">{statusLabel(selectedRun.kind)} · {statusLabel(selectedRun.status)} · updated {formatDate(selectedRun.updated_at)}</p>
           {selectedRun.error && <p className="work-error">{selectedRun.error}</p>}
           <ol className="goal-task-list">{selectedRun.steps.map((step) => <li key={step.id} className={step.status}><i /><div><strong>{step.label}</strong><small>{statusLabel(step.status)}{step.summary ? ` · ${step.summary}` : ''}</small></div></li>)}</ol>
+          {selectedRun.status === 'paused' && selectedRun.goal_id && <footer className="work-controls"><button className="button primary" onClick={() => void controlGoal(api, selectedRun.goal_id!, 'resume').then(() => { setSelectedRun(null); return refresh() })}>Resume from checkpoint</button></footer>}
           {['queued', 'running', 'waiting_for_approval'].includes(selectedRun.status) && <footer className="work-controls"><button className="button danger" onClick={() => void cancelWorkRun(api, selectedRun.id).then(() => refresh())}>Stop run</button></footer>}
         </>}
       </section>}

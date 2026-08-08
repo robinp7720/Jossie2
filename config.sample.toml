@@ -173,7 +173,7 @@ Help the user clearly, competently, and with good judgment."""
 
 # Maximum number of agent iterations (tool call loops) before stopping
 # This prevents infinite loops if the agent keeps calling tools
-# Default: 20, set to 9999 for effectively unlimited
+# Default: 20. Values above the hard safety cap of 64 are clamped.
 max_agent_iterations = 20
 
 # Maximum number of messages to include in conversation context
@@ -196,6 +196,15 @@ openai_optimizations = true
 max_context_chars = 120000
 context_compact_target_chars = 80000
 context_keep_recent_dialogue_messages = 12
+
+# Interactive work pauses with a resumable checkpoint after this budget.
+interactive_run_budget_seconds = 600
+# Bound individual model and tool operations so a single await cannot stall a run.
+llm_request_timeout_seconds = 120
+tool_call_timeout_seconds = 90
+# Bound model-visible and persisted tool output, individually and per batch.
+max_tool_result_chars = 32000
+max_tool_batch_chars = 60000
 
 # Recorded voice/audio model. Set to an empty string to disable transcription.
 transcription_model = "gpt-transcribe"

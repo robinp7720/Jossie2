@@ -406,27 +406,40 @@ impl EmailIntegration {
     async fn do_email_search(
         &self,
         config: &EmailConfig,
-        query: &str,
+        query: Option<&str>,
+        terms: &[String],
+        match_mode: &str,
+        from: Option<&str>,
+        subject: Option<&str>,
+        after: Option<&str>,
+        before: Option<&str>,
+        max_results: Option<u32>,
+        page_token: Option<&str>,
         folder: &str,
     ) -> anyhow::Result<String> {
         let mut session = Self::imap_connect(config).await?;
         session.select(folder).await?;
 
-        let escaped_query = escape_imap_query_value(query);
-        let search_query = format!(
-            "OR SUBJECT \"{}\" FROM \"{}\"",
-            escaped_query, escaped_query
-        );
+        let search_query =
+            build_imap_search_query(query, terms, match_mode, from, subject, after, before)?;
         let uids = session.uid_search(&search_query).await?;
 
         if uids.is_empty() {
             session.logout().await.ok();
-            return Ok("No matching emails found.".to_string());
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "messages": [],
+                "next_page_token": serde_json::Value::Null,
+            }))?);
         }
 
         let mut uid_vec: Vec<u32> = uids.into_iter().collect();
         uid_vec.sort_unstable_by(|a, b| b.cmp(a));
-        uid_vec.truncate(20);
+        if let Some(cursor) = page_token.and_then(|value| value.parse::<u32>().ok()) {
+            uid_vec.retain(|uid| *uid < cursor);
+        }
+        let max_results = max_results.unwrap_or(20).clamp(1, 100) as usize;
+        let has_more = uid_vec.len() > max_results;
+        uid_vec.truncate(max_results);
         let uid_set: String = uid_vec
             .iter()
             .map(|u| u.to_string())
@@ -455,7 +468,13 @@ impl EmailIntegration {
         }
 
         session.logout().await.ok();
-        Ok(serde_json::to_string_pretty(&results)?)
+        let next_page_token = has_more
+            .then(|| uid_vec.last().copied().map(|uid| uid.to_string()))
+            .flatten();
+        Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "messages": results,
+            "next_page_token": next_page_token,
+        }))?)
     }
 
     async fn do_email_read(
@@ -697,7 +716,24 @@ impl Integration for EmailIntegration {
             "email_search" => {
                 #[derive(Deserialize)]
                 struct Args {
-                    query: String,
+                    #[serde(default)]
+                    query: Option<String>,
+                    #[serde(default)]
+                    terms: Vec<String>,
+                    #[serde(default = "default_search_match_mode")]
+                    r#match: String,
+                    #[serde(default)]
+                    from: Option<String>,
+                    #[serde(default)]
+                    subject: Option<String>,
+                    #[serde(default)]
+                    after: Option<String>,
+                    #[serde(default)]
+                    before: Option<String>,
+                    #[serde(default)]
+                    max_results: Option<u32>,
+                    #[serde(default)]
+                    page_token: Option<String>,
                     #[serde(default)]
                     folder: String,
                 }
@@ -707,7 +743,20 @@ impl Integration for EmailIntegration {
                 } else {
                     args.folder
                 };
-                self.do_email_search(&config, &args.query, &folder).await
+                self.do_email_search(
+                    &config,
+                    args.query.as_deref(),
+                    &args.terms,
+                    &args.r#match,
+                    args.from.as_deref(),
+                    args.subject.as_deref(),
+                    args.after.as_deref(),
+                    args.before.as_deref(),
+                    args.max_results,
+                    args.page_token.as_deref(),
+                    &folder,
+                )
+                .await
             }
             "email_read" => {
                 #[derive(Deserialize)]
@@ -779,6 +828,68 @@ impl Integration for EmailIntegration {
         }
 
         Ok(())
+    }
+}
+
+fn default_search_match_mode() -> String {
+    "any".to_string()
+}
+
+fn build_imap_search_query(
+    legacy_query: Option<&str>,
+    terms: &[String],
+    match_mode: &str,
+    from: Option<&str>,
+    subject: Option<&str>,
+    after: Option<&str>,
+    before: Option<&str>,
+) -> anyhow::Result<String> {
+    let mut criteria = Vec::new();
+    if let Some(after) = after.filter(|value| !value.trim().is_empty()) {
+        let date = chrono::NaiveDate::parse_from_str(after, "%Y-%m-%d")?;
+        criteria.push(format!("SINCE {}", date.format("%d-%b-%Y")));
+    }
+    if let Some(before) = before.filter(|value| !value.trim().is_empty()) {
+        let date = chrono::NaiveDate::parse_from_str(before, "%Y-%m-%d")?;
+        criteria.push(format!("BEFORE {}", date.format("%d-%b-%Y")));
+    }
+    if let Some(from) = from.filter(|value| !value.trim().is_empty()) {
+        criteria.push(format!("FROM \"{}\"", escape_imap_query_value(from.trim())));
+    }
+    if let Some(subject) = subject.filter(|value| !value.trim().is_empty()) {
+        criteria.push(format!(
+            "SUBJECT \"{}\"",
+            escape_imap_query_value(subject.trim())
+        ));
+    }
+
+    let mut text_terms = terms
+        .iter()
+        .map(|term| term.trim())
+        .filter(|term| !term.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if let Some(query) = legacy_query.filter(|value| !value.trim().is_empty()) {
+        text_terms.push(query.trim().to_string());
+    }
+    let mut term_criteria = text_terms
+        .iter()
+        .map(|term| format!("TEXT \"{}\"", escape_imap_query_value(term)))
+        .collect::<Vec<_>>();
+    if match_mode == "any" && term_criteria.len() > 1 {
+        let mut combined = term_criteria.pop().unwrap_or_default();
+        while let Some(item) = term_criteria.pop() {
+            combined = format!("OR {item} {combined}");
+        }
+        criteria.push(combined);
+    } else {
+        criteria.extend(term_criteria);
+    }
+
+    if criteria.is_empty() {
+        Ok("ALL".to_string())
+    } else {
+        Ok(criteria.join(" "))
     }
 }
 
@@ -901,6 +1012,32 @@ fn html_to_text(html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builds_structured_imap_search_query() {
+        let query = build_imap_search_query(
+            None,
+            &["receipt".to_string(), "invoice".to_string()],
+            "any",
+            Some("shop@example.com"),
+            None,
+            Some("2026-07-01"),
+            Some("2026-08-01"),
+        )
+        .unwrap();
+        assert_eq!(
+            query,
+            "SINCE 01-Jul-2026 BEFORE 01-Aug-2026 FROM \"shop@example.com\" OR TEXT \"receipt\" TEXT \"invoice\""
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_imap_filter_date() {
+        assert!(
+            build_imap_search_query(None, &[], "any", None, None, Some("07/01/2026"), None)
+                .is_err()
+        );
+    }
 
     #[test]
     fn extract_message_body_prefers_plaintext() {

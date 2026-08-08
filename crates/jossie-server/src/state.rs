@@ -6,6 +6,7 @@ use jossie_llm::LlmClient;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub struct PendingGoogleOAuth {
@@ -31,6 +32,11 @@ pub struct AppState {
     pub max_context_chars: usize,
     pub context_compact_target_chars: usize,
     pub context_keep_recent_dialogue_messages: usize,
+    pub interactive_run_budget_seconds: u64,
+    pub llm_request_timeout_seconds: u64,
+    pub tool_call_timeout_seconds: u64,
+    pub max_tool_result_chars: usize,
+    pub max_tool_batch_chars: usize,
     pub max_attachment_bytes_per_request: usize,
     pub google_config: jossie_core::config::GoogleConfig,
     pub google_integration: Option<Arc<GoogleIntegration>>,
@@ -42,6 +48,7 @@ pub struct AppState {
     pub heartbeat_interval_secs: u64,
     pub active_conversations: Arc<RwLock<HashSet<Uuid>>>,
     pub cancelled_conversations: Arc<RwLock<HashSet<Uuid>>>,
+    pub run_cancellations: Arc<RwLock<HashMap<Uuid, CancellationToken>>>,
     pub pending_google_oauth: Arc<RwLock<HashMap<String, PendingGoogleOAuth>>>,
     pub event_tx: broadcast::Sender<ServerEvent>,
     pub cors_origins: Vec<String>,
@@ -84,11 +91,18 @@ impl AppState {
             .write()
             .await
             .insert(conversation_id);
+        if let Some(token) = self.run_cancellations.read().await.get(&conversation_id) {
+            token.cancel();
+        }
         self.publish_event(ServerEvent::CancelRequested { conversation_id });
     }
 
     pub async fn clear_cancel(&self, conversation_id: Uuid) {
         self.cancelled_conversations
+            .write()
+            .await
+            .remove(&conversation_id);
+        self.run_cancellations
             .write()
             .await
             .remove(&conversation_id);
@@ -99,5 +113,23 @@ impl AppState {
             .read()
             .await
             .contains(&conversation_id)
+    }
+
+    pub async fn begin_run_cancellation(&self, conversation_id: Uuid) -> CancellationToken {
+        let token = CancellationToken::new();
+        self.run_cancellations
+            .write()
+            .await
+            .insert(conversation_id, token.clone());
+        token
+    }
+
+    pub async fn run_cancellation(&self, conversation_id: Uuid) -> CancellationToken {
+        self.run_cancellations
+            .read()
+            .await
+            .get(&conversation_id)
+            .cloned()
+            .unwrap_or_else(CancellationToken::new)
     }
 }

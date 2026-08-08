@@ -46,6 +46,16 @@ async fn main() -> Result<()> {
     if interrupted_runs > 0 {
         tracing::warn!("Marked {interrupted_runs} interrupted work run(s) after restart");
     }
+    let paused_goals = db.pause_goals_with_interrupted_runs().await?;
+    if paused_goals > 0 {
+        tracing::warn!("Paused {paused_goals} goal(s) whose active run was interrupted");
+    }
+    let recovered_checkpoints = db.create_checkpoints_for_interrupted_runs().await?;
+    if recovered_checkpoints > 0 {
+        tracing::warn!(
+            "Created {recovered_checkpoints} recovery checkpoint(s) for interrupted legacy runs"
+        );
+    }
     let interrupted_schedules = db.mark_running_scheduled_tasks_interrupted().await?;
     if interrupted_schedules > 0 {
         tracing::warn!(
@@ -193,6 +203,11 @@ async fn main() -> Result<()> {
         max_context_chars: config.llm.max_context_chars,
         context_compact_target_chars: config.llm.context_compact_target_chars,
         context_keep_recent_dialogue_messages: config.llm.context_keep_recent_dialogue_messages,
+        interactive_run_budget_seconds: config.llm.interactive_run_budget_seconds,
+        llm_request_timeout_seconds: config.llm.llm_request_timeout_seconds,
+        tool_call_timeout_seconds: config.llm.tool_call_timeout_seconds,
+        max_tool_result_chars: config.llm.max_tool_result_chars,
+        max_tool_batch_chars: config.llm.max_tool_batch_chars,
         max_attachment_bytes_per_request: config.llm.max_attachment_bytes_per_request,
         google_config: config.google.clone(),
         google_integration,
@@ -206,11 +221,14 @@ async fn main() -> Result<()> {
         cancelled_conversations: Arc::new(tokio::sync::RwLock::new(
             std::collections::HashSet::new(),
         )),
+        run_cancellations: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         pending_google_oauth: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         event_tx,
         cors_origins: config.server.cors_origins.clone(),
         max_request_body_bytes: config.server.max_request_body_bytes,
     });
+
+    tokio::spawn(run_work_watchdog(state.clone()));
 
     // Start Telegram bot if configured
     if !config.telegram.bot_token.is_empty() {
@@ -242,6 +260,56 @@ async fn main() -> Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+async fn run_work_watchdog(state: Arc<AppState>) {
+    let stale_after = std::cmp::max(
+        state.llm_request_timeout_seconds,
+        state.tool_call_timeout_seconds,
+    ) + 30;
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        let Ok(runs) = state.db.list_active_work_runs(None).await else {
+            tracing::warn!("Work watchdog could not read active runs");
+            continue;
+        };
+        let now = chrono::Utc::now();
+        for run in runs {
+            let Ok(updated_at) = chrono::DateTime::parse_from_rfc3339(&run.updated_at) else {
+                continue;
+            };
+            if now
+                .signed_duration_since(updated_at.with_timezone(&chrono::Utc))
+                .num_seconds()
+                <= stale_after as i64
+            {
+                continue;
+            }
+            tracing::error!(
+                run_id = %run.id,
+                conversation_id = run.conversation_id.as_deref().unwrap_or(""),
+                stale_after_seconds = stale_after,
+                "Work watchdog detected a stalled run"
+            );
+            let _ = state
+                .db
+                .update_work_run(
+                    &run.id,
+                    "failed",
+                    Some("Stopped after making no progress"),
+                    Some("Run exceeded the stalled-operation deadline"),
+                )
+                .await;
+            if let Some(conversation_id) = run
+                .conversation_id
+                .as_deref()
+                .and_then(|value| uuid::Uuid::parse_str(value).ok())
+            {
+                state.request_cancel(conversation_id).await;
+            }
+        }
+    }
 }
 
 fn validate_llm_config(config: &mut AppConfig) {
@@ -289,6 +357,19 @@ fn validate_llm_config(config: &mut AppConfig) {
         .llm
         .context_keep_recent_dialogue_messages
         .max(MIN_RECENT_DIALOGUE_MESSAGES);
+    config.llm.interactive_run_budget_seconds =
+        config.llm.interactive_run_budget_seconds.clamp(60, 86_400);
+    config.llm.llm_request_timeout_seconds = config.llm.llm_request_timeout_seconds.clamp(10, 600);
+    config.llm.tool_call_timeout_seconds = config.llm.tool_call_timeout_seconds.clamp(5, 600);
+    config.llm.max_tool_result_chars = config
+        .llm
+        .max_tool_result_chars
+        .clamp(2_000, 100_000)
+        .min(config.llm.context_compact_target_chars);
+    config.llm.max_tool_batch_chars = config.llm.max_tool_batch_chars.clamp(
+        config.llm.max_tool_result_chars,
+        config.llm.context_compact_target_chars,
+    );
     config.llm.max_attachment_bytes_per_request = config
         .llm
         .max_attachment_bytes_per_request
@@ -405,6 +486,31 @@ fn override_config_from_env(config: &mut AppConfig) {
     if let Ok(val) = env::var("JOSSIE_LLM_CONTEXT_KEEP_RECENT_DIALOGUE_MESSAGES") {
         if let Ok(parsed) = val.parse::<usize>() {
             config.llm.context_keep_recent_dialogue_messages = parsed;
+        }
+    }
+    if let Ok(val) = env::var("JOSSIE_LLM_INTERACTIVE_RUN_BUDGET_SECONDS") {
+        if let Ok(parsed) = val.parse::<u64>() {
+            config.llm.interactive_run_budget_seconds = parsed;
+        }
+    }
+    if let Ok(val) = env::var("JOSSIE_LLM_REQUEST_TIMEOUT_SECONDS") {
+        if let Ok(parsed) = val.parse::<u64>() {
+            config.llm.llm_request_timeout_seconds = parsed;
+        }
+    }
+    if let Ok(val) = env::var("JOSSIE_LLM_TOOL_CALL_TIMEOUT_SECONDS") {
+        if let Ok(parsed) = val.parse::<u64>() {
+            config.llm.tool_call_timeout_seconds = parsed;
+        }
+    }
+    if let Ok(val) = env::var("JOSSIE_LLM_MAX_TOOL_RESULT_CHARS") {
+        if let Ok(parsed) = val.parse::<usize>() {
+            config.llm.max_tool_result_chars = parsed;
+        }
+    }
+    if let Ok(val) = env::var("JOSSIE_LLM_MAX_TOOL_BATCH_CHARS") {
+        if let Ok(parsed) = val.parse::<usize>() {
+            config.llm.max_tool_batch_chars = parsed;
         }
     }
     if let Ok(val) = env::var("JOSSIE_LLM_TRANSCRIPTION_MODEL") {

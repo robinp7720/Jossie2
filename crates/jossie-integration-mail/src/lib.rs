@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 const IMAP_PROVIDER: &str = "imap";
 const GMAIL_PROVIDER: &str = "gmail";
+const MAX_UNIFIED_MAIL_BODY_CHARS: usize = 12_000;
 
 pub struct MailIntegration {
     email: Arc<EmailIntegration>,
@@ -34,13 +35,30 @@ struct MessageRef {
 #[derive(Debug, Deserialize)]
 struct MailSearchArgs {
     account_id: String,
-    query: String,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    terms: Vec<String>,
+    #[serde(default = "default_match_mode")]
+    r#match: String,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    subject: Option<String>,
+    #[serde(default)]
+    after: Option<String>,
+    #[serde(default)]
+    before: Option<String>,
     #[serde(default)]
     mailbox: Option<String>,
     #[serde(default)]
     max_results: Option<u32>,
     #[serde(default)]
     page_token: Option<String>,
+}
+
+fn default_match_mode() -> String {
+    "any".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,13 +195,23 @@ impl MailIntegration {
                 &json!({
                     "account_id": provider_account_id,
                     "query": args.query,
+                    "terms": args.terms,
+                    "match": args.r#match,
+                    "from": args.from,
+                    "subject": args.subject,
+                    "after": args.after,
+                    "before": args.before,
+                    "max_results": args.max_results,
+                    "page_token": args.page_token,
                     "folder": args.mailbox.clone().unwrap_or_default(),
                 })
                 .to_string(),
             )
             .await?;
-        let messages = Self::parse_json_value(&raw, "email_search")?
-            .as_array()
+        let payload = Self::parse_json_value(&raw, "email_search")?;
+        let messages = payload
+            .get("messages")
+            .and_then(|value| value.as_array())
             .cloned()
             .unwrap_or_default();
 
@@ -210,7 +238,7 @@ impl MailIntegration {
 
         Ok(serde_json::to_string_pretty(&json!({
             "messages": normalized,
-            "next_page_token": Value::Null,
+            "next_page_token": payload.get("next_page_token").cloned().unwrap_or(Value::Null),
         }))?)
     }
 
@@ -223,7 +251,7 @@ impl MailIntegration {
             .google
             .as_ref()
             .ok_or_else(|| anyhow!("Google integration is not configured"))?;
-        let query = merge_gmail_query(args.mailbox.as_deref(), &args.query);
+        let query = build_gmail_search_query(&args);
         let raw = google
             .execute(
                 "gmail_search",
@@ -313,7 +341,7 @@ impl MailIntegration {
             "to": payload.get("to").and_then(|value| value.as_array()).cloned().unwrap_or_default(),
             "subject": payload.get("subject").and_then(|value| value.as_str()).unwrap_or_default(),
             "date": payload.get("date").and_then(|value| value.as_str()).unwrap_or_default(),
-            "body": payload.get("body").and_then(|value| value.as_str()).unwrap_or_default(),
+            "body": compact_mail_body(payload.get("body").and_then(|value| value.as_str()).unwrap_or_default()),
             "attachments": Vec::<Value>::new(),
             "mailbox": message_ref.mailbox.clone().unwrap_or_else(|| "INBOX".to_string()),
         }))?)
@@ -345,7 +373,7 @@ impl MailIntegration {
             "to": split_recipients(payload.get("to").and_then(|value| value.as_str()).unwrap_or_default()),
             "subject": payload.get("subject").and_then(|value| value.as_str()).unwrap_or_default(),
             "date": payload.get("date").and_then(|value| value.as_str()).unwrap_or_default(),
-            "body": payload.get("body").and_then(|value| value.as_str()).unwrap_or_default(),
+            "body": compact_mail_body(payload.get("body").and_then(|value| value.as_str()).unwrap_or_default()),
             "attachments": payload.get("attachments").cloned().unwrap_or_else(|| json!([])),
             "mailbox": message_ref.mailbox,
         }))?)
@@ -487,6 +515,15 @@ impl MailIntegration {
     }
 }
 
+fn compact_mail_body(body: &str) -> String {
+    let text = if body.contains('<') && body.contains('>') {
+        jossie_core::text::html_to_text(body)
+    } else {
+        body.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    jossie_core::text::truncate_with_notice(text, MAX_UNIFIED_MAIL_BODY_CHARS)
+}
+
 #[async_trait::async_trait]
 impl Integration for MailIntegration {
     fn name(&self) -> &str {
@@ -514,18 +551,23 @@ impl Integration for MailIntegration {
             ToolDefinition {
                 name: "mail_search".to_string(),
                 description:
-                    "Search email messages in a unified way across Gmail and IMAP-backed accounts."
+                    "Search email consistently across Gmail and IMAP. Prefer one structured search with several terms over overlapping provider-specific queries; paginate with next_page_token when completeness matters."
                         .to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "account_id": {"type": "string", "description": "Unified mail account ID from mail_list_accounts"},
-                        "query": {"type": "string", "description": "Search query for the selected mailbox/account"},
+                        "terms": {"type": "array", "items": {"type": "string"}, "description": "Plain-text terms to match"},
+                        "match": {"type": "string", "enum": ["any", "all"], "description": "Whether any or all terms must match"},
+                        "from": {"type": ["string", "null"], "description": "Optional sender filter"},
+                        "subject": {"type": ["string", "null"], "description": "Optional subject filter"},
+                        "after": {"type": ["string", "null"], "description": "Optional inclusive date in YYYY-MM-DD format"},
+                        "before": {"type": ["string", "null"], "description": "Optional exclusive date in YYYY-MM-DD format"},
                         "mailbox": {"type": ["string", "null"], "description": "Optional mailbox, folder, or Gmail label filter"},
                         "max_results": {"type": ["integer", "null"], "description": "Optional provider-specific page size hint"},
                         "page_token": {"type": ["string", "null"], "description": "Optional pagination token for providers that support it"}
                     },
-                    "required": ["account_id", "query", "mailbox", "max_results", "page_token"],
+                    "required": ["account_id", "terms", "match", "from", "subject", "after", "before", "mailbox", "max_results", "page_token"],
                     "additionalProperties": false
                 }),
             },
@@ -630,6 +672,61 @@ fn merge_gmail_query(mailbox: Option<&str>, query: &str) -> String {
     }
 }
 
+fn build_gmail_search_query(args: &MailSearchArgs) -> String {
+    let mut parts = Vec::new();
+    if !args.terms.is_empty() {
+        let terms = args
+            .terms
+            .iter()
+            .map(|term| term.trim())
+            .filter(|term| !term.is_empty())
+            .collect::<Vec<_>>();
+        if !terms.is_empty() {
+            parts.push(if args.r#match == "all" {
+                terms.join(" ")
+            } else {
+                format!("({})", terms.join(" OR "))
+            });
+        }
+    }
+    if let Some(query) = args
+        .query
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(query.trim().to_string());
+    }
+    if let Some(from) = args
+        .from
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(format!("from:{}", from.trim()));
+    }
+    if let Some(subject) = args
+        .subject
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(format!("subject:{}", subject.trim()));
+    }
+    if let Some(after) = args
+        .after
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(format!("after:{}", after.replace('-', "/")));
+    }
+    if let Some(before) = args
+        .before
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(format!("before:{}", before.replace('-', "/")));
+    }
+    merge_gmail_query(args.mailbox.as_deref(), &parts.join(" "))
+}
+
 fn split_recipients(value: &str) -> Vec<String> {
     value
         .split(',')
@@ -658,8 +755,8 @@ fn header_value(headers: &[Value], name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MailIntegration, MailProvider, MessageRef, header_value, merge_gmail_query,
-        split_recipients,
+        MailIntegration, MailProvider, MailSearchArgs, MessageRef, build_gmail_search_query,
+        compact_mail_body, header_value, merge_gmail_query, split_recipients,
     };
     use serde_json::json;
 
@@ -683,6 +780,41 @@ mod tests {
         );
         assert_eq!(merge_gmail_query(Some("STARRED"), ""), "in:STARRED");
         assert_eq!(merge_gmail_query(None, "project update"), "project update");
+    }
+
+    #[test]
+    fn builds_structured_gmail_query() {
+        let query = build_gmail_search_query(&MailSearchArgs {
+            account_id: "gmail:test".to_string(),
+            query: None,
+            terms: vec!["receipt".to_string(), "invoice".to_string()],
+            r#match: "any".to_string(),
+            from: Some("shop@example.com".to_string()),
+            subject: None,
+            after: Some("2026-07-01".to_string()),
+            before: Some("2026-08-01".to_string()),
+            mailbox: Some("INBOX".to_string()),
+            max_results: Some(20),
+            page_token: None,
+        });
+        assert_eq!(
+            query,
+            "in:INBOX (receipt OR invoice) from:shop@example.com after:2026/07/01 before:2026/08/01"
+        );
+    }
+
+    #[test]
+    fn compacts_html_mail_body() {
+        let body = compact_mail_body("<html><body><p>Paid <b>€7.50</b></p></body></html>");
+        assert_eq!(body, "Paid €7.50");
+        assert!(!body.contains('<'));
+    }
+
+    #[test]
+    fn caps_unified_mail_body() {
+        let body = compact_mail_body(&"x".repeat(20_000));
+        assert!(body.starts_with(&"x".repeat(12_000)));
+        assert!(body.contains("Message truncated"));
     }
 
     #[test]

@@ -78,6 +78,12 @@ pub enum ServerEvent {
         conversation_id: Uuid,
         run_id: String,
     },
+    RunPaused {
+        conversation_id: Uuid,
+        run_id: String,
+        goal_id: String,
+        reason: String,
+    },
     RunCancelled {
         conversation_id: Uuid,
         run_id: String,
@@ -162,6 +168,9 @@ impl ServerEvent {
                 conversation_id, ..
             }
             | ServerEvent::RunCompleted {
+                conversation_id, ..
+            }
+            | ServerEvent::RunPaused {
                 conversation_id, ..
             }
             | ServerEvent::RunCancelled {
@@ -447,6 +456,21 @@ pub async fn persist_work_event(db: &jossie_db::Database, event: &ServerEvent) -
                     });
                 }
             }
+            ServerEvent::RunPaused {
+                conversation_id,
+                run_id,
+                reason,
+                ..
+            } => {
+                db.update_work_run(run_id, "paused", Some(reason), None)
+                    .await?;
+                if let Some(run) = db.get_work_run(run_id).await? {
+                    derived.push(ServerEvent::WorkRunUpdated {
+                        conversation_id: Some(*conversation_id),
+                        run,
+                    });
+                }
+            }
             ServerEvent::RunCancelled {
                 conversation_id,
                 run_id,
@@ -657,6 +681,19 @@ pub async fn persist_activity_event(db: &jossie_db::Database, event: &ServerEven
             "A run needs attention",
             None,
             "warn",
+        )),
+        ServerEvent::RunPaused {
+            conversation_id,
+            run_id,
+            reason,
+            ..
+        } => Some((
+            Some(*conversation_id),
+            Some(run_id.as_str()),
+            "work",
+            "Work paused with a checkpoint",
+            Some(reason.as_str()),
+            "normal",
         )),
         _ => None,
     };

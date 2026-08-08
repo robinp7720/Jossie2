@@ -34,6 +34,8 @@ enum Command {
     New,
     #[command(description = "stop the current run")]
     Cancel,
+    #[command(description = "resume the latest safely paused goal")]
+    Resume,
 }
 
 #[derive(Default)]
@@ -266,7 +268,7 @@ async fn handle_command(
 ) {
     match command {
         Command::Start | Command::Help => {
-            let text = "Send me a message, photo, document, voice note, or audio file.\n\n/new — start a fresh conversation\n/cancel — stop the current run\n/help — show this message";
+            let text = "Send me a message, photo, document, voice note, or audio file.\n\n/new — start a fresh conversation\n/cancel — stop the current run\n/resume — continue paused work\n/help — show this message";
             let _ = send_reply(&bot, msg.chat.id, Some(msg.id), text, None).await;
         }
         Command::New => {
@@ -343,6 +345,82 @@ async fn handle_command(
                 let _ = send_generic_error(&bot, &msg).await;
             }
         },
+        Command::Resume => {
+            if !try_activate_chat(&runtime, msg.chat.id.0).await {
+                let _ = send_reply(
+                    &bot,
+                    msg.chat.id,
+                    Some(msg.id),
+                    "I'm already working on this conversation.",
+                    None,
+                )
+                .await;
+                return;
+            }
+            let chat_id = msg.chat.id;
+            let reply_to = msg.id;
+            let numeric_chat_id = msg.chat.id.0;
+            tokio::spawn(async move {
+                let result: anyhow::Result<String> = async {
+                    let conversation_id = state
+                        .db
+                        .get_telegram_conversation(numeric_chat_id)
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("No linked conversation"))?;
+                    let goal = state
+                        .db
+                        .get_active_goal_for_conversation(conversation_id)
+                        .await?
+                        .filter(|goal| goal.goal.status == "paused")
+                        .ok_or_else(|| anyhow::anyhow!("No paused goal is available"))?;
+                    let checkpoint = state
+                        .db
+                        .latest_available_checkpoint_for_goal(&goal.goal.id)
+                        .await?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("No continuation checkpoint is available")
+                        })?;
+                    if !state
+                        .db
+                        .set_goal_control_state(&goal.goal.id, "resume")
+                        .await?
+                    {
+                        anyhow::bail!("The goal can no longer be resumed");
+                    }
+                    let message = JossieMessage::new(
+                        conversation_id,
+                        Role::User,
+                        format!("Continue the tracked goal: {}", goal.goal.title),
+                    )
+                    .with_name("goal_resume".to_string());
+                    state.db.save_message(&message).await?;
+                    let task_id = goal
+                        .tasks
+                        .iter()
+                        .find(|task| !matches!(task.status.as_str(), "completed" | "cancelled"))
+                        .map(|task| task.id.clone());
+                    jossie_server::agent::run_agent_loop_with_options(
+                        &state,
+                        conversation_id,
+                        jossie_server::agent::AgentRunOptions {
+                            goal_id: Some(goal.goal.id),
+                            task_id,
+                            work_summary: Some(goal.goal.title),
+                            resume_checkpoint_run_id: Some(checkpoint.run_id),
+                            ..jossie_server::agent::AgentRunOptions::default()
+                        },
+                    )
+                    .await
+                }
+                .await;
+                let reply = match result {
+                    Ok(response) => response,
+                    Err(error) => error.to_string(),
+                };
+                let _ = send_reply(&bot, chat_id, Some(reply_to), &reply, None).await;
+                release_chat(&runtime, numeric_chat_id).await;
+            });
+        }
     }
 }
 
@@ -1149,6 +1227,7 @@ fn command_from_message(msg: &teloxide::types::Message) -> Option<Command> {
         "/help" => Some(Command::Help),
         "/new" => Some(Command::New),
         "/cancel" => Some(Command::Cancel),
+        "/resume" => Some(Command::Resume),
         _ => None,
     }
 }

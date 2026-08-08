@@ -332,7 +332,7 @@ function Chat({ conversations, onRefresh }: { conversations: Conversation[]; onR
       if (payload.type === 'run_waiting_for_approval') { setSending(false); setActivity('Waiting for your approval'); socket.close(); setFiles([]); if (conversationId) void refreshConversation(conversationId) }
       if (payload.type === 'pending_action') { setSending(false); setActivity(null); setActionError(typeof payload.error === 'string' ? payload.error : 'Resolve the pending action first.'); socket.close(); if (conversationId) void refreshConversation(conversationId) }
       if (payload.type === 'action_decision_received') { setSending(false); setActivity(null); socket.close(); if (conversationId) void refreshConversation(conversationId) }
-      if (payload.type === 'run_completed' || payload.type === 'error' || payload.type === 'run_cancelled') { setSending(false); setActivity(null); socket.close(); setFiles([]); void onRefresh(); if (conversationId) void refreshConversation(conversationId) }
+      if (payload.type === 'run_completed' || payload.type === 'run_paused' || payload.type === 'error' || payload.type === 'run_cancelled') { setSending(false); setActivity(null); socket.close(); setFiles([]); void onRefresh(); if (conversationId) void refreshConversation(conversationId) }
     }
     socket.onerror = () => { setSending(false); setActivity('Connection lost. Try again.'); socket.close() }
   }

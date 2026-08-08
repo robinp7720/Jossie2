@@ -105,6 +105,16 @@ pub struct LlmConfig {
     pub context_compact_target_chars: usize,
     #[serde(default = "default_context_keep_recent_dialogue_messages")]
     pub context_keep_recent_dialogue_messages: usize,
+    #[serde(default = "default_interactive_run_budget_seconds")]
+    pub interactive_run_budget_seconds: u64,
+    #[serde(default = "default_llm_request_timeout_seconds")]
+    pub llm_request_timeout_seconds: u64,
+    #[serde(default = "default_tool_call_timeout_seconds")]
+    pub tool_call_timeout_seconds: u64,
+    #[serde(default = "default_max_tool_result_chars")]
+    pub max_tool_result_chars: usize,
+    #[serde(default = "default_max_tool_batch_chars")]
+    pub max_tool_batch_chars: usize,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
     #[serde(default)]
@@ -145,6 +155,26 @@ fn default_context_compact_target_chars() -> usize {
 
 fn default_context_keep_recent_dialogue_messages() -> usize {
     12
+}
+
+fn default_interactive_run_budget_seconds() -> u64 {
+    600
+}
+
+fn default_llm_request_timeout_seconds() -> u64 {
+    120
+}
+
+fn default_tool_call_timeout_seconds() -> u64 {
+    90
+}
+
+fn default_max_tool_result_chars() -> usize {
+    32_000
+}
+
+fn default_max_tool_batch_chars() -> usize {
+    60_000
 }
 
 fn default_service_tier() -> Option<String> {

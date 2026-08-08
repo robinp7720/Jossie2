@@ -86,6 +86,20 @@ pub struct WorkRunDetail {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct WorkRunCheckpoint {
+    pub run_id: String,
+    pub goal_id: String,
+    pub task_id: Option<String>,
+    pub conversation_id: String,
+    pub state_json: String,
+    pub partial_response: String,
+    pub status: String,
+    pub resumed_by_run_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct WorkerStatus {
     pub worker_key: String,
     pub label: String,
@@ -546,7 +560,10 @@ impl Database {
         error: Option<&str>,
     ) -> anyhow::Result<bool> {
         let now = Utc::now().to_rfc3339();
-        let terminal = matches!(status, "completed" | "failed" | "cancelled" | "interrupted");
+        let terminal = matches!(
+            status,
+            "completed" | "failed" | "cancelled" | "interrupted" | "paused"
+        );
         let started = (status == "running").then_some(now.clone());
         let finished = terminal.then_some(now.clone());
         Ok(sqlx::query(
@@ -636,9 +653,196 @@ impl Database {
             .bind(run_id).fetch_all(&self.pool).await?)
     }
 
+    pub async fn save_work_run_checkpoint(
+        &self,
+        run_id: &str,
+        goal_id: &str,
+        task_id: Option<&str>,
+        conversation_id: uuid::Uuid,
+        state_json: &str,
+        partial_response: &str,
+    ) -> anyhow::Result<WorkRunCheckpoint> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO work_run_checkpoints
+             (run_id, goal_id, task_id, conversation_id, state_json, partial_response, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'available', ?, ?)
+             ON CONFLICT(run_id) DO UPDATE SET goal_id=excluded.goal_id, task_id=excluded.task_id,
+             conversation_id=excluded.conversation_id, state_json=excluded.state_json,
+             partial_response=excluded.partial_response, status='available', resumed_by_run_id=NULL,
+             updated_at=excluded.updated_at",
+        )
+        .bind(run_id)
+        .bind(goal_id)
+        .bind(task_id)
+        .bind(conversation_id.to_string())
+        .bind(state_json)
+        .bind(partial_response)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        self.get_work_run_checkpoint(run_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("saved checkpoint disappeared"))
+    }
+
+    pub async fn get_work_run_checkpoint(
+        &self,
+        run_id: &str,
+    ) -> anyhow::Result<Option<WorkRunCheckpoint>> {
+        Ok(sqlx::query_as::<_, WorkRunCheckpoint>(
+            "SELECT run_id, goal_id, task_id, conversation_id, state_json, partial_response,
+             status, resumed_by_run_id, created_at, updated_at
+             FROM work_run_checkpoints WHERE run_id = ?",
+        )
+        .bind(run_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn latest_available_checkpoint_for_goal(
+        &self,
+        goal_id: &str,
+    ) -> anyhow::Result<Option<WorkRunCheckpoint>> {
+        Ok(sqlx::query_as::<_, WorkRunCheckpoint>(
+            "SELECT run_id, goal_id, task_id, conversation_id, state_json, partial_response,
+             status, resumed_by_run_id, created_at, updated_at
+             FROM work_run_checkpoints WHERE goal_id = ? AND status = 'available'
+             ORDER BY updated_at DESC LIMIT 1",
+        )
+        .bind(goal_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn claim_work_run_checkpoint(
+        &self,
+        run_id: &str,
+        resumed_by_run_id: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(sqlx::query(
+            "UPDATE work_run_checkpoints SET status='claimed', resumed_by_run_id=?, updated_at=?
+             WHERE run_id=? AND status='available'",
+        )
+        .bind(resumed_by_run_id)
+        .bind(Utc::now().to_rfc3339())
+        .bind(run_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    pub async fn release_work_run_checkpoint_claim(
+        &self,
+        run_id: &str,
+        resumed_by_run_id: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(sqlx::query(
+            "UPDATE work_run_checkpoints SET status='available', resumed_by_run_id=NULL, updated_at=?
+             WHERE run_id=? AND status='claimed' AND resumed_by_run_id=?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(run_id)
+        .bind(resumed_by_run_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    pub async fn consume_work_run_checkpoint(
+        &self,
+        run_id: &str,
+        resumed_by_run_id: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(sqlx::query(
+            "UPDATE work_run_checkpoints SET status='consumed', updated_at=?
+             WHERE run_id=? AND status='claimed' AND resumed_by_run_id=?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(run_id)
+        .bind(resumed_by_run_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
     pub async fn mark_running_work_interrupted(&self) -> anyhow::Result<u64> {
         Ok(sqlx::query("UPDATE work_runs SET status = 'interrupted', error = 'Interrupted by server restart', finished_at = ?, updated_at = ? WHERE status IN ('running','waiting_for_approval')")
             .bind(Utc::now().to_rfc3339()).bind(Utc::now().to_rfc3339()).execute(&self.pool).await?.rows_affected())
+    }
+
+    pub async fn pause_goals_with_interrupted_runs(&self) -> anyhow::Result<u64> {
+        let now = Utc::now().to_rfc3339();
+        Ok(sqlx::query(
+            "UPDATE goals SET status='paused', blocker='Previous run was interrupted; resume to continue', updated_at=?
+             WHERE status='active' AND id IN (
+                 SELECT goal_id FROM work_runs
+                 WHERE status='interrupted' AND goal_id IS NOT NULL
+             ) AND id NOT IN (
+                 SELECT goal_id FROM work_runs
+                 WHERE status IN ('queued','running','waiting_for_approval') AND goal_id IS NOT NULL
+             )",
+        )
+        .bind(now)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
+    }
+
+    pub async fn create_checkpoints_for_interrupted_runs(&self) -> anyhow::Result<u64> {
+        let runs = sqlx::query_as::<_, (String, String, Option<String>, String, String, String)>(
+            "SELECT wr.id, wr.goal_id, wr.task_id, wr.conversation_id, g.objective, wr.summary
+             FROM work_runs wr
+             JOIN goals g ON g.id = wr.goal_id
+             WHERE wr.status = 'interrupted'
+               AND g.status = 'paused'
+               AND wr.conversation_id IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM work_run_checkpoints checkpoint
+                   WHERE checkpoint.goal_id = wr.goal_id
+                     AND checkpoint.status IN ('available', 'claimed')
+               )
+               AND wr.id = (
+                   SELECT latest.id FROM work_runs latest
+                   WHERE latest.goal_id = wr.goal_id
+                     AND latest.status = 'interrupted'
+                     AND latest.conversation_id IS NOT NULL
+                   ORDER BY latest.updated_at DESC LIMIT 1
+               )",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut created = 0;
+        for (run_id, goal_id, task_id, conversation_id, objective, summary) in runs {
+            let Ok(conversation_id) = uuid::Uuid::parse_str(&conversation_id) else {
+                continue;
+            };
+            let state_json = serde_json::json!({
+                "objective": objective,
+                "previous_run_summary": summary,
+                "recovery": "The server stopped before the previous run could write a full checkpoint. Continue from the durable goal and conversation history.",
+                "completed_steps": [],
+                "observations": [],
+                "recent_tool_results": [],
+            })
+            .to_string();
+            self.save_work_run_checkpoint(
+                &run_id,
+                &goal_id,
+                task_id.as_deref(),
+                conversation_id,
+                &state_json,
+                "The previous run was interrupted before it could finish. Resume to continue from the saved conversation and goal state.",
+            )
+            .await?;
+            created += 1;
+        }
+        Ok(created)
     }
 
     pub async fn upsert_worker_status(
@@ -845,5 +1049,126 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_is_claimed_once_and_can_be_released_or_consumed() {
+        let db = test_db().await;
+        let conversation = db.create_conversation(Some("Checkpoint")).await.unwrap();
+        let goal = db
+            .create_goal(
+                Some(conversation.id),
+                "Review expenses",
+                "Review every receipt",
+                &["Read receipts".to_string()],
+            )
+            .await
+            .unwrap();
+        let run = db
+            .create_work_run(NewWorkRun {
+                id: Some("run-checkpoint"),
+                goal_id: Some(&goal.goal.id),
+                task_id: Some(&goal.tasks[0].id),
+                conversation_id: Some(conversation.id),
+                kind: "chat",
+                source_type: None,
+                source_id: None,
+                summary: "Review expenses",
+                visibility: "significant",
+            })
+            .await
+            .unwrap();
+        db.save_work_run_checkpoint(
+            &run.id,
+            &goal.goal.id,
+            Some(&goal.tasks[0].id),
+            conversation.id,
+            r#"{"version":1}"#,
+            "Paused safely",
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            db.claim_work_run_checkpoint(&run.id, "resume-1")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !db.claim_work_run_checkpoint(&run.id, "resume-2")
+                .await
+                .unwrap()
+        );
+        assert!(
+            db.release_work_run_checkpoint_claim(&run.id, "resume-1")
+                .await
+                .unwrap()
+        );
+        assert!(
+            db.claim_work_run_checkpoint(&run.id, "resume-2")
+                .await
+                .unwrap()
+        );
+        assert!(
+            db.consume_work_run_checkpoint(&run.id, "resume-2")
+                .await
+                .unwrap()
+        );
+        assert!(
+            db.latest_available_checkpoint_for_goal(&goal.goal.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupted_legacy_run_gets_a_resumable_checkpoint() {
+        let db = test_db().await;
+        let conversation = db.create_conversation(Some("Legacy work")).await.unwrap();
+        let goal = db
+            .create_goal(
+                Some(conversation.id),
+                "Review expenses",
+                "List every expenditure",
+                &["Search messages".to_string()],
+            )
+            .await
+            .unwrap();
+        let run = db
+            .create_work_run(NewWorkRun {
+                id: Some("run-legacy-interrupted"),
+                goal_id: Some(&goal.goal.id),
+                task_id: Some(&goal.tasks[0].id),
+                conversation_id: Some(conversation.id),
+                kind: "chat",
+                source_type: None,
+                source_id: None,
+                summary: "Review every expenditure",
+                visibility: "significant",
+            })
+            .await
+            .unwrap();
+        db.update_work_run(&run.id, "running", Some("Reading messages"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(db.mark_running_work_interrupted().await.unwrap(), 1);
+        assert_eq!(db.pause_goals_with_interrupted_runs().await.unwrap(), 1);
+        assert_eq!(
+            db.create_checkpoints_for_interrupted_runs().await.unwrap(),
+            1
+        );
+        assert_eq!(
+            db.create_checkpoints_for_interrupted_runs().await.unwrap(),
+            0
+        );
+        let checkpoint = db
+            .latest_available_checkpoint_for_goal(&goal.goal.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint.run_id, run.id);
+        assert!(checkpoint.state_json.contains("List every expenditure"));
     }
 }

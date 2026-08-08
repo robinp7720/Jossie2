@@ -1281,6 +1281,7 @@ async fn execute_scheduled_task(
                     work_source_type: Some("scheduled_task".to_string()),
                     work_source_id: Some(format!("{}:{}", task.id, task.run_count + 1)),
                     work_summary: Some(prompt.to_string()),
+                    resume_checkpoint_run_id: None,
                 },
             )
             .await

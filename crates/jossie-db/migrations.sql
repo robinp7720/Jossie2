@@ -252,6 +252,22 @@ CREATE TABLE IF NOT EXISTS work_run_steps (
 CREATE INDEX IF NOT EXISTS idx_work_run_steps_run_sequence
     ON work_run_steps(run_id, sequence);
 
+CREATE TABLE IF NOT EXISTS work_run_checkpoints (
+    run_id TEXT PRIMARY KEY REFERENCES work_runs(id) ON DELETE CASCADE,
+    goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+    task_id TEXT REFERENCES goal_tasks(id) ON DELETE SET NULL,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    state_json TEXT NOT NULL,
+    partial_response TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'available',
+    resumed_by_run_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_run_checkpoints_goal_status
+    ON work_run_checkpoints(goal_id, status, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS worker_status (
     worker_key TEXT PRIMARY KEY,
     label TEXT NOT NULL,
