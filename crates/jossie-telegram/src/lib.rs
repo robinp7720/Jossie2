@@ -323,9 +323,14 @@ fn goal_needs_proactive_notification(
     goal: &jossie_db::GoalWithTasks,
     include_completed: bool,
 ) -> bool {
+    if goal.goal.status == "cancelled" {
+        return false;
+    }
+    if goal.goal.status == "completed" {
+        return include_completed;
+    }
     matches!(goal.goal.status.as_str(), "blocked" | "paused")
         || goal.tasks.iter().any(|task| task.status == "blocked")
-        || (include_completed && goal.goal.status == "completed")
 }
 
 fn goal_notification_fingerprint(goal: &jossie_db::GoalWithTasks) -> String {
@@ -1996,6 +2001,9 @@ mod tests {
         let completed = sample_goal("completed", true);
         assert!(!goal_needs_proactive_notification(&completed, false));
         assert!(goal_needs_proactive_notification(&completed, true));
+        let mut cancelled = sample_goal("cancelled", false);
+        cancelled.tasks[0].status = "blocked".to_string();
+        assert!(!goal_needs_proactive_notification(&cancelled, true));
     }
 
     #[tokio::test]
