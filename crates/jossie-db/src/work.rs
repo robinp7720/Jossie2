@@ -790,8 +790,14 @@ impl Database {
         Ok(sqlx::query(
             "UPDATE goals SET status='paused', blocker='Previous run was interrupted; resume to continue', updated_at=?
              WHERE status='active' AND id IN (
-                 SELECT goal_id FROM work_runs
-                 WHERE status='interrupted' AND goal_id IS NOT NULL
+                 SELECT interrupted.goal_id FROM work_runs interrupted
+                 WHERE interrupted.status='interrupted'
+                   AND interrupted.goal_id IS NOT NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM work_runs newer
+                       WHERE newer.goal_id = interrupted.goal_id
+                         AND newer.updated_at > interrupted.updated_at
+                   )
              ) AND id NOT IN (
                  SELECT goal_id FROM work_runs
                  WHERE status IN ('queued','running','waiting_for_approval') AND goal_id IS NOT NULL
@@ -811,6 +817,11 @@ impl Database {
              WHERE wr.status = 'interrupted'
                AND g.status = 'paused'
                AND wr.conversation_id IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM work_runs newer
+                   WHERE newer.goal_id = wr.goal_id
+                     AND newer.updated_at > wr.updated_at
+               )
                AND NOT EXISTS (
                    SELECT 1 FROM work_run_checkpoints checkpoint
                    WHERE checkpoint.goal_id = wr.goal_id
@@ -1217,6 +1228,70 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn newer_completed_run_prevents_stale_restart_recovery() {
+        let db = test_db().await;
+        let conversation = db
+            .create_conversation(Some("Recovered work"))
+            .await
+            .unwrap();
+        let goal = db
+            .create_goal(
+                Some(conversation.id),
+                "Review expenses",
+                "List every expenditure",
+                &["Search messages".to_string()],
+            )
+            .await
+            .unwrap();
+        let interrupted = db
+            .create_work_run(NewWorkRun {
+                id: Some("old-interrupted-run"),
+                goal_id: Some(&goal.goal.id),
+                task_id: Some(&goal.tasks[0].id),
+                conversation_id: Some(conversation.id),
+                kind: "chat",
+                source_type: None,
+                source_id: None,
+                summary: "Old attempt",
+                visibility: "significant",
+            })
+            .await
+            .unwrap();
+        db.update_work_run(&interrupted.id, "running", None, None)
+            .await
+            .unwrap();
+        assert_eq!(db.mark_running_work_interrupted().await.unwrap(), 1);
+
+        let completed = db
+            .create_work_run(NewWorkRun {
+                id: Some("new-completed-run"),
+                goal_id: Some(&goal.goal.id),
+                task_id: Some(&goal.tasks[0].id),
+                conversation_id: Some(conversation.id),
+                kind: "chat",
+                source_type: None,
+                source_id: None,
+                summary: "Resumed attempt",
+                visibility: "significant",
+            })
+            .await
+            .unwrap();
+        db.update_work_run(&completed.id, "completed", Some("Finished"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(db.pause_goals_with_interrupted_runs().await.unwrap(), 0);
+        assert_eq!(
+            db.create_checkpoints_for_interrupted_runs().await.unwrap(),
+            0
+        );
+        assert_eq!(
+            db.get_goal(&goal.goal.id).await.unwrap().unwrap().status,
+            "active"
         );
     }
 }
