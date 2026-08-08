@@ -83,10 +83,12 @@ impl Database {
     }
 
     async fn run_migrations(&self) -> anyhow::Result<()> {
-        // Split migrations into individual statements and run each one.
+        // Split migrations into individual statements and run each one. The
+        // splitter must understand comments and quoted values because those may
+        // legitimately contain semicolons.
         // IF NOT EXISTS clauses handle idempotency; real errors are propagated.
         let sql = include_str!("../../jossie-db/migrations.sql");
-        for statement in sql.split(';') {
+        for statement in split_sql_statements(sql) {
             let statement = statement.trim();
             if statement.is_empty() {
                 continue;
@@ -2453,6 +2455,80 @@ impl Database {
     }
 }
 
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut statement = String::new();
+    let mut chars = sql.chars().peekable();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+
+    while let Some(ch) = chars.next() {
+        statement.push(ch);
+
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+
+        if in_block_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                statement.push(chars.next().expect("peeked block-comment terminator"));
+                in_block_comment = false;
+            }
+            continue;
+        }
+
+        if in_single_quote {
+            if ch == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    statement.push(chars.next().expect("peeked escaped quote"));
+                } else {
+                    in_single_quote = false;
+                }
+            }
+            continue;
+        }
+
+        if in_double_quote {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    statement.push(chars.next().expect("peeked escaped identifier quote"));
+                } else {
+                    in_double_quote = false;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '-' if chars.peek() == Some(&'-') => {
+                statement.push(chars.next().expect("peeked line-comment marker"));
+                in_line_comment = true;
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                statement.push(chars.next().expect("peeked block-comment marker"));
+                in_block_comment = true;
+            }
+            '\'' => in_single_quote = true,
+            '"' => in_double_quote = true,
+            ';' => {
+                statements.push(std::mem::take(&mut statement));
+            }
+            _ => {}
+        }
+    }
+
+    if !statement.trim().is_empty() {
+        statements.push(statement);
+    }
+
+    statements
+}
+
 fn backup_path_for(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
@@ -3123,6 +3199,19 @@ struct SchemaEntryRow {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn migration_splitter_ignores_semicolons_in_comments_and_quotes() {
+        let sql = "-- goals; work runs\nCREATE TABLE first (value TEXT DEFAULT 'a;b');\n\
+                   /* another; comment */ CREATE TABLE second (id INTEGER);";
+
+        let statements = split_sql_statements(sql);
+
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].contains("CREATE TABLE first"));
+        assert!(statements[0].contains("'a;b'"));
+        assert!(statements[1].contains("CREATE TABLE second"));
+    }
 
     async fn test_db() -> Database {
         let db = Database::new("sqlite::memory:").await.unwrap();

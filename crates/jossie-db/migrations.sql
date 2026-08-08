@@ -168,7 +168,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_events_conversation
     ON activity_events(conversation_id, created_at DESC);
 
 -- Durable user-facing goals and operational work tracking. Goal tasks describe
--- outcomes in the user's language; work runs/steps describe safe execution
+-- outcomes in the user's language, while work runs/steps describe safe execution
 -- progress without retaining prompts, reasoning, or raw tool payloads.
 CREATE TABLE IF NOT EXISTS goals (
     id TEXT PRIMARY KEY,
