@@ -11,6 +11,15 @@ const formatDate = (value?: string | null) => {
 
 const statusLabel = (status: string) => status.replace(/_/g, ' ')
 const isGoalOpen = (goal: Goal) => ['active', 'paused', 'blocked'].includes(goal.status)
+const nextGoalTask = (goal: Goal) => goal.tasks.find((task) => task.status === 'in_progress')
+  ?? goal.tasks.find((task) => ['blocked', 'waiting'].includes(task.status))
+  ?? goal.tasks.find((task) => task.status === 'pending')
+
+const betweenRunsLabel = (goal: Goal) => {
+  if (goal.status === 'blocked') return 'blocked · waiting for input'
+  if (goal.status === 'paused') return 'paused · ready to resume'
+  return 'open goal · between runs'
+}
 
 export function WorkPage({ api }: { api: ApiConfig }) {
   const [work, setWork] = useState<WorkSummary | null>(null)
@@ -45,6 +54,10 @@ export function WorkPage({ api }: { api: ApiConfig }) {
   }, [selectedGoal?.id, selectedRun?.id])
 
   const goals = useMemo(() => work?.goals.filter(isGoalOpen) ?? [], [work])
+  const goalsBetweenRuns = useMemo(() => {
+    const runningGoalIds = new Set(work?.active_runs.flatMap((run) => run.goal_id ? [run.goal_id] : []) ?? [])
+    return goals.filter((goal) => !runningGoalIds.has(goal.id))
+  }, [goals, work?.active_runs])
 
   const chooseGoal = async (goal: Goal) => {
     setSelectedRun(null)
@@ -81,11 +94,22 @@ export function WorkPage({ api }: { api: ApiConfig }) {
     <div className="work-grid">
       <section className="panel-new work-now">
         <div className="panel-head"><div><p className="eyebrow">NOW</p><h2>What’s happening</h2></div></div>
-        <div className="work-card-list">{work.active_runs.length ? work.active_runs.map((run) => <button className="work-run-card" key={run.id} onClick={() => void chooseRun(run)}>
-          <span className={`status-dot ${run.status}`} />
-          <div><strong>{run.current_phase || run.summary}</strong><small>{statusLabel(run.kind)} · {statusLabel(run.status)} · started {formatDate(run.started_at || run.created_at)}</small></div>
-          <span>→</span>
-        </button>) : <p className="empty-copy">Nothing is executing right now.</p>}</div>
+        <div className="work-card-list">
+          {work.active_runs.map((run) => <button className="work-run-card" key={run.id} onClick={() => void chooseRun(run)}>
+            <span className={`status-dot ${run.status}`} />
+            <div><strong>{run.current_phase || run.summary}</strong><small>{statusLabel(run.kind)} · {statusLabel(run.status)} · started {formatDate(run.started_at || run.created_at)}</small></div>
+            <span>→</span>
+          </button>)}
+          {goalsBetweenRuns.map((goal) => {
+            const task = nextGoalTask(goal)
+            return <button className="work-run-card" key={`goal-${goal.id}`} onClick={() => void chooseGoal(goal)}>
+              <span className={`status-dot ${goal.status === 'active' ? 'queued' : goal.status}`} />
+              <div><strong>{task?.title || goal.title}</strong><small>{goal.title} · {betweenRunsLabel(goal)} · {goal.completed_tasks} of {goal.total_tasks} complete</small></div>
+              <span>→</span>
+            </button>
+          })}
+          {!work.active_runs.length && !goalsBetweenRuns.length && <p className="empty-copy">No execution or open goal needs attention right now.</p>}
+        </div>
       </section>
 
       <section className="panel-new work-goals">
@@ -105,7 +129,8 @@ export function WorkPage({ api }: { api: ApiConfig }) {
           {selectedGoal.blocker && <p className="work-error">Blocked: {selectedGoal.blocker}</p>}
           <ol className="goal-task-list">{selectedGoal.tasks.map((task) => <li key={task.id} className={task.status}><i /> <div><strong>{task.title}</strong><small>{statusLabel(task.status)}{task.summary ? ` · ${task.summary}` : ''}</small>{task.blocker && <span>{task.blocker}</span>}</div></li>)}</ol>
           <footer className="work-controls">
-            {selectedGoal.status === 'paused' ? <button className="button primary" onClick={() => void actOnGoal(selectedGoal, 'resume')}>Resume</button> : <button className="button secondary" onClick={() => void actOnGoal(selectedGoal, 'pause')}>Pause</button>}
+            {selectedGoal.status === 'active' && <button className="button primary" onClick={() => void actOnGoal(selectedGoal, 'resume')}>Continue now</button>}
+            {selectedGoal.status === 'active' ? <button className="button secondary" onClick={() => void actOnGoal(selectedGoal, 'pause')}>Pause</button> : <button className="button primary" onClick={() => void actOnGoal(selectedGoal, 'resume')}>Resume</button>}
             <button className="button danger" onClick={() => void actOnGoal(selectedGoal, 'cancel')}>Cancel goal</button>
             <button className="text-button" onClick={() => void updateGoal(api, selectedGoal.id, { archived: true }).then(() => { setSelectedGoal(null); return refresh() })}>Archive</button>
           </footer>

@@ -142,7 +142,25 @@ async fn control_goal(
         .get_goal(id)
         .await?
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("Goal not found")))?;
-    if !state.db.set_goal_control_state(id, action).await? {
+    let continuing_active = action == "resume" && goal.status == "active";
+    if continuing_active {
+        let already_running = state
+            .db
+            .list_work_runs_for_goal(id, 20)
+            .await?
+            .into_iter()
+            .any(|run| {
+                matches!(
+                    run.status.as_str(),
+                    "queued" | "running" | "waiting_for_approval"
+                )
+            });
+        if already_running {
+            return Err(AppError::bad_request(anyhow::anyhow!(
+                "Goal is already being worked on"
+            )));
+        }
+    } else if !state.db.set_goal_control_state(id, action).await? {
         return Err(AppError::bad_request(anyhow::anyhow!(
             "Goal cannot transition from its current state"
         )));

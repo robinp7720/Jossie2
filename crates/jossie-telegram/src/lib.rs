@@ -582,8 +582,8 @@ async fn handle_command(
                         .db
                         .get_active_goal_for_conversation(conversation_id)
                         .await?
-                        .filter(|goal| goal.goal.status == "paused")
-                        .ok_or_else(|| anyhow::anyhow!("No paused goal is available"))?;
+                        .filter(|goal| matches!(goal.goal.status.as_str(), "active" | "paused"))
+                        .ok_or_else(|| anyhow::anyhow!("No resumable goal is available"))?;
                     let message = JossieMessage::new(
                         conversation_id,
                         Role::User,
@@ -591,7 +591,8 @@ async fn handle_command(
                     )
                     .with_name("goal_resume".to_string());
                     state.db.save_message(&message).await?;
-                    continue_tracked_goal(&state, conversation_id, &goal, true).await
+                    let require_checkpoint = goal.goal.status == "paused";
+                    continue_tracked_goal(&state, conversation_id, &goal, require_checkpoint).await
                 }
                 .await;
                 let reply = match result {
@@ -623,10 +624,11 @@ async fn continue_tracked_goal(
     } else {
         None
     };
-    if !state
-        .db
-        .set_goal_control_state(&goal.goal.id, "resume")
-        .await?
+    if goal.goal.status != "active"
+        && !state
+            .db
+            .set_goal_control_state(&goal.goal.id, "resume")
+            .await?
     {
         anyhow::bail!("The goal can no longer be resumed");
     }
@@ -810,7 +812,7 @@ async fn process_turn_inner(
         .get_active_goal_for_conversation(conversation_id)
         .await?;
     let response = if let Some(goal) = goal_before.as_ref().filter(|goal| {
-        matches!(goal.goal.status.as_str(), "paused" | "blocked")
+        matches!(goal.goal.status.as_str(), "active" | "paused" | "blocked")
             && should_continue_tracked_goal(goal, &user_message.content, !local_media.is_empty())
     }) {
         continue_tracked_goal(state, conversation_id, goal, goal.goal.status == "paused").await?

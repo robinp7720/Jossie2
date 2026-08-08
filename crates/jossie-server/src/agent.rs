@@ -23,6 +23,7 @@ const MAX_PROMPT_MEMORIES: usize = 6;
 const MAX_EVENT_PROMPT_MEMORY_MATCHES: usize = 4;
 const LOOP_GUARD_WARN_THRESHOLD: usize = 2;
 const LOOP_GUARD_STOP_THRESHOLD: usize = 3;
+const PREMATURE_GOAL_FINAL_LIMIT: usize = 3;
 const LIVE_STANCE_MESSAGE_WINDOW: usize = 6;
 const REFLECTION_CONTEXT_WINDOW: usize = 4;
 
@@ -55,6 +56,8 @@ struct GoalTracker {
     repeated_tool_batch_count: usize,
     successful_reads: HashMap<String, String>,
     checkpoint_records: Vec<serde_json::Value>,
+    goal_bound_to_run: bool,
+    scheduled_execution: bool,
 }
 
 impl GoalTracker {
@@ -77,6 +80,8 @@ impl GoalTracker {
             repeated_tool_batch_count: 0,
             successful_reads: HashMap::new(),
             checkpoint_records: Vec::new(),
+            goal_bound_to_run: false,
+            scheduled_execution: false,
         }
     }
 
@@ -262,6 +267,30 @@ impl GoalTracker {
             "- Either advance the task, explain the blocker, or ask one focused question.\n",
         );
         msg
+    }
+
+    fn active_goal_continuation_message(&self) -> Option<String> {
+        let goal = self.durable_goal.as_ref()?;
+        if !self.goal_bound_to_run || self.scheduled_execution || goal.goal.status != "active" {
+            return None;
+        }
+
+        let unfinished = goal
+            .tasks
+            .iter()
+            .filter(|task| !matches!(task.status.as_str(), "completed" | "cancelled"))
+            .map(|task| format!("- [{}] {}", task.status, task.title))
+            .collect::<Vec<_>>();
+        let task_state = if unfinished.is_empty() {
+            "All tasks look terminal, but the goal itself is still marked active.".to_string()
+        } else {
+            format!("Unfinished outcomes:\n{}", unfinished.join("\n"))
+        };
+
+        Some(format!(
+            "[ACTIVE GOAL CONTINUATION]\nYour draft reply was not sent because it would leave a goal from this run active with no worker continuing it. Do not stop at a progress report. Continue the work now and use tools to advance the next unfinished outcome. Before giving the user a final reply, call update_work_plan by itself and mark the goal completed, or mark it blocked with the exact missing input.\nTracked goal: {}\n{}",
+            goal.goal.title, task_state
+        ))
     }
 }
 
@@ -1061,6 +1090,8 @@ async fn prepare_run_context(
 
     let mut goal_tracker = GoalTracker::new(&last_user_msg);
     goal_tracker.locked_goal_id = options.goal_id.clone();
+    goal_tracker.goal_bound_to_run = options.goal_id.is_some();
+    goal_tracker.scheduled_execution = options.scheduled_execution;
     goal_tracker.durable_goal = if let Some(goal_id) = options.goal_id.as_deref() {
         let goal = state
             .db
@@ -1558,6 +1589,7 @@ async fn process_work_plan_updates(
                 .link_work_run_goal(run_id, &goal.goal.id, current_task_id)
                 .await?;
             goal_tracker.durable_goal = Some(goal.clone());
+            goal_tracker.goal_bound_to_run = true;
             emit_stream_event(
                 state,
                 event_tx,
@@ -2051,6 +2083,7 @@ async fn run_agent_loop_inner(
     let mut chained_messages = Vec::new();
     let run_started = std::time::Instant::now();
     let mut cumulative_tokens = 0u64;
+    let mut premature_goal_finals = 0usize;
 
     for _iteration in 0..state.max_agent_iterations {
         ensure_run_not_cancelled(state, conv_id, run_id, None).await?;
@@ -2176,6 +2209,36 @@ async fn run_agent_loop_inner(
                 }
             }
 
+            if let Some(continuation) = goal_tracker.active_goal_continuation_message() {
+                premature_goal_finals += 1;
+                tracing::warn!(
+                    conversation_id = %conv_id,
+                    run_id,
+                    attempt = premature_goal_finals,
+                    "Withholding a final reply because its tracked goal is still active"
+                );
+                if premature_goal_finals >= PREMATURE_GOAL_FINAL_LIMIT {
+                    return pause_run_with_checkpoint(
+                        state,
+                        conv_id,
+                        run_id,
+                        &goal_tracker,
+                        "The agent repeatedly stopped while its tracked goal was still active",
+                        None,
+                    )
+                    .await;
+                }
+                messages.push(
+                    Message::transient(Role::Assistant, content)
+                        .with_response_items(response_items),
+                );
+                let continuation = Message::transient(Role::System, continuation)
+                    .with_name("active_goal_continuation".to_string());
+                messages.push(continuation.clone());
+                chained_messages.push(continuation);
+                continue;
+            }
+
             let msg = Message::new(conv_id, Role::Assistant, content.clone());
             persist_message(state, &msg).await?;
 
@@ -2206,6 +2269,17 @@ async fn run_agent_loop_inner(
         if let Some(loop_warning) = goal_tracker.note_tool_batch(&tool_calls) {
             tracing::warn!("Loop guard triggered for conversation {conv_id}: {loop_warning}");
             if goal_tracker.should_stop_for_repetition() {
+                if goal_tracker.active_goal_continuation_message().is_some() {
+                    return pause_run_with_checkpoint(
+                        state,
+                        conv_id,
+                        run_id,
+                        &goal_tracker,
+                        "The agent repeated the same action without advancing its tracked goal",
+                        None,
+                    )
+                    .await;
+                }
                 let fallback = goal_tracker.build_stuck_message();
                 let msg = Message::new(conv_id, Role::Assistant, fallback.clone());
                 persist_message(state, &msg).await?;
@@ -2554,6 +2628,7 @@ async fn run_agent_loop_streaming_inner(
     let mut chained_messages = Vec::new();
     let run_started = std::time::Instant::now();
     let mut cumulative_tokens = 0u64;
+    let mut premature_goal_finals = 0usize;
 
     for iteration in 0..state.max_agent_iterations {
         if ensure_run_not_cancelled(state, conv_id, &run_id, Some(&event_tx))
@@ -2787,25 +2862,6 @@ async fn run_agent_loop_streaming_inner(
         chained_messages.clear();
 
         if !tool_calls.is_empty() {
-            if iteration + 1 >= state.max_agent_iterations {
-                emit_stream_event(
-                    state,
-                    Some(&event_tx),
-                    ServerEvent::Error {
-                        conversation_id: conv_id,
-                        run_id: Some(run_id.clone()),
-                        error: "Max agent iterations reached. The agent loop has been stopped to prevent infinite recursion. Please check the results or try a different request.".to_string(),
-                    },
-                )
-                .await;
-
-                // Optionally send a final user message explaining the situation
-                let error_msg = Message::new(conv_id, Role::Assistant, "I've reached my maximum iteration limit while processing your request. It's possible I'm stuck in a loop or the task is too complex. You might want to try rephrasing or breaking down the task.".to_string());
-                let _ = persist_message(state, &error_msg).await;
-
-                return;
-            }
-
             if let Some(loop_warning) = goal_tracker.note_tool_batch(&tool_calls) {
                 tracing::warn!(
                     "Streaming loop guard triggered for conversation {conv_id}: {loop_warning}"
@@ -2822,6 +2878,30 @@ async fn run_agent_loop_streaming_inner(
                 .await;
 
                 if goal_tracker.should_stop_for_repetition() {
+                    if goal_tracker.active_goal_continuation_message().is_some() {
+                        if let Ok(partial) = pause_run_with_checkpoint(
+                            state,
+                            conv_id,
+                            &run_id,
+                            &goal_tracker,
+                            "The agent repeated the same action without advancing its tracked goal",
+                            Some(&event_tx),
+                        )
+                        .await
+                        {
+                            emit_stream_event(
+                                state,
+                                Some(&event_tx),
+                                ServerEvent::AssistantDelta {
+                                    conversation_id: conv_id,
+                                    run_id: run_id.clone(),
+                                    content: partial,
+                                },
+                            )
+                            .await;
+                        }
+                        return;
+                    }
                     let fallback = goal_tracker.build_stuck_message();
                     emit_stream_event(
                         state,
@@ -3072,6 +3152,59 @@ async fn run_agent_loop_streaming_inner(
                 chained_messages.push(feedback_message);
                 continue;
             }
+        }
+
+        if let Some(continuation) = goal_tracker.active_goal_continuation_message() {
+            premature_goal_finals += 1;
+            tracing::warn!(
+                conversation_id = %conv_id,
+                run_id = %run_id,
+                attempt = premature_goal_finals,
+                "Withholding a streamed final reply because its tracked goal is still active"
+            );
+            emit_stream_event(
+                state,
+                Some(&event_tx),
+                ServerEvent::AssistantReset {
+                    conversation_id: conv_id,
+                    run_id: run_id.clone(),
+                    reason: "active_goal_continuation".to_string(),
+                },
+            )
+            .await;
+            if premature_goal_finals >= PREMATURE_GOAL_FINAL_LIMIT {
+                if let Ok(partial) = pause_run_with_checkpoint(
+                    state,
+                    conv_id,
+                    &run_id,
+                    &goal_tracker,
+                    "The agent repeatedly stopped while its tracked goal was still active",
+                    Some(&event_tx),
+                )
+                .await
+                {
+                    emit_stream_event(
+                        state,
+                        Some(&event_tx),
+                        ServerEvent::AssistantDelta {
+                            conversation_id: conv_id,
+                            run_id: run_id.clone(),
+                            content: partial,
+                        },
+                    )
+                    .await;
+                }
+                return;
+            }
+            messages.push(
+                Message::transient(Role::Assistant, full_content)
+                    .with_response_items(response_items),
+            );
+            let continuation = Message::transient(Role::System, continuation)
+                .with_name("active_goal_continuation".to_string());
+            messages.push(continuation.clone());
+            chained_messages.push(continuation);
+            continue;
         }
 
         let assistant_msg = Message::new(conv_id, Role::Assistant, full_content);
@@ -5489,6 +5622,18 @@ mod tests {
         let tracking = tracker.build_tracking_message();
         assert!(tracking.contains("id=original"));
         assert!(tracking.contains("never create a replacement goal"));
+
+        assert!(tracker.active_goal_continuation_message().is_none());
+        tracker.goal_bound_to_run = true;
+        let continuation = tracker.active_goal_continuation_message().unwrap();
+        assert!(continuation.contains("Do not stop at a progress report"));
+        assert!(continuation.contains("Original goal"));
+
+        tracker.scheduled_execution = true;
+        assert!(tracker.active_goal_continuation_message().is_none());
+        tracker.scheduled_execution = false;
+        tracker.durable_goal.as_mut().unwrap().goal.status = "completed".to_string();
+        assert!(tracker.active_goal_continuation_message().is_none());
     }
 
     #[test]
