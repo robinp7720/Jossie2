@@ -399,5 +399,6 @@ fn attachment_input(attachment: &Attachment) -> Option<ResponseInputContent> {
 
 include!("client/config.rs");
 include!("client/request.rs");
+include!("client/retry.rs");
 include!("client/completion.rs");
 include!("client/tests.rs");

@@ -3,8 +3,88 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use serde_json::json;
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use uuid::Uuid;
+
+    #[derive(Clone)]
+    struct RateLimitTestState {
+        attempts: Arc<AtomicUsize>,
+        failures_before_success: usize,
+    }
+
+    async fn rate_limited_responses_handler(
+        axum::extract::State(state): axum::extract::State<RateLimitTestState>,
+        axum::Json(request): axum::Json<Value>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+
+        let attempt = state.attempts.fetch_add(1, Ordering::SeqCst);
+        if attempt < state.failures_before_success {
+            return (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                [(axum::http::header::RETRY_AFTER, "0")],
+                axum::Json(json!({
+                    "error": {
+                        "message": "try again later",
+                        "code": "rate_limit_exceeded"
+                    }
+                })),
+            )
+                .into_response();
+        }
+
+        if request["stream"] == true {
+            return (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                concat!(
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"recovered\"}\n\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_retry\",\"usage\":{}}}\n\n",
+                    "data: [DONE]\n\n"
+                ),
+            )
+                .into_response();
+        }
+
+        axum::Json(json!({
+            "id": "resp_retry",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "recovered"}]
+            }]
+        }))
+        .into_response()
+    }
+
+    async fn spawn_rate_limited_responses_server(
+        failures_before_success: usize,
+    ) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+        use axum::{Router, routing::post};
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let state = RateLimitTestState {
+            attempts: attempts.clone(),
+            failures_before_success,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/v1/responses", post(rate_limited_responses_handler))
+                    .with_state(state),
+            )
+            .await
+            .unwrap();
+        });
+        (address, attempts)
+    }
 
     fn test_client() -> LlmClient {
         LlmClient::new("https://example.invalid/v1", "test", "test-model")
@@ -487,5 +567,56 @@ mod tests {
                 .cached_tokens,
             10
         );
+    }
+
+    #[test]
+    fn rate_limit_delay_honors_retry_after_and_caps_excessive_values() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "17".parse().unwrap());
+        assert_eq!(
+            rate_limit_retry_delay(&headers, 0),
+            std::time::Duration::from_secs(17)
+        );
+
+        headers.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
+        assert_eq!(
+            rate_limit_retry_delay(&headers, 0),
+            std::time::Duration::from_secs(MAX_RETRY_DELAY_SECS)
+        );
+    }
+
+    #[tokio::test]
+    async fn non_streaming_completion_retries_rate_limits_transparently() {
+        let (address, attempts) = spawn_rate_limited_responses_server(2).await;
+        let client = LlmClient::new(&format!("http://{address}/v1"), "test", "model");
+
+        let output = client
+            .complete(&[make_message(Role::User, "hello")], &[])
+            .await
+            .unwrap();
+
+        assert_eq!(output.content, "recovered");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn streaming_completion_retries_before_emitting_events() {
+        let (address, attempts) = spawn_rate_limited_responses_server(2).await;
+        let client = LlmClient::new(&format!("http://{address}/v1"), "test", "model");
+        let (tx, mut rx) = mpsc::channel(8);
+
+        client
+            .complete_stream(&[make_message(Role::User, "hello")], &[], tx)
+            .await
+            .unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Delta(text)) if text == "recovered"));
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamEvent::Completed { response_id, .. })
+                if response_id.as_deref() == Some("resp_retry")
+        ));
+        assert!(rx.recv().await.is_none());
     }
 }

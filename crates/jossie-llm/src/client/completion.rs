@@ -17,13 +17,7 @@ impl LlmClient {
     ) -> anyhow::Result<LlmOutput> {
         let req = self.build_request(messages, tools, false, options);
 
-        let resp = self
-            .client
-            .post(format!("{}/responses", self.api_url))
-            .bearer_auth(&self.api_key)
-            .json(&req)
-            .send()
-            .await?;
+        let resp = self.send_responses_request(&req).await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -57,14 +51,7 @@ impl LlmClient {
     ) -> anyhow::Result<()> {
         let req = self.build_request(messages, tools, true, options);
 
-        let resp = match self
-            .client
-            .post(format!("{}/responses", self.api_url))
-            .bearer_auth(&self.api_key)
-            .json(&req)
-            .send()
-            .await
-        {
+        let resp = match self.send_responses_request(&req).await {
             Ok(resp) => resp,
             Err(e) => {
                 let _ = tx
