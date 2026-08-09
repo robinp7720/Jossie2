@@ -1687,7 +1687,7 @@ fn action_is_explicitly_authorized(
         .unwrap_or_default();
 
     match call.name.as_str() {
-        "mail_send" | "email_send" | "gmail_send" => {
+        "mail_send" => {
             let asks_to_send =
                 contains_action_term(&user, &["send", "email", "e-mail", "mail this", "forward"]);
             if !asks_to_send {
@@ -1754,7 +1754,7 @@ fn action_summary(call: &jossie_core::ToolCall) -> (String, String) {
             .map(|value| preview_text(value, 180))
     };
     match call.name.as_str() {
-        "mail_send" | "email_send" | "gmail_send" => (
+        "mail_send" => (
             "Send email".to_string(),
             format!(
                 "To {} — {}\n{}",
@@ -4262,10 +4262,15 @@ fn build_trigger_email_read_call(
                 .unwrap_or(event.account_id.as_str());
             Ok(jossie_core::ToolCall {
                 id: tool_call_id.to_string(),
-                name: "gmail_read".to_string(),
+                name: "mail_read".to_string(),
                 arguments: serde_json::json!({
-                    "account_id": account_id,
-                    "message_id": message_id
+                    "message_ref": {
+                        "provider": "gmail",
+                        "account_id": format!("gmail:{account_id}"),
+                        "external_id": message_id,
+                        "mailbox": serde_json::Value::Null,
+                        "native": serde_json::Value::Null
+                    }
                 })
                 .to_string(),
             })
@@ -4288,11 +4293,15 @@ fn build_trigger_email_read_call(
                 .unwrap_or(event.account_id.as_str());
             Ok(jossie_core::ToolCall {
                 id: tool_call_id.to_string(),
-                name: "email_read".to_string(),
+                name: "mail_read".to_string(),
                 arguments: serde_json::json!({
-                    "account_id": account_id,
-                    "uid": uid,
-                    "folder": folder
+                    "message_ref": {
+                        "provider": "imap",
+                        "account_id": format!("imap:{account_id}"),
+                        "external_id": uid.to_string(),
+                        "mailbox": (!folder.is_empty()).then_some(folder),
+                        "native": { "uid": uid }
+                    }
                 })
                 .to_string(),
             })
@@ -5810,6 +5819,28 @@ mod tests {
             "That draft looks good",
             &messages
         ));
+    }
+
+    #[test]
+    fn event_email_reads_use_unified_message_references() {
+        let event = IntegrationEvent {
+            id: "event-1".to_string(),
+            integration: "google".to_string(),
+            account_id: "account-1".to_string(),
+            event_type: "gmail_new_message".to_string(),
+            dedupe_key: "dedupe-1".to_string(),
+            payload: serde_json::json!({"message_id": "message-1"}),
+            status: "new".to_string(),
+            created_at: "2026-08-08T00:00:00Z".to_string(),
+            processed_at: None,
+            last_error: None,
+        };
+
+        let call = build_trigger_email_read_call(&event, "call-1").unwrap();
+        let arguments: serde_json::Value = serde_json::from_str(&call.arguments).unwrap();
+        assert_eq!(call.name, "mail_read");
+        assert_eq!(arguments["message_ref"]["account_id"], "gmail:account-1");
+        assert_eq!(arguments["message_ref"]["external_id"], "message-1");
     }
 }
 

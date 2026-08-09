@@ -126,17 +126,9 @@ pub fn tool_metadata(tool_name: &str, arguments: &str) -> ToolMetadata {
             Some(CapabilityGroup::Knowledge)
         }
         "list_files" | "read_file" => Some(CapabilityGroup::Files),
-        "mail_list_accounts"
-        | "mail_search"
-        | "mail_read"
-        | "mail_list_mailboxes"
-        | "email_list_accounts"
-        | "email_search"
-        | "email_read"
-        | "email_list_folders"
-        | "gmail_search"
-        | "gmail_read"
-        | "gmail_list_labels" => Some(CapabilityGroup::Mail),
+        "mail_list_accounts" | "mail_search" | "mail_read" | "mail_list_mailboxes" => {
+            Some(CapabilityGroup::Mail)
+        }
         "google_list_accounts" | "calendar_list_calendars" | "calendar_list_events" => {
             Some(CapabilityGroup::Calendar)
         }
@@ -165,9 +157,7 @@ pub fn tool_metadata(tool_name: &str, arguments: &str) -> ToolMetadata {
         "graph_delete_node" | "graph_delete_relation" => {
             ToolMetadata::local_write(CapabilityGroup::Knowledge)
         }
-        "mail_send" | "email_send" | "gmail_send" => {
-            ToolMetadata::action(CapabilityGroup::Mail, ToolEffect::ExternalWrite)
-        }
+        "mail_send" => ToolMetadata::action(CapabilityGroup::Mail, ToolEffect::ExternalWrite),
         "calendar_create_event" | "calendar_update_event" => {
             ToolMetadata::action(CapabilityGroup::Calendar, ToolEffect::ExternalWrite)
         }

@@ -4,7 +4,7 @@ use jossie_core::integration::{Integration, OnboardingField, OnboardingStatus, T
 use jossie_db::Database;
 use jossie_db::IntegrationAccount;
 use mailparse::{DispositionType, MailHeaderMap, ParsedMail};
-use serde::Deserialize;
+use serde_json::Value;
 use std::sync::Arc;
 
 type ImapSession = async_imap::Session<
@@ -40,6 +40,20 @@ struct ImapEventSummary {
     to: Vec<String>,
     subject: String,
     date: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EmailSearchRequest {
+    pub query: Option<String>,
+    pub terms: Vec<String>,
+    pub match_mode: String,
+    pub from: Option<String>,
+    pub subject: Option<String>,
+    pub after: Option<String>,
+    pub before: Option<String>,
+    pub max_results: Option<u32>,
+    pub page_token: Option<String>,
+    pub folder: Option<String>,
 }
 
 pub struct EmailIntegration {
@@ -607,6 +621,85 @@ impl EmailIntegration {
         }
         Ok(serde_json::to_string_pretty(&accounts)?)
     }
+
+    fn provider_account_id(account_id: &str) -> Option<&str> {
+        let account_id = account_id.trim();
+        (!account_id.is_empty() && account_id != "default").then_some(account_id)
+    }
+
+    pub async fn mail_accounts(&self) -> anyhow::Result<Vec<Value>> {
+        Ok(serde_json::from_str(&self.list_accounts().await?)?)
+    }
+
+    pub async fn mail_search(
+        &self,
+        account_id: &str,
+        request: EmailSearchRequest,
+    ) -> anyhow::Result<Value> {
+        let config = self
+            .get_account_config(Self::provider_account_id(account_id))
+            .await?;
+        let folder = request
+            .folder
+            .as_deref()
+            .map(str::trim)
+            .filter(|folder| !folder.is_empty())
+            .unwrap_or(DEFAULT_FOLDER);
+        let result = self
+            .do_email_search(
+                &config,
+                request.query.as_deref(),
+                &request.terms,
+                &request.match_mode,
+                request.from.as_deref(),
+                request.subject.as_deref(),
+                request.after.as_deref(),
+                request.before.as_deref(),
+                request.max_results,
+                request.page_token.as_deref(),
+                folder,
+            )
+            .await?;
+        Ok(serde_json::from_str(&result)?)
+    }
+
+    pub async fn mail_read(
+        &self,
+        account_id: &str,
+        uid: u32,
+        folder: Option<&str>,
+    ) -> anyhow::Result<Value> {
+        let config = self
+            .get_account_config(Self::provider_account_id(account_id))
+            .await?;
+        let folder = folder
+            .map(str::trim)
+            .filter(|folder| !folder.is_empty())
+            .unwrap_or(DEFAULT_FOLDER);
+        Ok(serde_json::from_str(
+            &self.do_email_read(&config, uid, folder).await?,
+        )?)
+    }
+
+    pub async fn mail_send(
+        &self,
+        account_id: &str,
+        to: &str,
+        subject: &str,
+        body: &str,
+    ) -> anyhow::Result<String> {
+        let config = self
+            .get_account_config(Self::provider_account_id(account_id))
+            .await?;
+        self.do_email_send(&config, to, subject, body).await
+    }
+
+    pub async fn mail_folders(&self, account_id: &str) -> anyhow::Result<Vec<String>> {
+        let config = self
+            .get_account_config(Self::provider_account_id(account_id))
+            .await?;
+        Ok(serde_json::from_str(&self.do_list_folders(&config).await?)?)
+    }
 }
 
 #[async_trait::async_trait]
@@ -615,178 +708,12 @@ impl Integration for EmailIntegration {
         "email"
     }
 
-    fn agent_tools(&self) -> Vec<ToolDefinition> {
+    fn tools(&self) -> Vec<ToolDefinition> {
         Vec::new()
     }
 
-    fn tools(&self) -> Vec<ToolDefinition> {
-        vec![
-            ToolDefinition {
-                name: "email_list_accounts".to_string(),
-                description: "List configured email accounts".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "email_search".to_string(),
-                description: "Search emails by query in subject or sender so you can triage likely relevant messages before reading full bodies.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "account_id": {"type": "string", "description": "Account ID (use empty string for default account)"},
-                        "query": {"type": "string", "description": "Search term"},
-                        "folder": {"type": "string", "description": "IMAP folder to search (use empty string for INBOX)"}
-                    },
-                    "required": ["account_id", "query", "folder"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "email_read".to_string(),
-                description: "Read the full content of a specific email by UID when triage indicates it is relevant, important, or actionable.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "account_id": {"type": "string", "description": "Account ID (use empty string for default account)"},
-                        "uid": {"type": "integer", "description": "Email UID from search results"},
-                        "folder": {"type": "string", "description": "IMAP folder (use empty string for INBOX)"}
-                    },
-                    "required": ["account_id", "uid", "folder"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "email_send".to_string(),
-                description: "Send an email".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "account_id": {"type": "string", "description": "Account ID (use empty string for default account)"},
-                        "to": {"type": "string", "description": "Recipient email address"},
-                        "subject": {"type": "string", "description": "Email subject"},
-                        "body": {"type": "string", "description": "Email body text"}
-                    },
-                    "required": ["account_id", "to", "subject", "body"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "email_list_folders".to_string(),
-                description: "List all email folders/mailboxes".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "account_id": {"type": "string", "description": "Account ID (use empty string for default account)"}
-                    },
-                    "required": ["account_id"],
-                    "additionalProperties": false
-                }),
-            },
-        ]
-    }
-
-    async fn execute(&self, tool_name: &str, arguments: &str) -> anyhow::Result<String> {
-        tracing::debug!("email.execute: {tool_name}");
-        if tool_name == "email_list_accounts" {
-            return self.list_accounts().await;
-        }
-
-        // Common args struct for account extraction
-        #[derive(Deserialize)]
-        struct AccountArgs {
-            #[serde(default)]
-            account_id: String,
-        }
-        let base_args: AccountArgs = serde_json::from_str(arguments).unwrap_or(AccountArgs {
-            account_id: String::new(),
-        });
-        let account_id = base_args.account_id.trim();
-        let account_id = if account_id.is_empty() || account_id == "default" {
-            None
-        } else {
-            Some(account_id)
-        };
-        let config = self.get_account_config(account_id).await?;
-
-        match tool_name {
-            "email_search" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    #[serde(default)]
-                    query: Option<String>,
-                    #[serde(default)]
-                    terms: Vec<String>,
-                    #[serde(default = "default_search_match_mode")]
-                    r#match: String,
-                    #[serde(default)]
-                    from: Option<String>,
-                    #[serde(default)]
-                    subject: Option<String>,
-                    #[serde(default)]
-                    after: Option<String>,
-                    #[serde(default)]
-                    before: Option<String>,
-                    #[serde(default)]
-                    max_results: Option<u32>,
-                    #[serde(default)]
-                    page_token: Option<String>,
-                    #[serde(default)]
-                    folder: String,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
-                let folder = if args.folder.trim().is_empty() {
-                    DEFAULT_FOLDER.to_string()
-                } else {
-                    args.folder
-                };
-                self.do_email_search(
-                    &config,
-                    args.query.as_deref(),
-                    &args.terms,
-                    &args.r#match,
-                    args.from.as_deref(),
-                    args.subject.as_deref(),
-                    args.after.as_deref(),
-                    args.before.as_deref(),
-                    args.max_results,
-                    args.page_token.as_deref(),
-                    &folder,
-                )
-                .await
-            }
-            "email_read" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    uid: u32,
-                    #[serde(default)]
-                    folder: String,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
-                let folder = if args.folder.trim().is_empty() {
-                    DEFAULT_FOLDER.to_string()
-                } else {
-                    args.folder
-                };
-                self.do_email_read(&config, args.uid, &folder).await
-            }
-            "email_send" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    to: String,
-                    subject: String,
-                    body: String,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
-                self.do_email_send(&config, &args.to, &args.subject, &args.body)
-                    .await
-            }
-            "email_list_folders" => self.do_list_folders(&config).await,
-            _ => anyhow::bail!("Unknown email tool: {tool_name}"),
-        }
+    async fn execute(&self, tool_name: &str, _arguments: &str) -> anyhow::Result<String> {
+        anyhow::bail!("Unknown email tool: {tool_name}")
     }
 
     async fn check_onboarding(&self) -> anyhow::Result<OnboardingStatus> {
@@ -829,10 +756,6 @@ impl Integration for EmailIntegration {
 
         Ok(())
     }
-}
-
-fn default_search_match_mode() -> String {
-    "any".to_string()
 }
 
 fn build_imap_search_query(
@@ -1153,5 +1076,11 @@ mod tests {
             EmailIntegration::build_message_unique_id(None, 42),
             "imap:42"
         );
+    }
+
+    #[test]
+    fn provider_integration_exposes_no_legacy_agent_tools() {
+        let integration = EmailIntegration::new(&EmailConfig::default());
+        assert!(integration.tools().is_empty());
     }
 }

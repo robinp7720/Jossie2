@@ -1,6 +1,6 @@
 use anyhow::{Context, anyhow};
 use jossie_core::integration::{Integration, ToolDefinition};
-use jossie_integration_email::EmailIntegration;
+use jossie_integration_email::{EmailIntegration, EmailSearchRequest};
 use jossie_integration_google::GoogleIntegration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -113,11 +113,7 @@ impl MailIntegration {
     }
 
     async fn list_imap_accounts(&self) -> anyhow::Result<Vec<Value>> {
-        let raw = self.email.execute("email_list_accounts", "{}").await?;
-        let accounts = Self::parse_json_value(&raw, "email_list_accounts")?
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let accounts = self.email.mail_accounts().await?;
 
         Ok(accounts
             .into_iter()
@@ -143,7 +139,7 @@ impl MailIntegration {
             return Ok(Vec::new());
         };
 
-        let raw = google.execute("google_list_accounts", "{}").await?;
+        let raw = google.list_accounts().await?;
         let accounts = Self::parse_json_value(&raw, "google_list_accounts")?
             .as_array()
             .cloned()
@@ -188,27 +184,24 @@ impl MailIntegration {
         provider_account_id: &str,
         args: MailSearchArgs,
     ) -> anyhow::Result<String> {
-        let raw = self
+        let payload = self
             .email
-            .execute(
-                "email_search",
-                &json!({
-                    "account_id": provider_account_id,
-                    "query": args.query,
-                    "terms": args.terms,
-                    "match": args.r#match,
-                    "from": args.from,
-                    "subject": args.subject,
-                    "after": args.after,
-                    "before": args.before,
-                    "max_results": args.max_results,
-                    "page_token": args.page_token,
-                    "folder": args.mailbox.clone().unwrap_or_default(),
-                })
-                .to_string(),
+            .mail_search(
+                provider_account_id,
+                EmailSearchRequest {
+                    query: args.query.clone(),
+                    terms: args.terms.clone(),
+                    match_mode: args.r#match.clone(),
+                    from: args.from.clone(),
+                    subject: args.subject.clone(),
+                    after: args.after.clone(),
+                    before: args.before.clone(),
+                    max_results: args.max_results,
+                    page_token: args.page_token.clone(),
+                    folder: args.mailbox.clone(),
+                },
             )
             .await?;
-        let payload = Self::parse_json_value(&raw, "email_search")?;
         let messages = payload
             .get("messages")
             .and_then(|value| value.as_array())
@@ -253,15 +246,11 @@ impl MailIntegration {
             .ok_or_else(|| anyhow!("Google integration is not configured"))?;
         let query = build_gmail_search_query(&args);
         let raw = google
-            .execute(
-                "gmail_search",
-                &json!({
-                    "account_id": provider_account_id,
-                    "query": query,
-                    "max_results": args.max_results,
-                    "page_token": args.page_token,
-                })
-                .to_string(),
+            .mail_search(
+                provider_account_id,
+                &query,
+                args.max_results,
+                args.page_token.as_deref(),
             )
             .await?;
         let payload = Self::parse_json_value(&raw, "gmail_search")?;
@@ -322,19 +311,14 @@ impl MailIntegration {
         provider_account_id: &str,
         message_ref: MessageRef,
     ) -> anyhow::Result<String> {
-        let raw = self
+        let payload = self
             .email
-            .execute(
-                "email_read",
-                &json!({
-                    "account_id": provider_account_id,
-                    "uid": parse_imap_uid(&message_ref.external_id)?,
-                    "folder": message_ref.mailbox.clone().unwrap_or_default(),
-                })
-                .to_string(),
+            .mail_read(
+                provider_account_id,
+                parse_imap_uid(&message_ref.external_id)?,
+                message_ref.mailbox.as_deref(),
             )
             .await?;
-        let payload = Self::parse_json_value(&raw, "email_read")?;
         Ok(serde_json::to_string_pretty(&json!({
             "message_ref": message_ref,
             "from": payload.get("from").and_then(|value| value.as_str()).unwrap_or_default(),
@@ -357,14 +341,7 @@ impl MailIntegration {
             .as_ref()
             .ok_or_else(|| anyhow!("Google integration is not configured"))?;
         let raw = google
-            .execute(
-                "gmail_read",
-                &json!({
-                    "account_id": provider_account_id,
-                    "message_id": message_ref.external_id,
-                })
-                .to_string(),
-            )
+            .mail_read(provider_account_id, &message_ref.external_id)
             .await?;
         let payload = Self::parse_json_value(&raw, "gmail_read")?;
         Ok(serde_json::to_string_pretty(&json!({
@@ -384,16 +361,7 @@ impl MailIntegration {
         let result = match provider {
             MailProvider::Imap => {
                 self.email
-                    .execute(
-                        "email_send",
-                        &json!({
-                            "account_id": provider_account_id,
-                            "to": args.to,
-                            "subject": args.subject,
-                            "body": args.body,
-                        })
-                        .to_string(),
-                    )
+                    .mail_send(provider_account_id, &args.to, &args.subject, &args.body)
                     .await?
             }
             MailProvider::Gmail => {
@@ -402,16 +370,7 @@ impl MailIntegration {
                     .as_ref()
                     .ok_or_else(|| anyhow!("Google integration is not configured"))?;
                 google
-                    .execute(
-                        "gmail_send",
-                        &json!({
-                            "account_id": provider_account_id,
-                            "to": args.to,
-                            "subject": args.subject,
-                            "body": args.body,
-                        })
-                        .to_string(),
-                    )
+                    .mail_send(provider_account_id, &args.to, &args.subject, &args.body)
                     .await?
             }
         };
@@ -428,26 +387,14 @@ impl MailIntegration {
         let (provider, provider_account_id) = Self::split_account_id(&args.account_id)?;
         let mailboxes = match provider {
             MailProvider::Imap => {
-                let raw = self
-                    .email
-                    .execute(
-                        "email_list_folders",
-                        &json!({ "account_id": provider_account_id }).to_string(),
-                    )
-                    .await?;
-                let folders = Self::parse_json_value(&raw, "email_list_folders")?
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
+                let folders = self.email.mail_folders(provider_account_id).await?;
                 folders
                     .into_iter()
-                    .filter_map(|folder| {
-                        folder.as_str().map(|name| {
-                            json!({
-                                "name": name,
-                                "display_name": name,
-                                "kind": "folder",
-                            })
+                    .map(|name| {
+                        json!({
+                            "name": name,
+                            "display_name": name,
+                            "kind": "folder",
                         })
                     })
                     .collect::<Vec<_>>()
@@ -457,12 +404,7 @@ impl MailIntegration {
                     .google
                     .as_ref()
                     .ok_or_else(|| anyhow!("Google integration is not configured"))?;
-                let raw = google
-                    .execute(
-                        "gmail_list_labels",
-                        &json!({ "account_id": provider_account_id }).to_string(),
-                    )
-                    .await?;
+                let raw = google.mail_labels(provider_account_id).await?;
                 let labels = Self::parse_json_value(&raw, "gmail_list_labels")?
                     .as_array()
                     .cloned()
@@ -759,6 +701,10 @@ mod tests {
         compact_mail_body, header_value, merge_gmail_query, split_recipients,
     };
     use serde_json::json;
+    use std::sync::Arc;
+
+    use jossie_core::{config::EmailConfig, integration::Integration};
+    use jossie_integration_email::EmailIntegration;
 
     #[test]
     fn builds_prefixed_unified_account_ids() {
@@ -846,5 +792,28 @@ mod tests {
         });
         let parsed: MessageRef = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+    }
+
+    #[test]
+    fn unified_integration_is_the_only_public_mail_tool_surface() {
+        let integration = MailIntegration::new(
+            Arc::new(EmailIntegration::new(&EmailConfig::default())),
+            None,
+        );
+        let names = integration
+            .tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "mail_list_accounts",
+                "mail_search",
+                "mail_read",
+                "mail_send",
+                "mail_list_mailboxes",
+            ]
+        );
     }
 }

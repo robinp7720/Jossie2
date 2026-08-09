@@ -429,7 +429,7 @@ impl GoogleIntegration {
         Ok(td.access_token)
     }
 
-    async fn list_accounts(&self) -> anyhow::Result<String> {
+    pub async fn list_accounts(&self) -> anyhow::Result<String> {
         tracing::debug!("Listing Google integration accounts");
         let mut accounts = Vec::new();
 
@@ -805,7 +805,7 @@ impl GoogleIntegration {
         Ok(events)
     }
 
-    async fn gmail_search(
+    pub async fn mail_search(
         &self,
         account_id: &str,
         query: &str,
@@ -903,7 +903,7 @@ impl GoogleIntegration {
         }))?)
     }
 
-    async fn gmail_read(&self, account_id: &str, message_id: &str) -> anyhow::Result<String> {
+    pub async fn mail_read(&self, account_id: &str, message_id: &str) -> anyhow::Result<String> {
         let token = self.get_access_token(account_id).await?;
         let url = format!("https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}");
         let resp = self
@@ -980,7 +980,7 @@ impl GoogleIntegration {
         .to_string())
     }
 
-    async fn gmail_send(
+    pub async fn mail_send(
         &self,
         account_id: &str,
         to: &str,
@@ -1011,7 +1011,7 @@ impl GoogleIntegration {
         Ok(format!("Email sent to {to}"))
     }
 
-    async fn gmail_list_labels(&self, account_id: &str) -> anyhow::Result<String> {
+    pub async fn mail_labels(&self, account_id: &str) -> anyhow::Result<String> {
         let token = self.get_access_token(account_id).await?;
         let resp = self
             .client
@@ -1859,13 +1859,6 @@ impl Integration for GoogleIntegration {
         "google"
     }
 
-    fn agent_tools(&self) -> Vec<ToolDefinition> {
-        self.tools()
-            .into_iter()
-            .filter(|tool| !tool.name.starts_with("gmail_"))
-            .collect()
-    }
-
     fn tools(&self) -> Vec<ToolDefinition> {
         vec![
             ToolDefinition {
@@ -1875,61 +1868,6 @@ impl Integration for GoogleIntegration {
                     "type": "object",
                     "properties": {},
                     "required": [],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "gmail_search".to_string(),
-                description: "Search Gmail messages with pagination support. Use this to triage likely relevant messages before reading full bodies.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "account_id": {"type": "string", "description": "Account ID from google_list_accounts"},
-                        "query": {"type": "string", "description": "Gmail search query (same syntax as Gmail search bar)"},
-                        "max_results": {"type": ["integer", "null"], "description": "Maximum number of messages to return (default: 20, max: 500)"},
-                        "page_token": {"type": ["string", "null"], "description": "Token for pagination from previous search results"}
-                    },
-                    "required": ["account_id", "query", "max_results", "page_token"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "gmail_read".to_string(),
-                description: "Read the full content of a specific Gmail message by ID when triage indicates it is relevant, important, or actionable.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "account_id": {"type": "string", "description": "Account ID from google_list_accounts"},
-                        "message_id": {"type": "string", "description": "Gmail message ID from search results"}
-                    },
-                    "required": ["account_id", "message_id"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "gmail_send".to_string(),
-                description: "Send an email via Gmail".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "account_id": {"type": "string", "description": "Account ID from google_list_accounts"},
-                        "to": {"type": "string", "description": "Recipient email address"},
-                        "subject": {"type": "string", "description": "Email subject"},
-                        "body": {"type": "string", "description": "Email body text"}
-                    },
-                    "required": ["account_id", "to", "subject", "body"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "gmail_list_labels".to_string(),
-                description: "List Gmail labels and system mailboxes".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "account_id": {"type": "string", "description": "Account ID from google_list_accounts"}
-                    },
-                    "required": ["account_id"],
                     "additionalProperties": false
                 }),
             },
@@ -2054,52 +1992,6 @@ impl Integration for GoogleIntegration {
         }
 
         match tool_name {
-            "gmail_search" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    query: String,
-                    account_id: String,
-                    max_results: Option<u32>,
-                    page_token: Option<String>,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
-                self.gmail_search(
-                    &args.account_id,
-                    &args.query,
-                    args.max_results,
-                    args.page_token.as_deref(),
-                )
-                .await
-            }
-            "gmail_read" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    message_id: String,
-                    account_id: String,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
-                self.gmail_read(&args.account_id, &args.message_id).await
-            }
-            "gmail_send" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    to: String,
-                    subject: String,
-                    body: String,
-                    account_id: String,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
-                self.gmail_send(&args.account_id, &args.to, &args.subject, &args.body)
-                    .await
-            }
-            "gmail_list_labels" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    account_id: String,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
-                self.gmail_list_labels(&args.account_id).await
-            }
             "drive_search" => {
                 #[derive(Deserialize)]
                 struct Args {
@@ -2392,5 +2284,6 @@ mod tests {
                 .unwrap()
                 .contains(&serde_json::json!("send_updates"))
         );
+        assert!(tools.iter().all(|tool| !tool.name.starts_with("gmail_")));
     }
 }
