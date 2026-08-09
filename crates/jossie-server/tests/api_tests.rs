@@ -147,6 +147,7 @@ async fn text_file_uploads_can_exceed_the_old_100_kib_default() {
         "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"history.txt\"\r\nContent-Type: text/plain\r\n\r\n{content}\r\n--{boundary}--\r\n"
     );
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -169,9 +170,44 @@ async fn text_file_uploads_can_exceed_the_old_100_kib_default() {
     let uploaded: Value = serde_json::from_slice(&response_body).unwrap();
     assert_eq!(uploaded["name"], "history.txt");
     let file_id = uploaded["file_id"].as_str().unwrap();
-    tokio::fs::remove_file(format!("uploads/{file_id}"))
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/files/{file_id}"))
+                .header("Authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 256 * 1024)
+            .await
+            .unwrap()
+            .len(),
+        content.len()
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/files/{file_id}"))
+                .header("Authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        !tokio::fs::try_exists(format!("uploads/{file_id}"))
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -433,4 +469,103 @@ async fn test_chat_rejects_unknown_conversation_id() {
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"], "Conversation not found");
+}
+
+#[tokio::test]
+async fn conversation_lifecycle_and_exports_are_available_over_the_api() {
+    let app = setup_app().await;
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/conversations")
+                .header("Authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(create.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let conversation: Value = serde_json::from_slice(&body).unwrap();
+    let id = conversation["id"].as_str().unwrap();
+
+    let rename = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/conversations/{id}"))
+                .header("Authorization", "Bearer test-token")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"title":"A durable title"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rename.status(), StatusCode::OK);
+
+    let export = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/conversations/{id}/export?format=json"))
+                .header("Authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(export.status(), StatusCode::OK);
+    assert!(
+        export.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .contains(".json")
+    );
+
+    let direct_delete = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/conversations/{id}"))
+                .header("Authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(direct_delete.status(), StatusCode::CONFLICT);
+
+    let archive = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/conversations/{id}"))
+                .header("Authorization", "Bearer test-token")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"archived":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(archive.status(), StatusCode::OK);
+
+    let delete = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/conversations/{id}"))
+                .header("Authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), StatusCode::OK);
 }

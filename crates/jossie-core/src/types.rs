@@ -145,6 +145,7 @@ impl Message {
 pub struct Conversation {
     pub id: Uuid,
     pub title: Option<String>,
+    pub archived_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

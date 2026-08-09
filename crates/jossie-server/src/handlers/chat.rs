@@ -19,12 +19,28 @@ pub struct ChatRequest {
     conversation_id: Option<Uuid>,
     #[serde(default)]
     file_ids: Option<Vec<Uuid>>,
+    #[serde(default)]
+    client_message_id: Option<Uuid>,
 }
 
 #[derive(Serialize)]
 pub struct ChatResponse {
     conversation_id: Uuid,
     message: String,
+}
+
+fn attachments_match(message: &Message, requested_file_ids: Option<&[Uuid]>) -> bool {
+    let mut stored = message
+        .attachments
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|attachment| attachment.id)
+        .collect::<Vec<_>>();
+    let mut requested = requested_file_ids.unwrap_or_default().to_vec();
+    stored.sort_unstable();
+    requested.sort_unstable();
+    stored == requested
 }
 
 async fn conversation_exists(state: &Arc<AppState>, conversation_id: Uuid) -> anyhow::Result<bool> {
@@ -126,6 +142,24 @@ pub async fn chat_handler(
 ) -> Result<Json<ChatResponse>, AppError> {
     let conv_id = get_or_create_conversation_id(&state, req.conversation_id).await?;
 
+    if let Some(message_id) = req.client_message_id
+        && let Some(existing) = state.db.get_message(message_id).await?
+    {
+        if existing.conversation_id != conv_id
+            || existing.role != Role::User
+            || existing.content != req.message
+            || !attachments_match(&existing, req.file_ids.as_deref())
+        {
+            return Err(AppError::conflict(anyhow::anyhow!(
+                "client_message_id is already used by a different message"
+            )));
+        }
+        return Ok(Json(ChatResponse {
+            conversation_id: conv_id,
+            message: "Message already accepted".to_string(),
+        }));
+    }
+
     if let Some(message) = resolve_pending_reply(&state, conv_id, &req.message).await? {
         return Ok(Json(ChatResponse {
             conversation_id: conv_id,
@@ -134,6 +168,9 @@ pub async fn chat_handler(
     }
 
     let mut user_msg = Message::new(conv_id, Role::User, req.message);
+    if let Some(message_id) = req.client_message_id {
+        user_msg.id = message_id;
+    }
     if let Some(ref fids) = req.file_ids {
         let mut attachments = Vec::new();
         for fid in fids {
@@ -255,7 +292,32 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
 
         tracing::info!("Processing message for conversation {}", conv_id);
 
-        match resolve_pending_reply(&state, conv_id, &req.message).await {
+        let existing = match req.client_message_id {
+            Some(message_id) => state.db.get_message(message_id).await.ok().flatten(),
+            None => None,
+        };
+        if let Some(existing) = existing.as_ref()
+            && (existing.conversation_id != conv_id
+                || existing.role != Role::User
+                || existing.content != req.message
+                || !attachments_match(existing, req.file_ids.as_deref()))
+        {
+            let payload = serde_json::json!({
+                "type": "error",
+                "conversation_id": conv_id,
+                "error": "client_message_id is already used by a different message",
+            });
+            let _ = socket
+                .send(ws::Message::Text(payload.to_string().into()))
+                .await;
+            continue;
+        }
+
+        match if existing.is_some() {
+            Ok::<Option<String>, AppError>(None)
+        } else {
+            resolve_pending_reply(&state, conv_id, &req.message).await
+        } {
             Ok(Some(message)) => {
                 let payload = serde_json::json!({
                     "type": "action_decision_received",
@@ -282,6 +344,9 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
         }
 
         let mut user_msg = Message::new(conv_id, Role::User, req.message);
+        if let Some(message_id) = req.client_message_id {
+            user_msg.id = message_id;
+        }
         if let Some(ref fids) = req.file_ids {
             let mut attachments = Vec::new();
             for fid in fids {
@@ -297,31 +362,138 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
             }
             user_msg = user_msg.with_attachments(attachments);
         }
-        if persist_message(&state, &user_msg).await.is_err() {
+        let duplicate = existing.is_some();
+        if !duplicate && persist_message(&state, &user_msg).await.is_err() {
+            let payload = serde_json::json!({
+                "type": "error",
+                "conversation_id": conv_id,
+                "error": "Failed to save message",
+            });
+            let _ = socket
+                .send(ws::Message::Text(payload.to_string().into()))
+                .await;
             continue;
         }
 
         // Link attachments in DB
-        if let Some(fids) = req.file_ids {
+        if !duplicate && let Some(fids) = req.file_ids {
             for fid in fids {
                 let _ = state.db.link_message_attachment(user_msg.id, fid).await;
             }
         }
 
+        let source_id = user_msg.id.to_string();
+        let existing_run = state
+            .db
+            .get_work_run_by_source("chat_message", &source_id)
+            .await
+            .ok()
+            .flatten();
+        let proposed_run_id = Uuid::new_v4().to_string();
+        let run_id = if let Some(run) = existing_run {
+            run.id
+        } else {
+            match state
+                .db
+                .create_work_run(jossie_db::NewWorkRun {
+                    id: Some(&proposed_run_id),
+                    goal_id: None,
+                    task_id: None,
+                    conversation_id: Some(conv_id),
+                    kind: "chat",
+                    source_type: Some("chat_message"),
+                    source_id: Some(&source_id),
+                    summary: "Conversation request",
+                    visibility: "significant",
+                })
+                .await
+            {
+                Ok(run) => run.id,
+                Err(_) => match state
+                    .db
+                    .get_work_run_by_source("chat_message", &source_id)
+                    .await
+                    .ok()
+                    .flatten()
+                {
+                    Some(run) => run.id,
+                    None => {
+                        let payload = serde_json::json!({
+                            "type": "error",
+                            "conversation_id": conv_id,
+                            "error": "Failed to create work run",
+                        });
+                        let _ = socket
+                            .send(ws::Message::Text(payload.to_string().into()))
+                            .await;
+                        continue;
+                    }
+                },
+            }
+        };
+        let should_spawn = match state.db.claim_queued_work_run(&run_id).await {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                tracing::error!(%error, %run_id, "failed to claim queued chat work run");
+                let payload = serde_json::json!({
+                    "type": "error",
+                    "conversation_id": conv_id,
+                    "error": "Failed to start work run",
+                });
+                let _ = socket
+                    .send(ws::Message::Text(payload.to_string().into()))
+                    .await;
+                continue;
+            }
+        };
+        let accepted = serde_json::json!({
+            "type": "message_accepted",
+            "conversation_id": conv_id,
+            "message_id": user_msg.id,
+            "duplicate": duplicate,
+            "run_id": run_id.clone(),
+        });
+        if !should_spawn {
+            let _ = socket
+                .send(ws::Message::Text(accepted.to_string().into()))
+                .await;
+            continue;
+        }
+
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
         let loop_state = state.clone();
+        let source_message_id = Some(user_msg.id);
+        let run_id_for_task = run_id.clone();
         tokio::spawn(async move {
-            run_agent_loop_streaming(&loop_state, conv_id, event_tx).await;
+            run_agent_loop_streaming(
+                &loop_state,
+                conv_id,
+                run_id_for_task,
+                source_message_id,
+                event_tx,
+            )
+            .await;
         });
+        if socket
+            .send(ws::Message::Text(accepted.to_string().into()))
+            .await
+            .is_err()
+        {
+            continue;
+        }
 
         while let Some(event) = event_rx.recv().await {
             let ws_msg = match serde_json::to_value(event) {
                 Ok(v) => v,
                 Err(e) => serde_json::json!({"type": "error", "error": e.to_string()}),
             };
-            let _ = socket
+            if socket
                 .send(ws::Message::Text(ws_msg.to_string().into()))
-                .await;
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
     }
 }

@@ -417,6 +417,21 @@ pub struct FileRecord {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConversationListItem {
+    #[serde(flatten)]
+    pub conversation: Conversation,
+    pub preview: Option<String>,
+    pub matched_message_id: Option<Uuid>,
+    pub message_count: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConversationDeleteFile {
+    pub id: Uuid,
+    pub path: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
 pub struct ChatImport {
     pub id: String,
@@ -641,8 +656,21 @@ pub struct TelegramChatLink {
 struct ConversationRow {
     id: String,
     title: Option<String>,
+    archived_at: Option<String>,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct ConversationListRow {
+    id: String,
+    title: Option<String>,
+    archived_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+    preview: Option<String>,
+    matched_message_id: Option<String>,
+    message_count: i64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -699,6 +727,15 @@ impl From<ConversationRow> for Conversation {
                 Uuid::default()
             }),
             title: r.title,
+            archived_at: r.archived_at.and_then(|value| {
+                value
+                    .parse()
+                    .map_err(|e| {
+                        tracing::warn!("Failed to parse conversation archived_at '{value}': {e}");
+                        e
+                    })
+                    .ok()
+            }),
             created_at: r.created_at.parse().unwrap_or_else(|e| {
                 tracing::warn!(
                     "Failed to parse conversation created_at '{}': {e}",
@@ -713,6 +750,25 @@ impl From<ConversationRow> for Conversation {
                 );
                 chrono::DateTime::default()
             }),
+        }
+    }
+}
+
+impl From<ConversationListRow> for ConversationListItem {
+    fn from(row: ConversationListRow) -> Self {
+        let conversation = ConversationRow {
+            id: row.id,
+            title: row.title,
+            archived_at: row.archived_at,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+        .into();
+        Self {
+            conversation,
+            preview: row.preview,
+            matched_message_id: row.matched_message_id.and_then(|id| id.parse().ok()),
+            message_count: row.message_count,
         }
     }
 }

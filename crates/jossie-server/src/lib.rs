@@ -48,11 +48,21 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Conversations
         .route(
             "/api/conversations",
-            get(handlers::conversations::list_conversations),
+            get(handlers::conversations::list_conversations)
+                .post(handlers::conversations::create_conversation),
+        )
+        .route(
+            "/api/conversations/{id}",
+            patch(handlers::conversations::update_conversation)
+                .delete(handlers::conversations::delete_conversation),
         )
         .route(
             "/api/conversations/{id}/messages",
             get(handlers::conversations::get_messages),
+        )
+        .route(
+            "/api/conversations/{id}/export",
+            get(handlers::conversations::export_conversation),
         )
         .route(
             "/api/conversations/{id}/cancel",
@@ -60,6 +70,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         // Files
         .route("/api/files", post(handlers::files::upload_file))
+        .route(
+            "/api/files/{id}",
+            get(handlers::files::download_file).delete(handlers::files::delete_file),
+        )
         .route(
             "/api/chat-imports",
             post(handlers::files::start_chat_import),

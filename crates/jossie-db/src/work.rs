@@ -513,6 +513,46 @@ impl Database {
         ).bind(id).fetch_optional(&self.pool).await?)
     }
 
+    pub async fn get_work_run_by_source(
+        &self,
+        source_type: &str,
+        source_id: &str,
+    ) -> anyhow::Result<Option<WorkRun>> {
+        Ok(sqlx::query_as::<_, WorkRun>(
+            "SELECT id, goal_id, task_id, conversation_id, kind, source_type, source_id, status,
+             summary, current_phase, error, visibility, cancel_requested, started_at, finished_at, created_at, updated_at
+             FROM work_runs WHERE source_type = ? AND source_id = ?",
+        )
+        .bind(source_type)
+        .bind(source_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// Atomically claims a queued run for execution.
+    ///
+    /// This keeps reconnecting clients from starting the same durable turn more
+    /// than once while still allowing a queued turn to be resumed if the first
+    /// connection disappeared before its worker was spawned.
+    pub async fn claim_queued_work_run(&self, id: &str) -> anyhow::Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE work_runs
+             SET status = 'running',
+                 started_at = COALESCE(started_at, ?),
+                 current_phase = COALESCE(current_phase, 'Starting conversation'),
+                 updated_at = ?
+             WHERE id = ? AND status = 'queued'",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn get_work_run_detail(&self, id: &str) -> anyhow::Result<Option<WorkRunDetail>> {
         let Some(run) = self.get_work_run(id).await? else {
             return Ok(None);

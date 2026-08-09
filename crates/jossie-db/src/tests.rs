@@ -939,3 +939,135 @@ async fn interrupted_actions_become_uncertain_without_retrying() {
     );
     assert!(messages.last().unwrap().content.contains("uncertain"));
 }
+
+#[tokio::test]
+async fn conversation_search_and_archive_views_use_visible_messages() {
+    let db = test_db().await;
+    let first = db.create_conversation(Some("Planning")).await.unwrap();
+    let second = db.create_conversation(Some("Other")).await.unwrap();
+    db.save_message(&Message::new(
+        first.id,
+        Role::User,
+        "Book the night train to Vienna".to_string(),
+    ))
+    .await
+    .unwrap();
+    db.save_message(&Message::new(
+        second.id,
+        Role::Tool,
+        "Vienna internal result".to_string(),
+    ))
+    .await
+    .unwrap();
+
+    let matches = db
+        .list_conversation_items("active", Some("Vienna"), 50, None)
+        .await
+        .unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].conversation.id, first.id);
+    assert!(matches[0].matched_message_id.is_some());
+
+    db.update_conversation(first.id, None, Some(true))
+        .await
+        .unwrap();
+    assert!(
+        db.list_conversation_items("active", None, 50, None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|item| item.conversation.id != first.id)
+    );
+    assert_eq!(
+        db.list_conversation_items("archived", None, 50, None)
+            .await
+            .unwrap()[0]
+            .conversation
+            .id,
+        first.id
+    );
+}
+
+#[tokio::test]
+async fn visible_activity_restores_an_archived_conversation() {
+    let db = test_db().await;
+    let conversation = db.create_conversation(Some("Restore me")).await.unwrap();
+    db.update_conversation(conversation.id, None, Some(true))
+        .await
+        .unwrap();
+    db.save_message(&Message::new(
+        conversation.id,
+        Role::Assistant,
+        "A new update arrived".to_string(),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        db.get_conversation(conversation.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn message_history_supports_before_and_around_windows() {
+    let db = test_db().await;
+    let conversation = db.create_conversation(None).await.unwrap();
+    let mut ids = Vec::new();
+    for index in 0..8 {
+        let message = Message::new(conversation.id, Role::User, format!("Message {index}"));
+        ids.push(message.id);
+        db.save_message(&message).await.unwrap();
+    }
+    let before = db
+        .get_messages_before(conversation.id, ids[5], 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        before
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Message 2", "Message 3", "Message 4"]
+    );
+    let around = db
+        .get_messages_around(conversation.id, ids[4], 5)
+        .await
+        .unwrap();
+    assert!(around.iter().any(|message| message.id == ids[4]));
+    assert_eq!(around.len(), 5);
+}
+
+#[tokio::test]
+async fn queued_work_run_can_only_be_claimed_once() {
+    let db = test_db().await;
+    let conversation = db.create_conversation(None).await.unwrap();
+    let run = db
+        .create_work_run(NewWorkRun {
+            id: None,
+            goal_id: None,
+            task_id: None,
+            conversation_id: Some(conversation.id),
+            kind: "chat",
+            source_type: Some("chat_message"),
+            source_id: Some("message-1"),
+            summary: "Conversation request",
+            visibility: "significant",
+        })
+        .await
+        .unwrap();
+
+    assert!(db.claim_queued_work_run(&run.id).await.unwrap());
+    assert!(!db.claim_queued_work_run(&run.id).await.unwrap());
+    assert_eq!(
+        db.get_work_run_by_source("chat_message", "message-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
+}

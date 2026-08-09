@@ -20,3 +20,17 @@ jobs:
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: frontend/package-lock.json
+    - name: Install frontend dependencies
+      working-directory: frontend
+      run: npm ci
+    - name: Run frontend tests
+      working-directory: frontend
+      run: npm test
+    - name: Build served frontend assets
+      working-directory: frontend
+      run: npm run build

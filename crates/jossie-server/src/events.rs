@@ -98,7 +98,11 @@ pub enum ServerEvent {
     ConversationUpdated {
         conversation_id: Uuid,
         title: Option<String>,
+        archived_at: Option<String>,
         updated_at: String,
+    },
+    ConversationDeleted {
+        conversation_id: Uuid,
     },
     BackgroundNotification {
         conversation_id: Uuid,
@@ -183,6 +187,7 @@ impl ServerEvent {
             | ServerEvent::ConversationUpdated {
                 conversation_id, ..
             }
+            | ServerEvent::ConversationDeleted { conversation_id }
             | ServerEvent::BackgroundNotification {
                 conversation_id, ..
             }
@@ -738,6 +743,7 @@ pub async fn persist_message(state: &AppState, message: &Message) -> anyhow::Res
         state.publish_event(ServerEvent::ConversationUpdated {
             conversation_id: conversation.id,
             title: conversation.title,
+            archived_at: conversation.archived_at.map(|value| value.to_rfc3339()),
             updated_at: conversation.updated_at.to_rfc3339(),
         });
     }

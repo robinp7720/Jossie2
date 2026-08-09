@@ -305,8 +305,10 @@ See [WEB_API.md](WEB_API.md) for full HTTP and WebSocket API documentation.
 
 #### REST Endpoints
 - `POST /api/chat` - Send a message (blocking)
-- `GET /api/conversations` - List all conversations
-- `GET /api/conversations/{id}/messages` - Get conversation history
+- `GET`, `POST /api/conversations` - Search/page conversations or create a thread
+- `PATCH`, `DELETE /api/conversations/{id}` - Rename, archive, restore, or permanently delete an archived thread
+- `GET /api/conversations/{id}/messages` - Get a recent, older, or around-match history window
+- `GET /api/conversations/{id}/export` - Export the visible transcript as Markdown or JSON
 - `GET /api/work` - Get goals, active runs, schedules, imports, and worker health
 - `GET /api/goals/{id}` - Get a goal, its outcome tasks, and run history
 - `POST /api/goals/{id}/pause|resume|cancel` - Control tracked work

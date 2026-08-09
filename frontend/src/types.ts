@@ -1,8 +1,12 @@
 export type Conversation = {
   id: string
   title: string | null
+  archived_at: string | null
   created_at: string
   updated_at: string
+  preview?: string | null
+  matched_message_id?: string | null
+  message_count?: number
 }
 
 export type ToolCall = {

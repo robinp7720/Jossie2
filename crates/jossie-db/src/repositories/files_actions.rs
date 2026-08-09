@@ -45,6 +45,44 @@ impl Database {
         Ok(())
     }
 
+    pub async fn get_unattached_file_record(
+        &self,
+        id: &Uuid,
+    ) -> anyhow::Result<Option<FileRecord>> {
+        let Some(record) = self.get_file_record(id).await? else {
+            return Ok(None);
+        };
+        let in_use = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM message_attachments WHERE file_id = ?
+                           UNION ALL SELECT 1 FROM chat_imports WHERE file_id = ?)",
+        )
+        .bind(id.to_string())
+        .bind(id.to_string())
+        .fetch_one(&self.pool)
+        .await?
+            != 0;
+        if in_use {
+            anyhow::bail!("File is already attached or being used by an import");
+        }
+        Ok(Some(record))
+    }
+
+    pub async fn delete_file_record_if_unattached(&self, id: &Uuid) -> anyhow::Result<bool> {
+        let id = id.to_string();
+        let result = sqlx::query(
+            "DELETE FROM files
+             WHERE id = ?
+               AND NOT EXISTS (SELECT 1 FROM message_attachments WHERE file_id = ?)
+               AND NOT EXISTS (SELECT 1 FROM chat_imports WHERE file_id = ?)",
+        )
+        .bind(&id)
+        .bind(&id)
+        .bind(&id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn list_files_for_conversation(
         &self,
         conversation_id: Uuid,

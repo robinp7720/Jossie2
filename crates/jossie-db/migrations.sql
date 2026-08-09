@@ -1,9 +1,14 @@
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     title TEXT,
+    archived_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+ALTER TABLE conversations ADD COLUMN archived_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_conversations_archived_updated
+    ON conversations(archived_at, updated_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,

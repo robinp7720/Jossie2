@@ -151,9 +151,12 @@ Current API surface:
 | `/api/chat` | `POST` | non-streaming chat |
 | `/api/chat/stream` | `GET` | WebSocket streaming chat |
 | `/api/events` | `GET` | authenticated workspace-event WebSocket |
-| `/api/conversations` | `GET` | list conversations |
-| `/api/conversations/{id}/messages` | `GET` | optional `?limit=` |
-| `/api/files`, `/api/chat-imports` | `POST` | upload files and start imports |
+| `/api/conversations` | `GET`, `POST` | search/page conversations or create a thread |
+| `/api/conversations/{id}` | `PATCH`, `DELETE` | rename/archive or permanently delete an archived thread |
+| `/api/conversations/{id}/messages` | `GET` | optional `limit`, `before`, or `around` windowing |
+| `/api/conversations/{id}/export` | `GET` | visible transcript as Markdown or JSON |
+| `/api/files`, `/api/files/{id}` | `POST`, `GET`, `DELETE` | upload, download, or remove an unused file |
+| `/api/chat-imports` | `POST` | start a chat-export import |
 | `/api/graph` | `GET` | returns graph nodes/edges, optional `?limit=` |
 | `/api/dashboard`, `/api/memories`, `/api/activity` | `GET` | browser workspace data |
 | `/api/work`, `/api/goals/{id}`, `/api/work/runs/{id}` | `GET` | durable work, goal, and run state |

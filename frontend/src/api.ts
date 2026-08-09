@@ -75,14 +75,64 @@ export const request = async <T>(
   return JSON.parse(text) as T
 }
 
-export const listConversations = (config: ApiConfig) =>
-  request<Conversation[]>(config, '/api/conversations')
+export const listConversations = (
+  config: ApiConfig,
+  filters: { view?: 'active' | 'archived' | 'all'; q?: string; limit?: number; before?: string } = {},
+) => {
+  const query = new URLSearchParams()
+  if (filters.view) query.set('view', filters.view)
+  if (filters.q) query.set('q', filters.q)
+  if (filters.limit) query.set('limit', String(filters.limit))
+  if (filters.before) query.set('before', filters.before)
+  return request<Conversation[]>(config, `/api/conversations${query.size ? `?${query}` : ''}`)
+}
 
-export const getMessages = (config: ApiConfig, conversationId: string, limit?: number) =>
-  request<Message[]>(
+export const createConversation = (config: ApiConfig) =>
+  request<Conversation>(config, '/api/conversations', { method: 'POST' })
+
+export const updateConversation = (
+  config: ApiConfig,
+  conversationId: string,
+  payload: { title?: string; archived?: boolean },
+) => request<Conversation>(config, `/api/conversations/${encodeURIComponent(conversationId)}`, {
+  method: 'PATCH', body: JSON.stringify(payload),
+})
+
+export const deleteConversation = (config: ApiConfig, conversationId: string) =>
+  request<{ conversation_id: string; deleted: boolean; deleted_files: number }>(
     config,
-    `/api/conversations/${conversationId}/messages${limit ? `?limit=${limit}` : ''}`,
+    `/api/conversations/${encodeURIComponent(conversationId)}`,
+    { method: 'DELETE' },
   )
+
+export const getMessages = (
+  config: ApiConfig,
+  conversationId: string,
+  limit = 100,
+  cursor: { before?: string; around?: string } = {},
+) => {
+  const query = new URLSearchParams({ limit: String(limit) })
+  if (cursor.before) query.set('before', cursor.before)
+  if (cursor.around) query.set('around', cursor.around)
+  return request<Message[]>(config, `/api/conversations/${conversationId}/messages?${query}`)
+}
+
+export const downloadConversationExport = async (
+  config: ApiConfig,
+  conversationId: string,
+  format: 'markdown' | 'json',
+) => {
+  const response = await fetch(buildUrl(config, `/api/conversations/${encodeURIComponent(conversationId)}/export?format=${format}`), {
+    credentials: 'include', headers: buildHeaders(config),
+  })
+  if (!response.ok) throw new Error(await response.text() || `Export failed with status ${response.status}`)
+  const disposition = response.headers.get('content-disposition') ?? ''
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? `conversation.${format === 'markdown' ? 'md' : 'json'}`
+  const url = URL.createObjectURL(await response.blob())
+  const anchor = document.createElement('a')
+  anchor.href = url; anchor.download = filename; anchor.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
+}
 
 export const sendMessage = (
   config: ApiConfig,
@@ -107,6 +157,22 @@ export const uploadFile = (config: ApiConfig, file: File) => {
     method: 'POST',
     body: formData,
   })
+}
+
+export const deleteUploadedFile = (config: ApiConfig, fileId: string) =>
+  request<void>(config, `/api/files/${encodeURIComponent(fileId)}`, { method: 'DELETE' })
+
+export const downloadUploadedFile = async (config: ApiConfig, fileId: string, fallbackName: string) => {
+  const response = await fetch(buildUrl(config, `/api/files/${encodeURIComponent(fileId)}`), {
+    credentials: 'include', headers: buildHeaders(config),
+  })
+  if (!response.ok) throw new Error(await response.text() || `Download failed with status ${response.status}`)
+  const disposition = response.headers.get('content-disposition') ?? ''
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? fallbackName
+  const url = URL.createObjectURL(await response.blob())
+  const anchor = document.createElement('a')
+  anchor.href = url; anchor.download = filename; anchor.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
 export const startChatImport = (

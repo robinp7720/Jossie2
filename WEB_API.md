@@ -52,6 +52,10 @@ If `conversation_id` is omitted, the server creates a new conversation.
 
 Upload a file as multipart form data using the `file` field. The response contains `file_id` and `name`.
 
+#### `GET` / `DELETE /api/files/{id}`
+
+Download an uploaded attachment, or delete it while it is still an unused draft. Attached/imported files cannot be deleted through the draft cleanup endpoint.
+
 #### `POST /api/chat-imports`
 
 Queue an uploaded TXT or JSON chat export for background learning.
@@ -75,7 +79,7 @@ Fetch current import status. Large histories are analyzed in bounded chunks; whe
 
 #### `GET /api/conversations`
 
-List all conversations.
+List and search conversations. Query parameters are `view=active|archived|all` (default `active`), `q`, `limit` (maximum `100`), and the stable `before=<conversation-id>` cursor. Results also include a visible-message preview, message count, and `matched_message_id` when search matched transcript content.
 
 Response:
 
@@ -84,11 +88,27 @@ Response:
   {
     "id": "uuid-string",
     "title": "Telegram chat 12345",
+    "archived_at": null,
+    "preview": "Most recent visible message",
+    "matched_message_id": null,
+    "message_count": 8,
     "created_at": "ISO-8601-timestamp",
     "updated_at": "ISO-8601-timestamp"
   }
 ]
 ```
+
+#### `POST /api/conversations`
+
+Create an empty conversation. The web UI uses this before the first reconnect-safe turn.
+
+#### `PATCH` / `DELETE /api/conversations/{id}`
+
+Patch `title` and/or `archived`. Permanent deletion requires an archived conversation with no active work, approval, open goal, or schedule. It removes conversation-specific history and exclusive attachments, but not global memory or graph knowledge.
+
+#### `GET /api/conversations/{id}/export`
+
+Download the visible user/assistant transcript with attachment metadata. `format` is `markdown` (default) or `json`; internal system/tool records and attachment binaries are excluded.
 
 #### `GET /api/conversations/{id}/messages`
 
@@ -97,6 +117,10 @@ Fetch conversation messages in chronological order.
 Optional query parameters:
 
 - `limit`: maximum number of most recent messages to return
+- `before`: return messages before a message UUID
+- `around`: return a chronological window centered on a message UUID
+
+`before` and `around` are mutually exclusive; `limit` is clamped to `1..=200`.
 
 Response:
 
@@ -270,37 +294,48 @@ Client message:
 ```json
 {
   "message": "Hello",
-  "conversation_id": "optional-uuid"
+  "conversation_id": "optional-uuid",
+  "client_message_id": "optional-idempotency-uuid",
+  "file_ids": ["optional-upload-uuid"]
 }
 ```
 
-Server events:
+The browser supplies `client_message_id`. Retrying the same ID and content acknowledges the existing turn rather than creating a duplicate.
 
-#### Delta
+Server events include:
+
+#### Accepted
 
 ```json
 {
-  "type": "delta",
+  "type": "message_accepted",
+  "conversation_id": "uuid",
+  "message_id": "uuid",
+  "duplicate": false,
+  "run_id": "uuid"
+}
+```
+
+#### Assistant delta
+
+```json
+{
+  "type": "assistant_delta",
+  "conversation_id": "uuid",
+  "run_id": "uuid",
   "content": "Hel"
 }
 ```
 
-#### Tool result
+Run lifecycle events include `run_started`, `assistant_thinking`, `tool_started`, `tool_finished`, `run_waiting_for_approval`, `run_completed`, `run_paused`, `run_cancelled`, and `error`. The same privacy-safe events are broadcast on `/api/events`, allowing clients to reconcile after reconnecting.
+
+#### Completed
 
 ```json
 {
-  "type": "tool_result",
-  "tool": "mail_search",
-  "result": "Search results JSON..."
-}
-```
-
-#### Done
-
-```json
-{
-  "type": "done",
-  "conversation_id": "uuid"
+  "type": "run_completed",
+  "conversation_id": "uuid",
+  "run_id": "uuid"
 }
 ```
 

@@ -14,7 +14,6 @@ Current backlog only. Completed historical work has been removed so this file re
 
 - [ ] Add tests for Google OAuth callback and public base URL normalization in realistic handler-level flows
 
-- [ ] Add frontend smoke checks or a lightweight build/test step so the served `frontend/dist` contract is covered in CI
 
 ## Docs
 

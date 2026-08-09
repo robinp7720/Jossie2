@@ -3,6 +3,8 @@
 pub async fn run_agent_loop_streaming(
     state: &AppState,
     conv_id: Uuid,
+    run_id: String,
+    source_message_id: Option<Uuid>,
     event_tx: tokio::sync::mpsc::Sender<ServerEvent>,
 ) {
     if let Err(e) = claim_conversation(state, conv_id).await {
@@ -11,7 +13,7 @@ pub async fn run_agent_loop_streaming(
             Some(&event_tx),
             ServerEvent::Error {
                 conversation_id: conv_id,
-                run_id: None,
+                run_id: Some(run_id),
                 error: e.to_string(),
             },
         )
@@ -20,7 +22,13 @@ pub async fn run_agent_loop_streaming(
     }
 
     let event_tx_for_error = event_tx.clone();
-    let result = AssertUnwindSafe(run_agent_loop_streaming_inner(state, conv_id, event_tx))
+    let result = AssertUnwindSafe(run_agent_loop_streaming_inner(
+        state,
+        conv_id,
+        run_id,
+        source_message_id,
+        event_tx,
+    ))
         .catch_unwind()
         .await;
     release_conversation(state, conv_id).await;
@@ -45,9 +53,10 @@ pub async fn run_agent_loop_streaming(
 async fn run_agent_loop_streaming_inner(
     state: &AppState,
     conv_id: Uuid,
+    run_id: String,
+    source_message_id: Option<Uuid>,
     event_tx: tokio::sync::mpsc::Sender<ServerEvent>,
 ) {
-    let run_id = Uuid::new_v4().to_string();
     let options = AgentRunOptions::default();
     let (
         mut toolset,
@@ -83,6 +92,22 @@ async fn run_agent_loop_streaming_inner(
         },
     )
     .await;
+    if let Some(source_message_id) = source_message_id
+        && let Err(error) = state
+            .db
+            .annotate_work_run(
+                &run_id,
+                None,
+                None,
+                Some("chat_message"),
+                Some(&source_message_id.to_string()),
+                None,
+                None,
+            )
+            .await
+    {
+        tracing::warn!("Failed to associate chat run {run_id} with message: {error}");
+    }
 
     let mut previous_response_id: Option<String> = None;
     let mut chained_messages = Vec::new();
