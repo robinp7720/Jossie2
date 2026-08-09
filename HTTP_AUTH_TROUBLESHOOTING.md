@@ -201,7 +201,7 @@ Here's what a complete authentication failure looks like:
 ### Enable comprehensive HTTP logging in config.toml
 
 ```toml
-[integrations.http]
+[http]
 allowed_domains = ["*"]  # Or list specific domains
 # Note: Empty array means allow all domains
 ```

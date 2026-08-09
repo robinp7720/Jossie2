@@ -253,7 +253,7 @@ impl MailIntegration {
                 args.page_token.as_deref(),
             )
             .await?;
-        let payload = Self::parse_json_value(&raw, "gmail_search")?;
+        let payload = Self::parse_json_value(&raw, "Google mail search")?;
         let messages = payload
             .get("messages")
             .and_then(|value| value.as_array())
@@ -343,7 +343,7 @@ impl MailIntegration {
         let raw = google
             .mail_read(provider_account_id, &message_ref.external_id)
             .await?;
-        let payload = Self::parse_json_value(&raw, "gmail_read")?;
+        let payload = Self::parse_json_value(&raw, "Google mail read")?;
         Ok(serde_json::to_string_pretty(&json!({
             "message_ref": message_ref,
             "from": payload.get("from").and_then(|value| value.as_str()).unwrap_or_default(),
@@ -405,7 +405,7 @@ impl MailIntegration {
                     .as_ref()
                     .ok_or_else(|| anyhow!("Google integration is not configured"))?;
                 let raw = google.mail_labels(provider_account_id).await?;
-                let labels = Self::parse_json_value(&raw, "gmail_list_labels")?
+                let labels = Self::parse_json_value(&raw, "Google mail labels")?
                     .as_array()
                     .cloned()
                     .unwrap_or_default();

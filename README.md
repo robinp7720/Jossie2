@@ -264,14 +264,15 @@ You can override any config value with environment variables:
 - **Auto-extraction**: Jossie automatically extracts entities and relationships after each conversation turn
 - **Visualization**: The frontend fetches graph data from `GET /api/graph`
 
-### Email (`jossie-integration-email`)
-- **Tools**: `email_list_accounts`, `email_search`, `email_read`, `email_send`, `email_list_folders`
-- **Description**: IMAP/SMTP email integration
-- **Supported**: Multiple email accounts
+### Mail (`jossie-integration-mail`)
+- **Tools**: `mail_list_accounts`, `mail_search`, `mail_read`, `mail_send`, `mail_list_mailboxes`
+- **Description**: One provider-neutral tool surface for IMAP/SMTP and Gmail accounts
+- **Supported**: Multiple accounts with provider-prefixed account and message references
 
 ### Google (`jossie-integration-google`)
-- **Tools**: `google_list_accounts`, `gmail_search`, `gmail_read`, `gmail_send`, `drive_search`, `drive_read`, `drive_list_files`, `calendar_list_calendars`, `calendar_list_events`, `calendar_create_event`
+- **Tools**: `google_list_accounts`, `drive_search`, `drive_read`, `drive_list_files`, `calendar_list_calendars`, `calendar_list_events`, `calendar_create_event`, `calendar_update_event`
 - **Description**: Gmail, Google Calendar, and Google Drive
+- **Mail access**: Gmail messages are exposed through the provider-neutral `mail_*` tools
 - **OAuth**: Setup via `/setup/google` endpoint
 - **Multi-account**: Supports multiple Google accounts
 - **Auto-notifications**: Jossie monitors Gmail and Calendar events

@@ -290,7 +290,7 @@ Server events:
 ```json
 {
   "type": "tool_result",
-  "tool": "gmail_search",
+  "tool": "mail_search",
   "result": "Search results JSON..."
 }
 ```

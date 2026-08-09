@@ -13,7 +13,8 @@ Jossie2/
   Cargo.toml                    # workspace root + binary package
   config.sample.toml            # committed sample config; copy to config.toml locally
   src/main.rs                   # loads config, wires integrations, starts server/bot
-  src/event_loop.rs             # background polling + scheduled/OOB processing
+  src/event_loop.rs             # background-worker facade
+  src/event_loop/               # event batching, scheduling, heartbeat, worker logic
   frontend/                     # Vite + React web UI
   crates/
     jossie-core/               # shared types, config, integration trait/registry
@@ -24,10 +25,12 @@ Jossie2/
     jossie-integration-memory/ # long-term memory tools
     jossie-integration-graph/  # knowledge graph tools
     jossie-integration-email/  # IMAP/SMTP email tools
+    jossie-integration-mail/   # provider-neutral mail tools
     jossie-integration-google/ # Gmail, Drive, Calendar, OAuth, polling
     jossie-integration-browser/# headless browser + DuckDuckGo search
     jossie-integration-http/   # outbound HTTP requests with guardrails
     jossie-integration-scheduler/ # scheduled tasks + out-of-band messages
+    jossie-integration-files/  # uploaded files and chat-export imports
 ```
 
 ## Workspace Summary
@@ -41,8 +44,9 @@ Jossie2/
 | `jossie-telegram` | Private Telegram frontend with media, voice transcription, approvals, commands, and sustained typing status |
 | `integration-memory` | `memory_save`, `memory_search`, `memory_list_keys`, `memory_list_all` |
 | `integration-graph` | graph node/edge mutation and query tools |
-| `integration-email` | account listing, IMAP search/read, SMTP send, folder listing |
-| `integration-google` | Google OAuth onboarding, Gmail, Drive, Calendar, polling |
+| `integration-email` | Internal IMAP/SMTP provider, onboarding, and polling |
+| `integration-mail` | Agent-visible provider-neutral mail search/read/send tools |
+| `integration-google` | Google OAuth onboarding, Gmail provider operations, Drive, Calendar, polling |
 | `integration-browser` | page fetch/render via headless Chrome, DDG-style search |
 | `integration-http` | generic HTTP requests with SSRF-style blocking and domain controls |
 | `integration-scheduler` | one-shot/recurring tasks, cancel/list, out-of-band notifications |
@@ -52,13 +56,15 @@ Jossie2/
 
 ### Integration System
 
-Every integration implements `jossie_core::integration::Integration` in [`crates/jossie-core/src/integration.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-core/src/integration.rs):
+Every integration implements `jossie_core::integration::Integration` through `crates/jossie-core/src/integration.rs`:
 
 ```rust
 #[async_trait]
 pub trait Integration: Send + Sync {
     fn name(&self) -> &str;
     fn tools(&self) -> Vec<ToolDefinition>;
+    fn agent_tools(&self) -> Vec<ToolDefinition> { ... }
+    fn show_in_onboarding(&self) -> bool { ... }
     async fn execute(&self, tool_name: &str, arguments: &str) -> anyhow::Result<String>;
     async fn check_onboarding(&self) -> anyhow::Result<OnboardingStatus> { ... }
     async fn poll(&self) -> anyhow::Result<()> { ... }
@@ -69,7 +75,7 @@ pub trait Integration: Send + Sync {
 
 ### Agent Loop
 
-The main loop lives in [`crates/jossie-server/src/agent.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-server/src/agent.rs), not in `lib.rs`.
+The public agent facade lives in `crates/jossie-server/src/agent.rs`; goal tracking, prompts, tools, run modes, event mode, and knowledge handling are separated under `src/agent/`.
 
 Current behavior:
 
@@ -91,18 +97,18 @@ Notable current features:
 
 ### Background Event Loop
 
-[`src/event_loop.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/src/event_loop.rs) is a real background worker. It:
+`src/event_loop.rs` is the facade for the background worker, whose domain files live under `src/event_loop/`. It:
 
 - polls integrations that implement `poll()`
 - processes queued `integration_events`
 - executes due scheduled tasks
 - delivers queued out-of-band messages
 
-Important caveat: the event loop is only started from [`src/main.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/src/main.rs) when Telegram is configured, and proactive notifications are currently delivered through Telegram chat links.
+The event loop is started unconditionally from `src/main.rs`, so polling, scheduled tasks, heartbeat checks, and web-visible background activity continue without Telegram. Telegram delivery is used when a linked chat is available.
 
 ## Database Reality
 
-SQLite schema is embedded in [`crates/jossie-db/migrations.sql`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-db/migrations.sql) and applied by `Database::migrate()` in [`crates/jossie-db/src/lib.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-db/src/lib.rs).
+SQLite schema is embedded in `crates/jossie-db/migrations.sql` and applied by `Database::migrate()` in `crates/jossie-db/src/lib.rs`. Domain-specific operations live under `src/repositories/` while `Database` remains the facade.
 
 Current schema includes:
 
@@ -119,18 +125,22 @@ Current schema includes:
 - `scheduled_tasks`
 - `out_of_band_messages`
 - `conversation_summaries`
+- `auth_sessions`, `activity_events`, `pending_actions`
+- `goals`, `goal_tasks`, `work_runs`, `work_run_steps`, `work_run_checkpoints`
+- `worker_status`, `telegram_goal_notifications`
+- `files`, `message_attachments`, `chat_imports`
 
 Do not assume all IDs or timestamps follow one format. Conversations/messages/tasks/events are generally app-generated UUID strings, but some keys are arbitrary strings and Telegram chat IDs are integers. Some timestamps are written as RFC3339 by application code, while schema defaults still use SQLite `datetime('now')`.
 
 ## HTTP API And Frontends
 
-The router is assembled in [`crates/jossie-server/src/lib.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-server/src/lib.rs).
+The router is assembled in `crates/jossie-server/src/lib.rs`.
 
 Authentication:
 
 - Protected routes accept `Authorization: Bearer <token>`.
 - The auth middleware also accepts `?token=...`, mainly for WebSockets/browser usage.
-- `/api/health` and `/oauth/callback` are public.
+- `/api/auth/login`, `/api/auth/session`, `/api/health`, and `/oauth/callback` are public.
 - `/setup/google` is auth-protected.
 - Static frontend files from `frontend/dist` are served as the fallback service.
 
@@ -140,23 +150,28 @@ Current API surface:
 |---|---|---|
 | `/api/chat` | `POST` | non-streaming chat |
 | `/api/chat/stream` | `GET` | WebSocket streaming chat |
+| `/api/events` | `GET` | authenticated workspace-event WebSocket |
 | `/api/conversations` | `GET` | list conversations |
 | `/api/conversations/{id}/messages` | `GET` | optional `?limit=` |
+| `/api/files`, `/api/chat-imports` | `POST` | upload files and start imports |
 | `/api/graph` | `GET` | returns graph nodes/edges, optional `?limit=` |
+| `/api/dashboard`, `/api/memories`, `/api/activity` | `GET` | browser workspace data |
+| `/api/work`, `/api/goals/{id}`, `/api/work/runs/{id}` | `GET` | durable work, goal, and run state |
+| `/api/actions/pending` | `GET` | pending external-action approvals |
 | `/api/onboarding` | `GET` | integration onboarding status |
 | `/api/config/accounts` | `GET`, `POST` | list/add integration accounts |
-| `/api/config/accounts/{id}` | `DELETE` | delete integration account |
+| `/api/config/accounts/{id}` | `PATCH`, `DELETE` | update/delete integration account |
 | `/setup/google` | `GET` | start Google OAuth |
 | `/oauth/callback` | `GET` | complete Google OAuth |
 | `/api/health` | `GET` | DB health |
 
-Errors are already returned as structured JSON from [`crates/jossie-server/src/errors.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-server/src/errors.rs).
+Errors are already returned as structured JSON from `crates/jossie-server/src/errors.rs`.
 
 ## Config Reality
 
-The committed config file is [`config.sample.toml`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/config.sample.toml). The binary reads `config.toml` from the current working directory.
+The committed config file is `config.sample.toml`. The binary reads `config.toml` from the current working directory.
 
-Current top-level config sections in [`crates/jossie-core/src/config.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/crates/jossie-core/src/config.rs):
+Current top-level config sections are defined in `crates/jossie-core/src/config.rs`:
 
 - `[server]`
 - `[llm]`
@@ -165,8 +180,9 @@ Current top-level config sections in [`crates/jossie-core/src/config.rs`](/home/
 - `[email]`
 - `[google]`
 - `[http]`
+- `[heartbeat]`
 
-Environment overrides implemented in [`src/main.rs`](/home/robin/Development/07-External-Upstream/External-Checkouts/Jossie2/src/main.rs):
+Environment overrides are implemented in `src/main.rs`:
 
 - `JOSSIE_SERVER_AUTH_TOKEN`
 - `JOSSIE_SERVER_PUBLIC_BASE_URL`
@@ -215,7 +231,7 @@ At the time this guide was updated:
 - `cargo test --workspace -q` passes
 - `cargo check -q` passes
 
-There are unit tests across `jossie-core`, `jossie-db`, `jossie-llm`, `jossie-server`, `jossie-integration-memory`, `jossie-integration-email`, `jossie-integration-http`, and `src/event_loop.rs`.
+There are Rust tests across the core, database, LLM, server, integrations, Telegram, and background-worker code, plus Vitest component and utility tests in the frontend.
 
 Useful commands:
 

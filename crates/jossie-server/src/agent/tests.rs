@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn test_parse_event_mode_response_extracts_embedded_json() {
         let content = r#"to=multi_tool_use.parallel blah
-{"tool_uses":[{"recipient_name":"functions.gmail_read","parameters":{"message_id":"abc"}}]}
+{"tool_uses":[{"recipient_name":"functions.mail_read","parameters":{"message_ref":{"provider":"gmail","account_id":"gmail:demo","external_id":"abc"}}}]}
 {"action":"notify","message":"Two transaction emails just came in."}"#;
 
         let parsed = parse_event_mode_response(content).expect("expected parsed response");
