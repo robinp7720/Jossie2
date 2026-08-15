@@ -42,10 +42,6 @@ impl TelegramBot {
         }
     }
 
-    pub fn is_configured(&self) -> bool {
-        !self.token.is_empty()
-    }
-
     pub async fn run(self) -> anyhow::Result<()> {
         let bot = Bot::new(&self.token);
         let runtime = Arc::new(TelegramRuntime::default());
@@ -53,14 +49,14 @@ impl TelegramBot {
         let allowed_user_id = self.allowed_user_id;
 
         if state.llm.transcription_is_configured() {
-            match tokio::process::Command::new(&state.telegram_ffmpeg_path)
+            match tokio::process::Command::new(&state.telegram.ffmpeg_path)
                 .arg("-version")
                 .output()
                 .await
             {
                 Ok(output) if output.status.success() => {}
                 Ok(_) | Err(_) => tracing::warn!(
-                    ffmpeg = %state.telegram_ffmpeg_path,
+                    ffmpeg = %state.telegram.ffmpeg_path,
                     "FFmpeg is unavailable; Telegram voice notes will be rejected"
                 ),
             }

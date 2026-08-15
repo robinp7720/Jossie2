@@ -297,10 +297,10 @@ async fn build_system_prompt(
     prompt_memory_scope: PromptMemoryScope,
 ) -> PromptBundle {
     let stable = match prompt_memory_scope {
-        PromptMemoryScope::Chat => state.system_prompt.clone(),
+        PromptMemoryScope::Chat => state.agent.system_prompt.clone(),
         PromptMemoryScope::Event => format!(
             "{}\n\n{}",
-            state.system_prompt, INCOMING_NOTIFICATION_MODE_PROMPT
+            state.agent.system_prompt, INCOMING_NOTIFICATION_MODE_PROMPT
         ),
     };
     let mut dynamic = String::new();
@@ -477,7 +477,7 @@ fn format_prompt_memory_section(
     for entry in entries {
         section.push_str("- `");
         section.push_str(&entry.key);
-        section.push_str("`");
+        section.push('`');
         section.push_str(&format!(" (importance {})", entry.importance));
         section.push_str(": ");
         section.push_str(&preview_text(&entry.content, preview_chars));
@@ -546,4 +546,3 @@ pub async fn prepend_system_prompt(
     content.insert_into(messages);
     cache_key
 }
-

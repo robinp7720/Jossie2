@@ -192,8 +192,6 @@ struct ResponsesResponse {
     id: Option<String>,
     #[serde(default)]
     output: Vec<Value>,
-    #[allow(dead_code)]
-    status: Option<String>,
     #[serde(default)]
     error: Option<ResponseError>,
     #[serde(default)]

@@ -10,6 +10,7 @@ import {
 import { AgentRunStatus } from '../components/AgentRunStatus'
 import type { RunStep } from '../components/AgentRunStatus'
 import { api } from '../config'
+import { useWorkspaceEvents } from '../events'
 import type { Conversation, Message, PendingAction, WorkRun } from '../types'
 import { relativeDate } from '../utils/format'
 
@@ -45,7 +46,7 @@ export function Chat({ conversations: initialConversations, onRefresh }: { conve
   const [actionError, setActionError] = useState<string | null>(null)
   const [runSteps, setRunSteps] = useState<RunStep[]>([])
   const [activeRuns, setActiveRuns] = useState<WorkRun[]>([])
-  const [connection, setConnection] = useState<'online' | 'reconnecting'>('online')
+  const { event: workspaceEvent, sequence: eventSequence, connection } = useWorkspaceEvents()
   const [renaming, setRenaming] = useState(false)
   const [renameTitle, setRenameTitle] = useState('')
   const [confirmDelete, setConfirmDelete] = useState<Conversation | null>(null)
@@ -137,19 +138,8 @@ export function Chat({ conversations: initialConversations, onRefresh }: { conve
   }, [activeId, loadThreads, onRefresh, refreshConversation])
 
   useEffect(() => {
-    if (!activeId) return
-    let stopped = false; let socket: WebSocket | null = null; let retryTimer = 0; let attempt = 0
-    const pollTimer = window.setInterval(() => { if (socket?.readyState !== WebSocket.OPEN) void refreshConversation(activeId) }, 2_000)
-    const connect = () => {
-      socket = new WebSocket(buildWebSocketUrl(api, `/api/events?conversation_id=${encodeURIComponent(activeId)}`))
-      socket.onopen = () => { attempt = 0; setConnection('online'); void refreshConversation(activeId) }
-      socket.onmessage = (event) => { try { applyRunEvent(JSON.parse(event.data) as Record<string, unknown>, !directSocketActive.current) } catch { /* malformed event */ } }
-      socket.onclose = () => { if (!stopped) { setConnection('reconnecting'); attempt += 1; retryTimer = window.setTimeout(connect, Math.min(10_000, 500 * 2 ** attempt)) } }
-      socket.onerror = () => socket?.close()
-    }
-    connect()
-    return () => { stopped = true; socket?.close(); clearTimeout(retryTimer); clearInterval(pollTimer) }
-  }, [activeId, applyRunEvent, refreshConversation])
+    if (workspaceEvent) applyRunEvent(workspaceEvent as unknown as Record<string, unknown>, !directSocketActive.current)
+  }, [eventSequence, workspaceEvent, applyRunEvent])
 
   useEffect(() => {
     const feed = feedRef.current

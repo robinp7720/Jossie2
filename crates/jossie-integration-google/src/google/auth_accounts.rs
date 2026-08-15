@@ -114,15 +114,16 @@ impl GoogleIntegration {
             )
             .await?;
         let current_refresh = Self::get_account_refresh_token(acc);
-        if let (Some(paused), Some(current)) = (paused_refresh, current_refresh) {
-            if !paused.is_empty() && paused != current {
-                tracing::info!(
-                    "Google account {} refresh token changed; clearing paused status",
-                    acc.id
-                );
-                self.clear_account_pause_state(db, &acc.id).await?;
-                return Ok(false);
-            }
+        if let (Some(paused), Some(current)) = (paused_refresh, current_refresh)
+            && !paused.is_empty()
+            && paused != current
+        {
+            tracing::info!(
+                "Google account {} refresh token changed; clearing paused status",
+                acc.id
+            );
+            self.clear_account_pause_state(db, &acc.id).await?;
+            return Ok(false);
         }
 
         Ok(true)
@@ -176,12 +177,12 @@ impl GoogleIntegration {
                 &Self::account_last_reconnect_notice_key(&acc.id),
             )
             .await?;
-        if let Some(last_notice) = last_notice {
-            if let Ok(last_dt) = DateTime::parse_from_rfc3339(&last_notice) {
-                let cooldown = Duration::hours(RECONNECT_NOTICE_COOLDOWN_HOURS);
-                if Utc::now() - last_dt.with_timezone(&Utc) < cooldown {
-                    return Ok(());
-                }
+        if let Some(last_notice) = last_notice
+            && let Ok(last_dt) = DateTime::parse_from_rfc3339(&last_notice)
+        {
+            let cooldown = Duration::hours(RECONNECT_NOTICE_COOLDOWN_HOURS);
+            if Utc::now() - last_dt.with_timezone(&Utc) < cooldown {
+                return Ok(());
             }
         }
 
@@ -290,10 +291,10 @@ impl GoogleIntegration {
         // Check cached token
         {
             let tokens = self.tokens.read().await;
-            if let Some(td) = tokens.get(&account_key) {
-                if td.expires_at > std::time::Instant::now() {
-                    return Ok(td.access_token.clone());
-                }
+            if let Some(td) = tokens.get(&account_key)
+                && td.expires_at > std::time::Instant::now()
+            {
+                return Ok(td.access_token.clone());
             }
         }
 
@@ -334,7 +335,7 @@ impl GoogleIntegration {
         Ok(td.access_token)
     }
 
-    pub async fn list_accounts(&self) -> anyhow::Result<String> {
+    pub async fn account_values(&self) -> anyhow::Result<Vec<serde_json::Value>> {
         tracing::debug!("Listing Google integration accounts");
         let mut accounts = Vec::new();
 
@@ -356,7 +357,11 @@ impl GoogleIntegration {
                 }));
             }
         }
-        Ok(serde_json::to_string_pretty(&accounts)?)
+        Ok(accounts)
+    }
+
+    pub async fn list_accounts(&self) -> anyhow::Result<String> {
+        Ok(serde_json::to_string_pretty(&self.account_values().await?)?)
     }
 
 }

@@ -1,5 +1,5 @@
 use anyhow::{Context, anyhow};
-use jossie_core::integration::{Integration, ToolDefinition};
+use jossie_core::integration::{EmptyToolArgs, Integration, ToolDefinition};
 use jossie_integration_email::{EmailIntegration, EmailSearchRequest};
 use jossie_integration_google::GoogleIntegration;
 use serde::{Deserialize, Serialize};
@@ -21,14 +21,15 @@ enum MailProvider {
     Gmail,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MessageRef {
     pub provider: String,
     pub account_id: String,
     pub external_id: String,
-    #[serde(default)]
+    #[schemars(required)]
     pub mailbox: Option<String>,
-    #[serde(default)]
+    #[schemars(required)]
     pub native: Option<Value>,
 }
 
@@ -53,50 +54,67 @@ pub struct MailMessageEvidence {
     pub attachments: Vec<MailAttachmentRef>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct MailSearchArgs {
+    /// Unified mail account ID from mail_list_accounts.
     account_id: String,
+    /// Legacy single-query form. Prefer terms.
     #[serde(default)]
+    #[schemars(skip)]
     query: Option<String>,
-    #[serde(default)]
+    /// Plain-text terms to match.
+    #[schemars(required)]
     terms: Vec<String>,
-    #[serde(default = "default_match_mode")]
+    /// Whether any or all terms must match.
+    #[schemars(required)]
     r#match: String,
-    #[serde(default)]
+    /// Optional sender filter.
+    #[schemars(required)]
     from: Option<String>,
-    #[serde(default)]
+    /// Optional subject filter.
+    #[schemars(required)]
     subject: Option<String>,
-    #[serde(default)]
+    /// Optional inclusive date in YYYY-MM-DD format.
+    #[schemars(required)]
     after: Option<String>,
-    #[serde(default)]
+    /// Optional exclusive date in YYYY-MM-DD format.
+    #[schemars(required)]
     before: Option<String>,
-    #[serde(default)]
+    /// Optional mailbox, folder, or Gmail label filter.
+    #[schemars(required)]
     mailbox: Option<String>,
-    #[serde(default)]
+    /// Optional provider-specific page size hint.
+    #[schemars(required)]
     max_results: Option<u32>,
-    #[serde(default)]
+    /// Optional pagination token for providers that support it.
+    #[schemars(required)]
     page_token: Option<String>,
 }
 
-fn default_match_mode() -> String {
-    "any".to_string()
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct MailReadArgs {
     message_ref: MessageRef,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct MailSendArgs {
+    /// Unified mail account ID from mail_list_accounts.
     account_id: String,
+    /// Recipient email address.
     to: String,
+    /// Email subject.
     subject: String,
+    /// Email body text.
     body: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct MailboxArgs {
+    /// Unified mail account ID from mail_list_accounts.
     account_id: String,
 }
 
@@ -128,11 +146,6 @@ impl MailIntegration {
         Ok((provider, provider_account_id))
     }
 
-    fn parse_json_value(input: &str, context: &str) -> anyhow::Result<Value> {
-        serde_json::from_str::<Value>(input)
-            .with_context(|| format!("{context} returned invalid JSON"))
-    }
-
     async fn list_imap_accounts(&self) -> anyhow::Result<Vec<Value>> {
         let accounts = self.email.mail_accounts().await?;
 
@@ -160,11 +173,7 @@ impl MailIntegration {
             return Ok(Vec::new());
         };
 
-        let raw = google.list_accounts().await?;
-        let accounts = Self::parse_json_value(&raw, "google_list_accounts")?
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let accounts = google.account_values().await?;
 
         Ok(accounts
             .into_iter()
@@ -266,15 +275,14 @@ impl MailIntegration {
             .as_ref()
             .ok_or_else(|| anyhow!("Google integration is not configured"))?;
         let query = build_gmail_search_query(&args);
-        let raw = google
-            .mail_search(
+        let payload = google
+            .mail_search_value(
                 provider_account_id,
                 &query,
                 args.max_results,
                 args.page_token.as_deref(),
             )
             .await?;
-        let payload = Self::parse_json_value(&raw, "Google mail search")?;
         let messages = payload
             .get("messages")
             .and_then(|value| value.as_array())
@@ -370,10 +378,9 @@ impl MailIntegration {
                     .google
                     .as_ref()
                     .ok_or_else(|| anyhow!("Google integration is not configured"))?;
-                let raw = google
-                    .mail_read(provider_account_id, &message_ref.external_id)
+                let payload = google
+                    .mail_read_value(provider_account_id, &message_ref.external_id)
                     .await?;
-                let payload = Self::parse_json_value(&raw, "Google mail read")?;
                 let attachments = payload
                     .get("attachments")
                     .and_then(Value::as_array)
@@ -530,11 +537,7 @@ impl MailIntegration {
                     .google
                     .as_ref()
                     .ok_or_else(|| anyhow!("Google integration is not configured"))?;
-                let raw = google.mail_labels(provider_account_id).await?;
-                let labels = Self::parse_json_value(&raw, "Google mail labels")?
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
+                let labels = google.mail_label_values(provider_account_id).await?;
                 labels
                     .into_iter()
                     .map(|label| {
@@ -604,94 +607,26 @@ impl Integration for MailIntegration {
 
     fn tools(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition {
-                name: "mail_list_accounts".to_string(),
-                description:
-                    "List all configured mail accounts across IMAP/SMTP and Gmail providers."
-                        .to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "mail_search".to_string(),
-                description:
-                    "Search email consistently across Gmail and IMAP. Prefer one structured search with several terms over overlapping provider-specific queries; paginate with next_page_token when completeness matters."
-                        .to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "account_id": {"type": "string", "description": "Unified mail account ID from mail_list_accounts"},
-                        "terms": {"type": "array", "items": {"type": "string"}, "description": "Plain-text terms to match"},
-                        "match": {"type": "string", "enum": ["any", "all"], "description": "Whether any or all terms must match"},
-                        "from": {"type": ["string", "null"], "description": "Optional sender filter"},
-                        "subject": {"type": ["string", "null"], "description": "Optional subject filter"},
-                        "after": {"type": ["string", "null"], "description": "Optional inclusive date in YYYY-MM-DD format"},
-                        "before": {"type": ["string", "null"], "description": "Optional exclusive date in YYYY-MM-DD format"},
-                        "mailbox": {"type": ["string", "null"], "description": "Optional mailbox, folder, or Gmail label filter"},
-                        "max_results": {"type": ["integer", "null"], "description": "Optional provider-specific page size hint"},
-                        "page_token": {"type": ["string", "null"], "description": "Optional pagination token for providers that support it"}
-                    },
-                    "required": ["account_id", "terms", "match", "from", "subject", "after", "before", "mailbox", "max_results", "page_token"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "mail_read".to_string(),
-                description: "Read a specific email using the message_ref returned by mail_search."
-                    .to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "message_ref": {
-                            "type": "object",
-                            "properties": {
-                                "provider": {"type": "string"},
-                                "account_id": {"type": "string"},
-                                "external_id": {"type": "string"},
-                                "mailbox": {"type": ["string", "null"]},
-                                "native": {}
-                            },
-                            "required": ["provider", "account_id", "external_id", "mailbox", "native"],
-                            "additionalProperties": false
-                        }
-                    },
-                    "required": ["message_ref"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "mail_send".to_string(),
-                description: "Send an email through the selected unified mail account.".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "account_id": {"type": "string", "description": "Unified mail account ID from mail_list_accounts"},
-                        "to": {"type": "string", "description": "Recipient email address"},
-                        "subject": {"type": "string", "description": "Email subject"},
-                        "body": {"type": "string", "description": "Email body text"}
-                    },
-                    "required": ["account_id", "to", "subject", "body"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "mail_list_mailboxes".to_string(),
-                description:
-                    "List folders, mailboxes, or labels for the selected unified mail account."
-                        .to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "account_id": {"type": "string", "description": "Unified mail account ID from mail_list_accounts"}
-                    },
-                    "required": ["account_id"],
-                    "additionalProperties": false
-                }),
-            },
+            ToolDefinition::for_args::<EmptyToolArgs>(
+                "mail_list_accounts",
+                "List all configured mail accounts across IMAP/SMTP and Gmail providers.",
+            ),
+            ToolDefinition::for_args::<MailSearchArgs>(
+                "mail_search",
+                "Search email consistently across Gmail and IMAP. Prefer one structured search with several terms over overlapping provider-specific queries; paginate with next_page_token when completeness matters.",
+            ),
+            ToolDefinition::for_args::<MailReadArgs>(
+                "mail_read",
+                "Read a specific email using the message_ref returned by mail_search.",
+            ),
+            ToolDefinition::for_args::<MailSendArgs>(
+                "mail_send",
+                "Send an email through the selected unified mail account.",
+            ),
+            ToolDefinition::for_args::<MailboxArgs>(
+                "mail_list_mailboxes",
+                "List folders, mailboxes, or labels for the selected unified mail account.",
+            ),
         ]
     }
 

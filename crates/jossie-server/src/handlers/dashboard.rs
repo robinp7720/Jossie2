@@ -7,7 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Serialize)]
+#[derive(Serialize, ts_rs::TS)]
 pub struct DashboardResponse {
     pub stats: DashboardStats,
     pub recent_memories: Vec<jossie_db::MemoryEntryWithMetadata>,
@@ -17,7 +17,7 @@ pub struct DashboardResponse {
     pub graph_highlights: Vec<GraphHighlight>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ts_rs::TS)]
 pub struct DashboardStats {
     pub memories: i64,
     pub prompt_ready_memories: i64,
@@ -30,7 +30,7 @@ pub struct DashboardStats {
     pub blocked_goals: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ts_rs::TS)]
 pub struct GraphHighlight {
     pub node: jossie_db::GraphNode,
     pub connections: i64,

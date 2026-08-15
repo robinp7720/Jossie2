@@ -8,7 +8,7 @@ const action: PendingAction = {
   call_id: 'call-1', tool_name: 'mail_send', title: 'Send email',
   summary: 'To ada@example.com — Status update\nThe migration is complete.',
   effect: 'external_write', status: 'pending', created_at: '2026-08-02T12:00:00Z',
-  updated_at: '2026-08-02T12:00:00Z',
+  updated_at: '2026-08-02T12:00:00Z', result_error: null, resolved_at: null,
 }
 
 afterEach(cleanup)
@@ -38,8 +38,10 @@ describe('AgentRunStatus', () => {
       steps={[]}
       runs={[{
         id: 'run-1', conversation_id: 'conversation-1', kind: 'chat', status: 'running',
+        goal_id: null, task_id: null, source_type: null, source_id: null,
         summary: 'Conversation request', current_phase: 'Checking the calendar',
         visibility: 'significant', cancel_requested: false,
+        error: null, started_at: '2026-08-07T12:00:00Z', finished_at: null,
         created_at: '2026-08-07T12:00:00Z', updated_at: '2026-08-07T12:00:01Z',
       }]}
       actions={[]}

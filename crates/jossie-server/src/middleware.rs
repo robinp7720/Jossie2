@@ -34,8 +34,12 @@ pub async fn auth_middleware(
             })
         });
 
-    let bearer_valid =
-        token.is_some_and(|token| token.as_bytes().ct_eq(state.auth_token.as_bytes()).into());
+    let bearer_valid = token.is_some_and(|token| {
+        token
+            .as_bytes()
+            .ct_eq(state.web.auth_token.as_bytes())
+            .into()
+    });
     let session_valid = if bearer_valid {
         false
     } else if let Some(session) = session_token_from_headers(&headers) {

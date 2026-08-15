@@ -1,4 +1,5 @@
 impl EmailIntegration {
+    #[allow(clippy::too_many_arguments)]
     async fn do_email_search(
         &self,
         config: &EmailConfig,
@@ -140,7 +141,10 @@ impl EmailIntegration {
                         } else {
                             "full".to_string()
                         },
-                        body: truncate_with_notice(body, MAX_EMAIL_BODY_CHARS),
+                        body: jossie_core::text::truncate_with_notice(
+                            body,
+                            MAX_EMAIL_BODY_CHARS,
+                        ),
                         attachments,
                     }
                 }
@@ -152,7 +156,7 @@ impl EmailIntegration {
                         to: Vec::new(),
                         subject,
                         date,
-                        body: truncate_with_notice(
+                        body: jossie_core::text::truncate_with_notice(
                             text_fallback_preview(raw_message),
                             MAX_FALLBACK_PREVIEW_CHARS,
                         ),
@@ -240,7 +244,7 @@ impl EmailIntegration {
         Ok(serde_json::to_string_pretty(&folders)?)
     }
 
-    async fn list_accounts(&self) -> anyhow::Result<String> {
+    async fn account_values(&self) -> anyhow::Result<Vec<Value>> {
         let mut accounts = Vec::new();
         if let Some(config) = &self.default_config {
             accounts.push(serde_json::json!({
@@ -261,7 +265,7 @@ impl EmailIntegration {
                 }
             }
         }
-        Ok(serde_json::to_string_pretty(&accounts)?)
+        Ok(accounts)
     }
 
     fn provider_account_id(account_id: &str) -> Option<&str> {
@@ -270,7 +274,7 @@ impl EmailIntegration {
     }
 
     pub async fn mail_accounts(&self) -> anyhow::Result<Vec<Value>> {
-        Ok(serde_json::from_str(&self.list_accounts().await?)?)
+        self.account_values().await
     }
 
     pub async fn mail_search(

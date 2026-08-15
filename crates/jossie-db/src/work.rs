@@ -4,9 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, QueryBuilder, Sqlite};
 use uuid::Uuid;
 
-pub const ACTIVE_RUN_STATUSES: &[&str] = &["queued", "running", "waiting_for_approval"];
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ts_rs::TS)]
 pub struct Goal {
     pub id: String,
     pub conversation_id: Option<String>,
@@ -19,7 +17,7 @@ pub struct Goal {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ts_rs::TS)]
 pub struct GoalTask {
     pub id: String,
     pub goal_id: String,
@@ -34,7 +32,7 @@ pub struct GoalTask {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct GoalWithTasks {
     #[serde(flatten)]
     pub goal: Goal,
@@ -43,7 +41,7 @@ pub struct GoalWithTasks {
     pub total_tasks: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ts_rs::TS)]
 pub struct WorkRun {
     pub id: String,
     pub goal_id: Option<String>,
@@ -64,7 +62,7 @@ pub struct WorkRun {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ts_rs::TS)]
 pub struct WorkRunStep {
     pub id: String,
     pub run_id: String,
@@ -78,7 +76,7 @@ pub struct WorkRunStep {
     pub finished_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct WorkRunDetail {
     #[serde(flatten)]
     pub run: WorkRun,
@@ -99,7 +97,7 @@ pub struct WorkRunCheckpoint {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ts_rs::TS)]
 pub struct WorkerStatus {
     pub worker_key: String,
     pub label: String,
@@ -253,6 +251,7 @@ impl Database {
             == 1)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn annotate_work_run(
         &self,
         run_id: &str,
@@ -439,6 +438,7 @@ impl Database {
         ).bind(goal_id).bind(limit.clamp(1, 100) as i64).fetch_all(&self.pool).await?)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_goal_task(
         &self,
         goal_id: &str,
@@ -968,6 +968,7 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_worker_status(
         &self,
         key: &str,

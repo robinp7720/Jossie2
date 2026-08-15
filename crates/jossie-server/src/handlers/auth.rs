@@ -50,14 +50,14 @@ pub async fn login_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<LoginRequest>,
 ) -> Result<Response, AppError> {
-    if state.auth_password_hash.trim().is_empty() {
+    if state.web.auth_password_hash.trim().is_empty() {
         return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             anyhow::anyhow!("Password login is not configured"),
         ));
     }
 
-    let valid = PasswordHash::new(&state.auth_password_hash)
+    let valid = PasswordHash::new(&state.web.auth_password_hash)
         .ok()
         .and_then(|hash| {
             Argon2::default()
@@ -85,7 +85,7 @@ pub async fn login_handler(
     .into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
-        session_cookie(&token, state.session_cookie_secure, SESSION_TTL_SECONDS)
+        session_cookie(&token, state.web.session_cookie_secure, SESSION_TTL_SECONDS)
             .parse()
             .expect("session cookie is a valid header value"),
     );
@@ -123,7 +123,7 @@ pub async fn logout_handler(
     .into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
-        session_cookie("", state.session_cookie_secure, 0)
+        session_cookie("", state.web.session_cookie_secure, 0)
             .parse()
             .expect("session cookie is a valid header value"),
     );

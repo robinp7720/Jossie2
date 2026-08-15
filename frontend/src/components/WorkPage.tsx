@@ -1,13 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ApiConfig } from '../api'
-import { buildWebSocketUrl, cancelWorkRun, controlGoal, getGoal, getWork, getWorkRun, updateGoal } from '../api'
+import { cancelWorkRun, controlGoal, getGoal, getWork, getWorkRun, updateGoal } from '../api'
+import { useWorkspaceEvents } from '../events'
 import type { Goal, GoalDetail, WorkRun, WorkRunDetail, WorkSummary } from '../types'
-
-const formatDate = (value?: string | null) => {
-  if (!value) return 'Not yet'
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
-}
+import { formatDate } from '../utils/format'
 
 const statusLabel = (status: string) => status.replace(/_/g, ' ')
 const isGoalOpen = (goal: Goal) => ['active', 'paused', 'blocked'].includes(goal.status)
@@ -27,6 +23,7 @@ export function WorkPage({ api }: { api: ApiConfig }) {
   const [selectedRun, setSelectedRun] = useState<WorkRunDetail | null>(null)
   const [editingTitle, setEditingTitle] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const { event, sequence } = useWorkspaceEvents()
 
   const refresh = async () => {
     try {
@@ -42,16 +39,13 @@ export function WorkPage({ api }: { api: ApiConfig }) {
 
   useEffect(() => {
     void refresh()
-    const timer = window.setInterval(() => void refresh(), 5_000)
-    const socket = new WebSocket(buildWebSocketUrl(api, '/api/events'))
-    socket.onmessage = (event) => {
-      const payload = JSON.parse(event.data) as { type?: string }
-      if (payload.type && ['goal_updated', 'work_run_updated', 'work_step_updated', 'worker_status_updated', 'action_approval_required', 'action_resolved', 'background_notification'].includes(payload.type)) {
-        void refresh()
-      }
-    }
-    return () => { window.clearInterval(timer); socket.close() }
   }, [selectedGoal?.id, selectedRun?.id])
+
+  useEffect(() => {
+    if (event && ['goal_updated', 'work_run_updated', 'work_step_updated', 'worker_status_updated', 'action_approval_required', 'action_resolved', 'background_notification'].includes(event.type)) {
+      void refresh()
+    }
+  }, [sequence])
 
   const goals = useMemo(() => work?.goals.filter(isGoalOpen) ?? [], [work])
   const goalsBetweenRuns = useMemo(() => {

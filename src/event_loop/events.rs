@@ -76,7 +76,7 @@ async fn maybe_send_telegram_message(
     telegram_chat_id: Option<i64>,
     message: &str,
 ) -> anyhow::Result<()> {
-    if state.telegram_token.trim().is_empty() {
+    if state.telegram.token.trim().is_empty() {
         return Ok(());
     }
 
@@ -84,7 +84,7 @@ async fn maybe_send_telegram_message(
         return Ok(());
     };
 
-    jossie_telegram::send_message(&state.telegram_token, chat_id, message).await
+    jossie_telegram::send_message(&state.telegram.token, chat_id, message).await
 }
 
 fn is_email_event(event: &IntegrationEvent) -> bool {
@@ -209,12 +209,12 @@ async fn process_event_inner(
     // NEW: Extract entities from event and enrich with graph context
     let entities = extract_event_entities(event);
     for entity in &entities {
-        if let Ok(nodes) = state.db.graph_find_nodes(entity).await {
-            if !nodes.is_empty() {
-                tracing::info!("Enriching event with graph context for: {}", entity);
-                // Graph context will be automatically injected in generate_event_message
-                // via the normal context building mechanism
-            }
+        if let Ok(nodes) = state.db.graph_find_nodes(entity).await
+            && !nodes.is_empty()
+        {
+            tracing::info!("Enriching event with graph context for: {}", entity);
+            // Graph context will be automatically injected in generate_event_message
+            // via the normal context building mechanism
         }
     }
 
@@ -242,11 +242,11 @@ async fn process_event_inner(
         return Ok(false);
     };
 
-    if target.telegram_chat_id.is_some() && !state.telegram_token.trim().is_empty() {
+    if target.telegram_chat_id.is_some() && !state.telegram.token.trim().is_empty() {
         tracing::info!("Sending message: {}", message);
     }
     maybe_send_telegram_message(state, target.telegram_chat_id, &message).await?;
-    if target.telegram_chat_id.is_some() && !state.telegram_token.trim().is_empty() {
+    if target.telegram_chat_id.is_some() && !state.telegram.token.trim().is_empty() {
         tracing::info!("Message sent: {}", message);
     }
 
@@ -355,10 +355,10 @@ async fn process_email_event_batch_inner(
     for event in events {
         let entities = extract_event_entities(event);
         for entity in &entities {
-            if let Ok(nodes) = state.db.graph_find_nodes(entity).await {
-                if !nodes.is_empty() {
-                    tracing::info!("Enriching event with graph context for: {}", entity);
-                }
+            if let Ok(nodes) = state.db.graph_find_nodes(entity).await
+                && !nodes.is_empty()
+            {
+                tracing::info!("Enriching event with graph context for: {}", entity);
             }
         }
     }
@@ -389,11 +389,11 @@ async fn process_email_event_batch_inner(
         return Ok(());
     };
 
-    if target.telegram_chat_id.is_some() && !state.telegram_token.trim().is_empty() {
+    if target.telegram_chat_id.is_some() && !state.telegram.token.trim().is_empty() {
         tracing::info!("Sending batched email message: {}", message);
     }
     maybe_send_telegram_message(state, target.telegram_chat_id, &message).await?;
-    if target.telegram_chat_id.is_some() && !state.telegram_token.trim().is_empty() {
+    if target.telegram_chat_id.is_some() && !state.telegram.token.trim().is_empty() {
         tracing::info!("Batched email message sent: {}", message);
     }
 
@@ -439,13 +439,13 @@ async fn process_calendar_event_batch_inner(
     for event in &reduced_events {
         let entities = extract_event_entities(event);
         for entity in &entities {
-            if let Ok(nodes) = state.db.graph_find_nodes(entity).await {
-                if !nodes.is_empty() {
-                    tracing::info!(
-                        "Enriching calendar event with graph context for: {}",
-                        entity
-                    );
-                }
+            if let Ok(nodes) = state.db.graph_find_nodes(entity).await
+                && !nodes.is_empty()
+            {
+                tracing::info!(
+                    "Enriching calendar event with graph context for: {}",
+                    entity
+                );
             }
         }
     }
@@ -476,11 +476,11 @@ async fn process_calendar_event_batch_inner(
         return Ok(());
     };
 
-    if target.telegram_chat_id.is_some() && !state.telegram_token.trim().is_empty() {
+    if target.telegram_chat_id.is_some() && !state.telegram.token.trim().is_empty() {
         tracing::info!("Sending batched calendar message: {}", message);
     }
     maybe_send_telegram_message(state, target.telegram_chat_id, &message).await?;
-    if target.telegram_chat_id.is_some() && !state.telegram_token.trim().is_empty() {
+    if target.telegram_chat_id.is_some() && !state.telegram.token.trim().is_empty() {
         tracing::info!("Batched calendar message sent: {}", message);
     }
 
@@ -645,7 +645,7 @@ fn reduce_calendar_events(
     }
 
     let mut reduced: Vec<IntegrationEvent> = best_by_key.into_values().collect();
-    reduced.sort_by(|a, b| calendar_updated_value(b).cmp(&calendar_updated_value(a)));
+    reduced.sort_by_key(|event| std::cmp::Reverse(calendar_updated_value(event)));
 
     if reduced.len() > max_events {
         reduced.truncate(max_events);
@@ -787,22 +787,22 @@ fn extract_calendar_entities(payload: &serde_json::Value, entities: &mut Vec<Str
         }
     }
 
-    if let Some(summary) = payload.get("summary").and_then(|v| v.as_str()) {
-        if !summary.trim().is_empty() {
-            entities.push(summary.to_string());
-        }
+    if let Some(summary) = payload.get("summary").and_then(|v| v.as_str())
+        && !summary.trim().is_empty()
+    {
+        entities.push(summary.to_string());
     }
 
-    if let Some(account_email) = payload.get("account_email").and_then(|v| v.as_str()) {
-        if !account_email.trim().is_empty() {
-            entities.push(account_email.to_string());
-        }
+    if let Some(account_email) = payload.get("account_email").and_then(|v| v.as_str())
+        && !account_email.trim().is_empty()
+    {
+        entities.push(account_email.to_string());
     }
 
-    if let Some(location) = payload.get("location").and_then(|v| v.as_str()) {
-        if !location.is_empty() {
-            entities.push(location.to_string());
-        }
+    if let Some(location) = payload.get("location").and_then(|v| v.as_str())
+        && !location.is_empty()
+    {
+        entities.push(location.to_string());
     }
 }
 
@@ -827,4 +827,3 @@ fn extract_email_entities(payload: &serde_json::Value, entities: &mut Vec<String
         }
     }
 }
-

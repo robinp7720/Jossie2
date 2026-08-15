@@ -152,7 +152,7 @@ fn initial_llm_request_options(
     state: &AppState,
     prompt_cache_key: &str,
 ) -> jossie_llm::LlmRequestOptions {
-    if !state.openai_optimizations {
+    if !state.agent.openai_optimizations {
         return jossie_llm::LlmRequestOptions::default();
     }
     jossie_llm::LlmRequestOptions {
@@ -171,7 +171,7 @@ async fn complete_agent_iteration(
     prompt_cache_key: &str,
     structured_output: Option<&jossie_llm::StructuredOutputFormat>,
 ) -> anyhow::Result<jossie_llm::LlmOutput> {
-    if state.openai_optimizations
+    if state.agent.openai_optimizations
         && let Some(previous_response_id) = previous_response_id
     {
         let chained_options = jossie_llm::LlmRequestOptions {
@@ -180,7 +180,7 @@ async fn complete_agent_iteration(
             ..jossie_llm::LlmRequestOptions::default()
         };
         match tokio::time::timeout(
-            Duration::from_secs(state.llm_request_timeout_seconds),
+            Duration::from_secs(state.agent.llm_request_timeout_seconds),
             state
                 .llm
                 .complete_with_options(chained_messages, tools, &chained_options),
@@ -200,11 +200,11 @@ async fn complete_agent_iteration(
     }
 
     let mut options = initial_llm_request_options(state, prompt_cache_key);
-    if state.openai_optimizations {
+    if state.agent.openai_optimizations {
         options.structured_output = structured_output.cloned();
     }
     tokio::time::timeout(
-        Duration::from_secs(state.llm_request_timeout_seconds),
+        Duration::from_secs(state.agent.llm_request_timeout_seconds),
         state
             .llm
             .complete_with_options(full_messages, tools, &options),
@@ -213,7 +213,7 @@ async fn complete_agent_iteration(
     .map_err(|_| {
         anyhow::anyhow!(
             "LLM request timed out after {} seconds",
-            state.llm_request_timeout_seconds
+            state.agent.llm_request_timeout_seconds
         )
     })?
 }
@@ -242,10 +242,10 @@ async fn run_agent_loop_inner(
     let mut cumulative_tokens = 0u64;
     let mut premature_goal_finals = 0usize;
 
-    for _iteration in 0..state.max_agent_iterations {
+    for _iteration in 0..state.agent.max_agent_iterations {
         ensure_run_not_cancelled(state, conv_id, run_id, None).await?;
         if _iteration > 0
-            && run_started.elapsed() >= Duration::from_secs(state.interactive_run_budget_seconds)
+            && run_started.elapsed() >= Duration::from_secs(state.agent.interactive_run_budget_seconds)
         {
             return pause_run_with_checkpoint(
                 state,
@@ -265,9 +265,9 @@ async fn run_agent_loop_inner(
             );
             bound_context_window(
                 &mut messages,
-                state.max_context_chars,
-                state.context_compact_target_chars,
-                state.context_keep_recent_dialogue_messages,
+                state.agent.max_context_chars,
+                state.agent.context_compact_target_chars,
+                state.agent.context_keep_recent_dialogue_messages,
             );
         }
         let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
@@ -300,7 +300,7 @@ async fn run_agent_loop_inner(
                 .enumerate()
                 .map(|(i, m)| (m.content.len(), format!("Msg[{}] Role: {:?}", i, m.role)))
                 .collect();
-            sizes.sort_by(|a, b| b.0.cmp(&a.0));
+            sizes.sort_by_key(|entry| std::cmp::Reverse(entry.0));
             for (size, info) in sizes.iter().take(3) {
                 tracing::warn!("   Large Message: {} chars - {}", size, info);
             }
@@ -342,10 +342,10 @@ async fn run_agent_loop_inner(
         let response_items = output.response_items;
 
         if tool_calls.is_empty() {
-            if reflection_retries_remaining > 0 {
-                if let Some(feedback) =
+            if reflection_retries_remaining > 0
+                && let Some(feedback) =
                     self_reflect(state, &messages, &last_user_msg, &content).await
-                {
+            {
                     reflection_retries_remaining -= 1;
                     tracing::info!("Self-reflection retry. Feedback: {feedback}");
                     // Add the assistant's response and feedback, then continue the loop
@@ -363,7 +363,6 @@ async fn run_agent_loop_inner(
                     messages.push(feedback_message.clone());
                     chained_messages.push(feedback_message);
                     continue;
-                }
             }
 
             if let Some(continuation) = goal_tracker.active_goal_continuation_message() {
@@ -508,7 +507,7 @@ async fn run_agent_loop_inner(
         }
         let mut results = execute_tool_batch(state, conv_id, prepared_calls).await;
         results.extend(repeated_results);
-        ensure_run_not_cancelled(state, conv_id, &run_id, None).await?;
+        ensure_run_not_cancelled(state, conv_id, run_id, None).await?;
 
         for (_, call, result) in results {
             tracing::info!(
@@ -562,7 +561,7 @@ async fn run_agent_loop_inner(
         &goal_tracker,
         &format!(
             "Agent iteration budget of {} reached",
-            state.max_agent_iterations
+            state.agent.max_agent_iterations
         ),
         None,
     )

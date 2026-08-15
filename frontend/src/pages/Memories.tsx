@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { listMemories } from '../api'
+import { getChatImport, listMemories, startChatImport, uploadFile } from '../api'
 import { Empty } from '../components/Shared'
 import { api } from '../config'
-import type { Memory } from '../types'
+import type { ChatImport, Memory } from '../types'
 import { relativeDate } from '../utils/format'
 
 export function Memories() {
@@ -51,4 +51,3 @@ export function MemoryCard({ memory, compact = false }: { memory: Memory; compac
   const tags = Array.from(new Set(memory.tags.split(/[\s,]+/).filter(Boolean)))
   return <article className={compact ? 'memory-card compact' : 'memory-card'}><div className="memory-card-head"><div><p className="memory-key">{memory.key}</p>{tags.length > 0 && <div className="tag-row">{tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}</div><span className="scope-badge">{memory.prompt_scope}</span></div><p>{memory.content}</p><footer><span>Importance {memory.importance}</span><span>{relativeDate(memory.updated_at)}</span></footer></article>
 }
-

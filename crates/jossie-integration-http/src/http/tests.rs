@@ -69,7 +69,7 @@ mod tests {
             serde_json::json!({
                 "fields": fields,
                 "files_count": files.len(),
-                "file_info": files.into_iter().map(|(n, fnm, ct, len)| (n, fnm, ct, len)).collect::<Vec<_>>()
+                "file_info": files
             }).to_string()
         }));
 

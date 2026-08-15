@@ -1,4 +1,4 @@
-use jossie_core::integration::{Integration, ToolDefinition};
+use jossie_core::integration::{EmptyToolArgs, Integration, ToolDefinition};
 use jossie_db::Database;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -7,6 +7,66 @@ use totp_rs::{Algorithm, Secret, TOTP};
 
 pub struct MemoryIntegration {
     db: Arc<Database>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MemorySaveArgs {
+    /// Unique key for this memory.
+    key: String,
+    /// Durable content to remember.
+    content: String,
+    /// Space-separated categorization tags.
+    #[schemars(required)]
+    tags: String,
+    /// Legacy compatibility flag; optional and ignored.
+    #[serde(default)]
+    allow_sensitive: bool,
+    /// Automatic prompt scope: none, chat, event, or both.
+    #[serde(default)]
+    prompt_scope: Option<String>,
+    /// Prompt priority from 0 to 100.
+    #[serde(default)]
+    importance: Option<i64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MemoryKeyArgs {
+    /// Exact memory key.
+    key: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MemoryTotpArgs {
+    /// Exact memory key containing TOTP material.
+    key: String,
+    /// Optional field to use when the memory contains structured JSON.
+    #[serde(default)]
+    field: Option<String>,
+    /// Optional Unix timestamp for deterministic generation.
+    #[serde(default)]
+    timestamp: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MemorySearchArgs {
+    /// Focused memory search query.
+    query: String,
+}
+
+fn default_memory_limit() -> usize {
+    50
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MemoryListArgs {
+    /// Number of memories to return (default 50, max 500).
+    #[serde(default = "default_memory_limit")]
+    limit: usize,
 }
 
 impl MemoryIntegration {
@@ -137,7 +197,7 @@ fn resolve_totp(content: &str, preferred_field: Option<&str>) -> anyhow::Result<
         });
     }
 
-    let (secret_value, field_name, algorithm, digits, period) =
+    let (secret_value, _field_name, algorithm, digits, period) =
         if let Ok(bundle) = serde_json::from_str::<StoredCredentialBundle>(trimmed) {
             let (secret_value, field_name) = resolve_string_candidate(&bundle, preferred_field)
                 .ok_or_else(|| anyhow::anyhow!("No TOTP secret found in stored JSON memory"))?;
@@ -181,11 +241,7 @@ fn resolve_totp(content: &str, preferred_field: Option<&str>) -> anyhow::Result<
         period: totp.step,
         digits: totp.digits,
         algorithm: format!("{:?}", totp.algorithm),
-        totp: if field_name.as_deref() == Some("otpauth_url") {
-            totp
-        } else {
-            totp
-        },
+        totp,
     })
 }
 
@@ -201,118 +257,41 @@ impl Integration for MemoryIntegration {
 
     fn tools(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition {
-                name: "memory_save".to_string(),
-                description: "Save durable context to long-term memory, such as preferences, relationships, ongoing projects, recurring needs, credentials, API keys, tokens, MFA seed material, or other information likely to matter again. For structured secrets, prefer stable keys such as `credential.rwth_sso` and JSON content. Use prompt_scope only for compact, non-secret memories that should be automatically included in future chat/event prompts."
-                    .to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "key": {"type": "string", "description": "Unique key for this memory"},
-                        "content": {"type": "string", "description": "Durable content to remember"},
-                        "tags": {"type": "string", "description": "Space-separated tags for categorization (use empty string for none)"},
-                        "allow_sensitive": {"type": "boolean", "description": "Legacy compatibility flag. It is optional and ignored."},
-                        "prompt_scope": {"type": "string", "enum": ["none", "chat", "event", "both"], "description": "Optional automatic prompt inclusion scope. Use none for secrets or low-signal memories."},
-                        "importance": {"type": "integer", "minimum": 0, "maximum": 100, "description": "Optional prompt priority for prompt-scoped memories. Higher is included first."}
-                    },
-                    "required": ["key", "content", "tags"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "memory_get".to_string(),
-                description: "Fetch one memory entry by its exact key. Use this for precise recall of stored credentials or other structured data instead of broad search."
-                    .to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "key": {"type": "string", "description": "Exact memory key to fetch"}
-                    },
-                    "required": ["key"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "memory_delete".to_string(),
-                description: "Permanently delete one long-term memory by its exact key. Use only when the user explicitly asks to forget it."
-                    .to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "key": {"type": "string", "description": "Exact key of the memory to permanently delete"}
-                    },
-                    "required": ["key"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "memory_generate_totp".to_string(),
-                description: "Generate the current TOTP code from a stored memory entry. The memory content can be a raw Base32 secret, an `otpauth://` URL, or structured JSON with fields such as `totp_secret`, `otpauth_url`, `totp_algorithm`, `totp_digits`, and `totp_period`."
-                    .to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "key": {"type": "string", "description": "Exact memory key that stores the TOTP secret or otpauth URL"},
-                        "field": {"type": ["string", "null"], "description": "Optional JSON field to use when the memory content is structured. Defaults to `otpauth_url` or `totp_secret` when present."},
-                        "timestamp": {"type": ["integer", "null"], "description": "Optional Unix timestamp in seconds for deterministic generation. Defaults to the current time."}
-                    },
-                    "required": ["key"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "memory_search".to_string(),
-                description: "Search long-term memory using a few focused keywords. Prefer 2-6 specific terms, names, project titles, dates, or tags. If needed, run multiple narrower searches instead of one long laundry-list query."
-                    .to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search query"}
-                    },
-                    "required": ["query"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "memory_list_keys".to_string(),
-                description: "List all keys stored in long-term memory with timestamps".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "memory_list_all".to_string(),
-                description: "List all memories with full content".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "limit": {"type": "integer", "description": "Number of memories to return (default 50, max 500)"}
-                    },
-                    "additionalProperties": false
-                }),
-            },
+            ToolDefinition::for_args::<MemorySaveArgs>(
+                "memory_save",
+                "Save durable context to long-term memory, such as preferences, relationships, ongoing projects, recurring needs, credentials, API keys, tokens, MFA seed material, or other information likely to matter again. For structured secrets, prefer stable keys such as `credential.rwth_sso` and JSON content. Use prompt_scope only for compact, non-secret memories that should be automatically included in future chat/event prompts.",
+            ),
+            ToolDefinition::for_args::<MemoryKeyArgs>(
+                "memory_get",
+                "Fetch one memory entry by its exact key. Use this for precise recall of stored credentials or other structured data instead of broad search.",
+            ),
+            ToolDefinition::for_args::<MemoryKeyArgs>(
+                "memory_delete",
+                "Permanently delete one long-term memory by its exact key. Use only when the user explicitly asks to forget it.",
+            ),
+            ToolDefinition::for_args::<MemoryTotpArgs>(
+                "memory_generate_totp",
+                "Generate the current TOTP code from a stored memory entry. The memory content can be a raw Base32 secret, an `otpauth://` URL, or structured JSON with fields such as `totp_secret`, `otpauth_url`, `totp_algorithm`, `totp_digits`, and `totp_period`.",
+            ),
+            ToolDefinition::for_args::<MemorySearchArgs>(
+                "memory_search",
+                "Search long-term memory using a few focused keywords. Prefer 2-6 specific terms, names, project titles, dates, or tags. If needed, run multiple narrower searches instead of one long laundry-list query.",
+            ),
+            ToolDefinition::for_args::<EmptyToolArgs>(
+                "memory_list_keys",
+                "List all keys stored in long-term memory with timestamps",
+            ),
+            ToolDefinition::for_args::<MemoryListArgs>(
+                "memory_list_all",
+                "List all memories with full content",
+            ),
         ]
     }
 
     async fn execute(&self, tool_name: &str, arguments: &str) -> anyhow::Result<String> {
         match tool_name {
             "memory_save" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    key: String,
-                    content: String,
-                    #[serde(default)]
-                    tags: String,
-                    #[serde(default)]
-                    allow_sensitive: bool,
-                    #[serde(default)]
-                    prompt_scope: Option<String>,
-                    #[serde(default)]
-                    importance: Option<i64>,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
+                let args: MemorySaveArgs = serde_json::from_str(arguments)?;
                 let _ = args.allow_sensitive;
                 self.db
                     .memory_save_with_prompt_metadata(
@@ -326,11 +305,7 @@ impl Integration for MemoryIntegration {
                 Ok(format!("Saved memory with key '{}'", args.key))
             }
             "memory_get" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    key: String,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
+                let args: MemoryKeyArgs = serde_json::from_str(arguments)?;
                 let entry = self
                     .db
                     .get_memory(&args.key)
@@ -343,11 +318,7 @@ impl Integration for MemoryIntegration {
                 })?)
             }
             "memory_delete" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    key: String,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
+                let args: MemoryKeyArgs = serde_json::from_str(arguments)?;
                 if self.db.memory_delete(&args.key).await? {
                     Ok(format!("Deleted memory with key '{}'", args.key))
                 } else {
@@ -355,15 +326,7 @@ impl Integration for MemoryIntegration {
                 }
             }
             "memory_generate_totp" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    key: String,
-                    #[serde(default)]
-                    field: Option<String>,
-                    #[serde(default)]
-                    timestamp: Option<u64>,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
+                let args: MemoryTotpArgs = serde_json::from_str(arguments)?;
                 let entry = self
                     .db
                     .get_memory(&args.key)
@@ -393,11 +356,7 @@ impl Integration for MemoryIntegration {
                 })?)
             }
             "memory_search" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    query: String,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
+                let args: MemorySearchArgs = serde_json::from_str(arguments)?;
                 let results = self.db.memory_search(&args.query).await?;
                 Ok(serde_json::to_string_pretty(&results)?)
             }
@@ -406,15 +365,7 @@ impl Integration for MemoryIntegration {
                 Ok(serde_json::to_string_pretty(&results)?)
             }
             "memory_list_all" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    #[serde(default = "default_limit")]
-                    limit: usize,
-                }
-                fn default_limit() -> usize {
-                    50
-                }
-                let args: Args = serde_json::from_str(arguments).unwrap_or(Args { limit: 50 });
+                let args: MemoryListArgs = serde_json::from_str(arguments)?;
                 let results = self.db.memory_list_all(args.limit).await?;
                 Ok(serde_json::to_string_pretty(&results)?)
             }

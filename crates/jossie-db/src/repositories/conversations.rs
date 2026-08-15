@@ -33,7 +33,7 @@ impl Database {
         .bind(&id_str)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| r.into()))
+        row.map(Conversation::try_from).transpose()
     }
 
     pub async fn list_conversations(&self) -> anyhow::Result<Vec<Conversation>> {
@@ -42,7 +42,7 @@ impl Database {
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(Into::into).collect())
+        rows.into_iter().map(Conversation::try_from).collect()
     }
 
     pub async fn list_conversation_items(
@@ -111,7 +111,9 @@ impl Database {
         .bind(limit.clamp(1, 100) as i64)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(Into::into).collect())
+        rows.into_iter()
+            .map(ConversationListItem::try_from)
+            .collect()
     }
 
     pub async fn update_conversation(
@@ -306,18 +308,31 @@ impl Database {
             .execute(&mut *tx)
             .await?;
 
-        if msg.role == Role::User && msg.name.is_none() {
-            if let Some(title) = Self::conversation_title_from_content(&msg.content) {
-                sqlx::query(
-                    "UPDATE conversations
+        if msg.role == Role::User
+            && msg.name.is_none()
+            && let Some(title) = Self::conversation_title_from_content(&msg.content)
+        {
+            sqlx::query(
+                "UPDATE conversations
                      SET title = CASE
                          WHEN title IS NULL OR trim(title) = '' THEN ?
                          ELSE title
                      END
                      WHERE id = ?",
+            )
+            .bind(title)
+            .bind(&conv_str)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        if let Some(attachments) = &msg.attachments {
+            for attachment in attachments {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO message_attachments (message_id, file_id) VALUES (?, ?)",
                 )
-                .bind(title)
-                .bind(&conv_str)
+                .bind(&id_str)
+                .bind(attachment.id.to_string())
                 .execute(&mut *tx)
                 .await?;
             }
@@ -428,7 +443,7 @@ impl Database {
 
         let mut messages = Vec::new();
         for row in rows {
-            let mut msg: Message = row.into();
+            let mut msg = Message::try_from(row)?;
             let attachments = attachments_by_message.remove(&msg.id).unwrap_or_default();
             if !attachments.is_empty() {
                 msg.attachments = Some(
@@ -477,10 +492,14 @@ impl Database {
 
         let mut by_message: HashMap<Uuid, Vec<FileRecord>> = HashMap::new();
         for row in rows {
-            let Ok(message_id) = row.message_id.parse::<Uuid>() else {
-                continue;
-            };
-            by_message.entry(message_id).or_default().push(row.into());
+            let message_id = row
+                .message_id
+                .parse::<Uuid>()
+                .context("invalid attachment message id")?;
+            by_message
+                .entry(message_id)
+                .or_default()
+                .push(FileRecord::try_from(row)?);
         }
         Ok(by_message)
     }

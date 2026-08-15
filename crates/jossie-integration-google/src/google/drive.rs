@@ -1,7 +1,7 @@
 impl GoogleIntegration {
     async fn drive_search(&self, account_id: &str, query: &str) -> anyhow::Result<String> {
         let token = self.get_access_token(account_id).await?;
-        let q = format!("name contains '{}'", query.replace('"', "\""));
+        let q = format!("name contains '{}'", query.replace('\'', "\\'"));
         let resp = self
             .client
             .get("https://www.googleapis.com/drive/v3/files")
@@ -94,20 +94,20 @@ impl GoogleIntegration {
         let mut q_parts = Vec::new();
 
         // If folder_id is specified, filter by parent
-        if let Some(fid) = folder_id {
-            if !fid.trim().is_empty() {
-                q_parts.push(format!("'{}' in parents", fid.replace("'", "\\'").trim()));
-            }
+        if let Some(fid) = folder_id
+            && !fid.trim().is_empty()
+        {
+            q_parts.push(format!("'{}' in parents", fid.replace("'", "\\'").trim()));
         }
 
         // Add trashed filter
         q_parts.push("trashed = false".to_string());
 
         // If query is specified, add name search
-        if let Some(q) = query {
-            if !q.trim().is_empty() {
-                q_parts.push(format!("name contains '{}'", q.replace("'", "\\'").trim()));
-            }
+        if let Some(q) = query
+            && !q.trim().is_empty()
+        {
+            q_parts.push(format!("name contains '{}'", q.replace("'", "\\'").trim()));
         }
 
         let full_query = q_parts.join(" and ");

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { buildWebSocketUrl, getDashboard, listConversations, logout } from '../api'
+import { getDashboard, listConversations, logout } from '../api'
 import { WorkPage } from '../components/WorkPage'
 import { api } from '../config'
+import { useWorkspaceEvents, WorkspaceEventProvider } from '../events'
 import type { Page } from '../navigation'
 import type { Conversation, Dashboard } from '../types'
 import { Activity } from './Activity'
@@ -11,11 +12,12 @@ import { Knowledge } from './Knowledge'
 import { Memories } from './Memories'
 import { Overview } from './Overview'
 
-export function Workspace({ onLogout }: { onLogout: () => void }) {
+function WorkspaceContent({ onLogout }: { onLogout: () => void }) {
   const [page, setPage] = useState<Page>('overview')
   const [dashboard, setDashboard] = useState<Dashboard | null>(null)
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [error, setError] = useState<string | null>(null)
+  const { sequence } = useWorkspaceEvents()
 
   const refresh = async () => {
     try {
@@ -29,11 +31,7 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
   }
 
   useEffect(() => { void refresh() }, [])
-  useEffect(() => {
-    const socket = new WebSocket(buildWebSocketUrl(api, '/api/events'))
-    socket.onmessage = () => { void refresh() }
-    return () => socket.close()
-  }, [])
+  useEffect(() => { if (sequence) void refresh() }, [sequence])
 
   const signOut = async () => {
     try { await logout(api) } finally { onLogout() }
@@ -68,3 +66,6 @@ export function Workspace({ onLogout }: { onLogout: () => void }) {
   </div>
 }
 
+export function Workspace({ onLogout }: { onLogout: () => void }) {
+  return <WorkspaceEventProvider api={api}><WorkspaceContent onLogout={onLogout} /></WorkspaceEventProvider>
+}

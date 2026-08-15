@@ -98,10 +98,10 @@ impl GoogleIntegration {
             for item in list.history {
                 if let Some(added) = item.messages_added {
                     for entry in added {
-                        if let Some(message) = entry.message {
-                            if seen_message_ids.insert(message.id.clone()) {
-                                message_ids.push(message.id);
-                            }
+                        if let Some(message) = entry.message
+                            && seen_message_ids.insert(message.id.clone())
+                        {
+                            message_ids.push(message.id);
                         }
                     }
                 }

@@ -1,8 +1,41 @@
 import { useEffect, useState } from 'react'
-import { addAccount, deleteAccount, getChatImport, listAccounts, listOnboarding, startChatImport, updateAccount } from '../api'
-import { Empty } from '../components/Shared'
+import type { FormEvent } from 'react'
+import { addAccount, deleteAccount, listAccounts, listOnboarding, updateAccount } from '../api'
+import { Empty, Panel } from '../components/Shared'
 import { api } from '../config'
-import type { Account, ChatImport, OnboardingStatus } from '../types'
+import type { Account, OnboardingStatus } from '../types'
+
+type AccountForm = {
+  integration: 'email' | 'google'
+  name: string
+  email: string
+  username: string
+  password: string
+  imapHost: string
+  imapPort: string
+  smtpHost: string
+  smtpPort: string
+  refreshToken: string
+}
+
+const emptyAccountForm = (integration: AccountForm['integration'] = 'email'): AccountForm => ({
+  integration,
+  name: '',
+  email: '',
+  username: '',
+  password: '',
+  imapHost: '',
+  imapPort: '993',
+  smtpHost: '',
+  smtpPort: '587',
+  refreshToken: '',
+})
+
+const accountValue = (account: Account, key: string) => {
+  const details = account.details
+  const value = details && typeof details === 'object' && !Array.isArray(details) ? details[key] : undefined
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
+}
 
 export function Connections() {
   const [accounts, setAccounts] = useState<Account[]>([])
@@ -71,7 +104,7 @@ export function Connections() {
   return <section className="page">
     <header className="page-head"><div><p className="eyebrow">CONNECTED SERVICES</p><h1>Connections.</h1><p className="muted-copy">Manage the services that let Jossie do useful work beyond the conversation.</p></div><button className="button primary" onClick={() => window.open('/setup/google', '_blank')}>Connect Google with OAuth</button></header>
     <div className="connections-grid">
-      <Panel title="Connection status"><div className="integration-list">{onboarding.map((item) => <div key={item.name} className="integration-row"><span className={item.status === 'ready' ? 'ready-dot' : 'idle-dot'} /><div><strong>{item.name}</strong><small>{item.status}</small></div></div>)}</div></Panel>
+      <Panel title="Connection status"><div className="integration-list">{onboarding.map((item) => <div key={item.name} className="integration-row"><span className={item.status === 'Configured' ? 'ready-dot' : 'idle-dot'} /><div><strong>{item.name}</strong><small>{item.status === 'Configured' ? 'Ready' : 'Setup required'}</small></div></div>)}</div></Panel>
       <Panel title="Saved accounts"><div className="account-list">{accounts.length ? accounts.map((account) => <div className="account-row" key={account.id}><div><strong>{account.name}</strong><small>{account.integration}{accountValue(account, 'email') ? ` · ${accountValue(account, 'email')}` : ''}</small></div><div className="account-actions"><button className="text-button" onClick={() => startEdit(account)}>Edit</button><button className="text-button danger" onClick={async () => { await deleteAccount(api, account.id); if (editingAccount?.id === account.id) startNew(); await refresh() }}>Remove</button></div></div>) : <Empty copy="No accounts configured." />}</div></Panel>
       <Panel title={editingAccount ? `Edit ${editingAccount.name}` : 'Add account'} className="add-account">
         <form className="connection-form typed-account-form" onSubmit={submit}>
@@ -96,4 +129,3 @@ export function Connections() {
     </div>
   </section>
 }
-

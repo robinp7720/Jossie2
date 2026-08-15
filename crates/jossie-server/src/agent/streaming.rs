@@ -1,5 +1,3 @@
-/// Run the agent loop with streaming, sending events to the caller via an mpsc channel.
-/// This is the streaming counterpart of `run_agent_loop`.
 pub async fn run_agent_loop_streaming(
     state: &AppState,
     conv_id: Uuid,
@@ -22,6 +20,7 @@ pub async fn run_agent_loop_streaming(
     }
 
     let event_tx_for_error = event_tx.clone();
+    let run_id_for_error = run_id.clone();
     let result = AssertUnwindSafe(run_agent_loop_streaming_inner(
         state,
         conv_id,
@@ -32,22 +31,27 @@ pub async fn run_agent_loop_streaming(
         .catch_unwind()
         .await;
     release_conversation(state, conv_id).await;
-    if let Err(payload) = result {
-        let panic_message = panic_payload_to_string(payload);
-        tracing::error!(
-            "Streaming agent loop panicked for conversation {conv_id}: {panic_message}"
-        );
-        emit_stream_event(
-            state,
-            Some(&event_tx_for_error),
-            ServerEvent::Error {
-                conversation_id: conv_id,
-                run_id: None,
-                error: format!("Agent loop panicked: {panic_message}"),
-            },
-        )
-        .await;
-    }
+    let error = match result {
+        Ok(Ok(())) => return,
+        Ok(Err(error)) => error,
+        Err(payload) => {
+            let panic_message = panic_payload_to_string(payload);
+            tracing::error!(
+                "Streaming agent loop panicked for conversation {conv_id}: {panic_message}"
+            );
+            anyhow::anyhow!("Agent loop panicked: {panic_message}")
+        }
+    };
+    emit_stream_event(
+        state,
+        Some(&event_tx_for_error),
+        ServerEvent::Error {
+            conversation_id: conv_id,
+            run_id: Some(run_id_for_error),
+            error: error.to_string(),
+        },
+    )
+    .await;
 }
 
 async fn run_agent_loop_streaming_inner(
@@ -56,7 +60,7 @@ async fn run_agent_loop_streaming_inner(
     run_id: String,
     source_message_id: Option<Uuid>,
     event_tx: tokio::sync::mpsc::Sender<ServerEvent>,
-) {
+) -> anyhow::Result<()> {
     let options = AgentRunOptions::default();
     let (
         mut toolset,
@@ -67,19 +71,7 @@ async fn run_agent_loop_streaming_inner(
         prompt_cache_key,
     ) = match prepare_run_context(state, conv_id, &options).await {
         Ok(ctx) => ctx,
-        Err(e) => {
-            emit_stream_event(
-                state,
-                Some(&event_tx),
-                ServerEvent::Error {
-                    conversation_id: conv_id,
-                    run_id: Some(run_id.clone()),
-                    error: e.to_string(),
-                },
-            )
-            .await;
-            return;
-        }
+        Err(e) => return Err(e),
     };
 
     emit_stream_event(
@@ -115,15 +107,15 @@ async fn run_agent_loop_streaming_inner(
     let mut cumulative_tokens = 0u64;
     let mut premature_goal_finals = 0usize;
 
-    for iteration in 0..state.max_agent_iterations {
+    for iteration in 0..state.agent.max_agent_iterations {
         if ensure_run_not_cancelled(state, conv_id, &run_id, Some(&event_tx))
             .await
             .is_err()
         {
-            return;
+            return Ok(());
         }
         if iteration > 0
-            && run_started.elapsed() >= Duration::from_secs(state.interactive_run_budget_seconds)
+            && run_started.elapsed() >= Duration::from_secs(state.agent.interactive_run_budget_seconds)
         {
             if let Ok(partial) = pause_run_with_checkpoint(
                 state,
@@ -146,7 +138,7 @@ async fn run_agent_loop_streaming_inner(
                 )
                 .await;
             }
-            return;
+            return Ok(());
         }
         if iteration > 0 {
             inject_goal_tracking_message(&mut messages, &goal_tracker);
@@ -156,9 +148,9 @@ async fn run_agent_loop_streaming_inner(
             );
             bound_context_window(
                 &mut messages,
-                state.max_context_chars,
-                state.context_compact_target_chars,
-                state.context_keep_recent_dialogue_messages,
+                state.agent.max_context_chars,
+                state.agent.context_compact_target_chars,
+                state.agent.context_keep_recent_dialogue_messages,
             );
         }
 
@@ -175,7 +167,7 @@ async fn run_agent_loop_streaming_inner(
 
         let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(200);
         let llm = state.llm.clone();
-        let (messages_clone, request_options) = if state.openai_optimizations
+        let (messages_clone, request_options) = if state.agent.openai_optimizations
             && let Some(previous_response_id) = previous_response_id.as_ref()
         {
             (
@@ -216,7 +208,7 @@ async fn run_agent_loop_streaming_inner(
         let mut done_received = false;
         let mut completed_response_id = None;
         let stream_deadline =
-            tokio::time::Instant::now() + Duration::from_secs(state.llm_request_timeout_seconds);
+            tokio::time::Instant::now() + Duration::from_secs(state.agent.llm_request_timeout_seconds);
 
         while !done_received {
             tokio::select! {
@@ -270,14 +262,14 @@ async fn run_agent_loop_streaming_inner(
                     if state.is_cancel_requested(conv_id).await {
                         stream_task.abort();
                         let _ = ensure_run_not_cancelled(state, conv_id, &run_id, Some(&event_tx)).await;
-                        return;
+                        return Ok(());
                     }
                 }
                 _ = tokio::time::sleep_until(stream_deadline) => {
                     stream_task.abort();
                     stream_error = Some(format!(
                         "LLM stream timed out after {} seconds",
-                        state.llm_request_timeout_seconds
+                        state.agent.llm_request_timeout_seconds
                     ));
                     done_received = true;
                 }
@@ -326,7 +318,7 @@ async fn run_agent_loop_streaming_inner(
                             },
                         )
                         .await;
-                        return;
+                        return Ok(());
                     }
                 }
             } else {
@@ -340,7 +332,7 @@ async fn run_agent_loop_streaming_inner(
                     },
                 )
                 .await;
-                return;
+                return Ok(());
             }
         }
         previous_response_id = completed_response_id;
@@ -385,7 +377,7 @@ async fn run_agent_loop_streaming_inner(
                             )
                             .await;
                         }
-                        return;
+                        return Ok(());
                     }
                     let fallback = goal_tracker.build_stuck_message();
                     emit_stream_event(
@@ -399,7 +391,7 @@ async fn run_agent_loop_streaming_inner(
                     )
                     .await;
                     let assistant_msg = Message::new(conv_id, Role::Assistant, fallback);
-                    let _ = persist_message(state, &assistant_msg).await;
+                    persist_message(state, &assistant_msg).await?;
                     emit_stream_event(
                         state,
                         Some(&event_tx),
@@ -409,7 +401,7 @@ async fn run_agent_loop_streaming_inner(
                         },
                     )
                     .await;
-                    return;
+                    return Ok(());
                 }
 
                 messages.push(Message::transient(Role::Assistant, full_content));
@@ -427,7 +419,7 @@ async fn run_agent_loop_streaming_inner(
                     .with_response_items(response_items),
                 Err(_) => Message::new(conv_id, Role::Assistant, full_content.clone()),
             };
-            let _ = persist_message(state, &assistant_msg).await;
+            persist_message(state, &assistant_msg).await?;
             messages.push(assistant_msg);
 
             let capability_message_start = messages.len();
@@ -458,7 +450,7 @@ async fn run_agent_loop_streaming_inner(
                         },
                     )
                     .await;
-                    return;
+                    return Ok(());
                 }
             }
             match process_capability_activation(
@@ -489,7 +481,7 @@ async fn run_agent_loop_streaming_inner(
                         },
                     )
                     .await;
-                    return;
+                    return Ok(());
                 }
             }
 
@@ -522,7 +514,7 @@ async fn run_agent_loop_streaming_inner(
                         },
                     )
                     .await;
-                    return;
+                    return Ok(());
                 }
             };
             let (prepared_calls, repeated_results) =
@@ -555,7 +547,7 @@ async fn run_agent_loop_streaming_inner(
                 .await
                 .is_err()
             {
-                return;
+                return Ok(());
             }
 
             for (_, call, result) in results {
@@ -576,7 +568,7 @@ async fn run_agent_loop_streaming_inner(
                 let tool_msg = Message::new(conv_id, Role::Tool, result.content)
                     .with_tool_call_id(call.id.clone())
                     .with_name(call.name.clone());
-                let _ = persist_message(state, &tool_msg).await;
+                persist_message(state, &tool_msg).await?;
                 messages.push(tool_msg.clone());
                 chained_messages.push(tool_msg);
             }
@@ -591,16 +583,16 @@ async fn run_agent_loop_streaming_inner(
                     },
                 )
                 .await;
-                return;
+                return Ok(());
             }
             goal_tracker.record_tool_calls(&tool_calls);
             continue;
         }
 
-        if reflection_retries_remaining > 0 {
-            if let Some(feedback) =
+        if reflection_retries_remaining > 0
+            && let Some(feedback) =
                 self_reflect(state, &messages, &last_user_msg, &full_content).await
-            {
+        {
                 reflection_retries_remaining -= 1;
                 emit_stream_event(
                     state,
@@ -636,7 +628,6 @@ async fn run_agent_loop_streaming_inner(
                 messages.push(feedback_message.clone());
                 chained_messages.push(feedback_message);
                 continue;
-            }
         }
 
         if let Some(continuation) = goal_tracker.active_goal_continuation_message() {
@@ -679,7 +670,7 @@ async fn run_agent_loop_streaming_inner(
                     )
                     .await;
                 }
-                return;
+                return Ok(());
             }
             messages.push(
                 Message::transient(Role::Assistant, full_content)
@@ -692,13 +683,13 @@ async fn run_agent_loop_streaming_inner(
             continue;
         }
 
-        let _ = persist_final_assistant_response(
+        persist_final_assistant_response(
             state,
             conv_id,
             last_user_msg.clone(),
             full_content,
         )
-        .await;
+        .await?;
 
         emit_stream_event(
             state,
@@ -709,45 +700,30 @@ async fn run_agent_loop_streaming_inner(
             },
         )
         .await;
-        return;
+        return Ok(());
     }
 
-    match pause_run_with_checkpoint(
+    let partial = pause_run_with_checkpoint(
         state,
         conv_id,
         &run_id,
         &goal_tracker,
         &format!(
             "Agent iteration budget of {} reached",
-            state.max_agent_iterations
+            state.agent.max_agent_iterations
         ),
         Some(&event_tx),
     )
-    .await
-    {
-        Ok(partial) => {
-            emit_stream_event(
-                state,
-                Some(&event_tx),
-                ServerEvent::AssistantDelta {
-                    conversation_id: conv_id,
-                    run_id,
-                    content: partial,
-                },
-            )
-            .await;
-        }
-        Err(error) => {
-            emit_stream_event(
-                state,
-                Some(&event_tx),
-                ServerEvent::Error {
-                    conversation_id: conv_id,
-                    run_id: Some(run_id),
-                    error: error.to_string(),
-                },
-            )
-            .await;
-        }
-    }
+    .await?;
+    emit_stream_event(
+        state,
+        Some(&event_tx),
+        ServerEvent::AssistantDelta {
+            conversation_id: conv_id,
+            run_id,
+            content: partial,
+        },
+    )
+    .await;
+    Ok(())
 }

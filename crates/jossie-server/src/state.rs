@@ -15,17 +15,7 @@ pub struct PendingGoogleOAuth {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-pub struct AppState {
-    pub db: Arc<Database>,
-    pub llm: LlmClient,
-    pub kg_llm: LlmClient,
-    pub chat_export_importer: Arc<jossie_integration_files::ChatExportImporter>,
-    pub registry: Arc<IntegrationRegistry>,
-    pub mail_integration: Arc<MailIntegration>,
-    pub auth_token: String,
-    pub auth_password_hash: String,
-    pub session_cookie_secure: bool,
-    pub public_base_url: Option<String>,
+pub struct AgentRuntimeConfig {
     pub system_prompt: String,
     pub max_agent_iterations: usize,
     pub max_context_messages: usize,
@@ -40,21 +30,47 @@ pub struct AppState {
     pub max_tool_result_chars: usize,
     pub max_tool_batch_chars: usize,
     pub max_attachment_bytes_per_request: usize,
-    pub google_config: jossie_core::config::GoogleConfig,
-    pub google_integration: Option<Arc<GoogleIntegration>>,
-    pub telegram_token: String,
-    pub telegram_max_download_bytes: usize,
-    pub telegram_ffmpeg_path: String,
     pub enable_self_reflection: bool,
+}
+
+pub struct WebRuntimeConfig {
+    pub auth_token: String,
+    pub auth_password_hash: String,
+    pub session_cookie_secure: bool,
+    pub public_base_url: Option<String>,
+    pub cors_origins: Vec<String>,
+    pub max_request_body_bytes: usize,
+}
+
+pub struct TelegramRuntimeConfig {
+    pub token: String,
+    pub max_download_bytes: usize,
+    pub ffmpeg_path: String,
+}
+
+pub struct BackgroundRuntimeConfig {
     pub heartbeat_enabled: bool,
     pub heartbeat_interval_secs: u64,
+}
+
+pub struct AppState {
+    pub db: Arc<Database>,
+    pub llm: LlmClient,
+    pub kg_llm: LlmClient,
+    pub chat_export_importer: Arc<jossie_integration_files::ChatExportImporter>,
+    pub registry: Arc<IntegrationRegistry>,
+    pub mail_integration: Arc<MailIntegration>,
+    pub agent: AgentRuntimeConfig,
+    pub web: WebRuntimeConfig,
+    pub telegram: TelegramRuntimeConfig,
+    pub background: BackgroundRuntimeConfig,
+    pub google_config: jossie_core::config::GoogleConfig,
+    pub google_integration: Option<Arc<GoogleIntegration>>,
     pub active_conversations: Arc<RwLock<HashSet<Uuid>>>,
     pub cancelled_conversations: Arc<RwLock<HashSet<Uuid>>>,
     pub run_cancellations: Arc<RwLock<HashMap<Uuid, CancellationToken>>>,
     pub pending_google_oauth: Arc<RwLock<HashMap<String, PendingGoogleOAuth>>>,
     pub event_tx: broadcast::Sender<ServerEvent>,
-    pub cors_origins: Vec<String>,
-    pub max_request_body_bytes: usize,
 }
 
 impl AppState {

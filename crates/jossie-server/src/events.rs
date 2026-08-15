@@ -3,7 +3,7 @@ use jossie_core::types::Message;
 use serde::Serialize;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
     RunStarted {
@@ -703,17 +703,17 @@ pub async fn persist_activity_event(db: &jossie_db::Database, event: &ServerEven
         _ => None,
     };
 
-    if let Some((conversation_id, run_id, category, title, detail, tone)) = summary {
-        if let Err(error) = db
+    if let Some((conversation_id, run_id, category, title, detail, tone)) = summary
+        && let Err(error) = db
             .record_activity_event(conversation_id, run_id, category, title, detail, tone)
             .await
-        {
-            tracing::warn!("Failed to persist dashboard activity: {error}");
-        }
+    {
+        tracing::warn!("Failed to persist dashboard activity: {error}");
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::preview_text;
 

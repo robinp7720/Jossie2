@@ -65,7 +65,7 @@ pub async fn delete_file(
         .db
         .get_unattached_file_record(&file_id)
         .await
-        .map_err(|error| AppError::conflict(error))?
+        .map_err(AppError::conflict)?
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("File not found")))?;
 
     let source = std::path::PathBuf::from(&record.path);
@@ -170,8 +170,7 @@ pub async fn upload_file(
             &file_path,
             None, // Linked to message later
         )
-        .await
-        .map_err(anyhow::Error::from)?;
+        .await?;
 
     Ok(Json(UploadResponse { file_id, name }))
 }
@@ -195,8 +194,7 @@ pub async fn get_chat_import(
     let import = state
         .db
         .get_chat_import(&import_id)
-        .await
-        .map_err(anyhow::Error::from)?
+        .await?
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("Chat import not found")))?;
     Ok(Json(import))
 }

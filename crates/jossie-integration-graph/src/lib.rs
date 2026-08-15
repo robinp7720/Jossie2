@@ -7,89 +7,67 @@ pub struct GraphIntegration {
     db: Arc<Database>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GraphUpsertNodeArgs {
+    id: String,
+    label: String,
+    #[serde(rename = "type")]
+    node_type: String,
+    #[serde(alias = "properties")]
+    #[schemars(required)]
+    attributes: serde_json::Value,
+}
 
-    async fn test_graph() -> GraphIntegration {
-        let db = Database::new("sqlite::memory:").await.unwrap();
-        db.migrate().await.unwrap();
-        GraphIntegration::new(Arc::new(db))
-    }
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GraphAddRelationArgs {
+    source_id: String,
+    target_id: String,
+    relation: String,
+    #[schemars(required)]
+    weight: f64,
+    #[serde(alias = "properties")]
+    #[schemars(required)]
+    attributes: serde_json::Value,
+}
 
-    #[tokio::test]
-    async fn deletes_nodes_and_connected_relations() {
-        let graph = test_graph().await;
-        graph
-            .execute(
-                "graph_upsert_node",
-                r#"{"id":"robin","label":"Robin","type":"Person","attributes":[]}"#,
-            )
-            .await
-            .unwrap();
-        graph
-            .execute(
-                "graph_upsert_node",
-                r#"{"id":"apollo","label":"Apollo","type":"Project","attributes":[]}"#,
-            )
-            .await
-            .unwrap();
-        graph
-            .execute(
-                "graph_add_relation",
-                r#"{"source_id":"robin","target_id":"apollo","relation":"WORKS_ON","weight":1,"attributes":[]}"#,
-            )
-            .await
-            .unwrap();
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GraphNodeIdArgs {
+    id: String,
+}
 
-        let result = graph
-            .execute("graph_delete_node", r#"{"id":"robin"}"#)
-            .await
-            .unwrap();
-        assert!(result.contains("Deleted graph node"));
-        assert_eq!(graph.db.graph_list_edges(10).await.unwrap().len(), 0);
-        assert!(
-            graph
-                .execute("graph_delete_node", r#"{"id":"robin"}"#)
-                .await
-                .is_err()
-        );
-    }
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GraphRelationArgs {
+    source_id: String,
+    target_id: String,
+    relation: String,
+}
 
-    #[tokio::test]
-    async fn deletes_exact_relation() {
-        let graph = test_graph().await;
-        for (id, label) in [("robin", "Robin"), ("apollo", "Apollo")] {
-            graph
-                .add_node(id, label, "Person", serde_json::json!({}))
-                .await
-                .unwrap();
-        }
-        graph
-            .add_edge("robin", "apollo", "WORKS_ON", 1.0, serde_json::json!({}))
-            .await
-            .unwrap();
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GraphSearchArgs {
+    query: String,
+}
 
-        assert!(
-            graph
-                .execute(
-                    "graph_delete_relation",
-                    r#"{"source_id":"robin","target_id":"apollo","relation":"WORKS_ON"}"#,
-                )
-                .await
-                .unwrap()
-                .contains("Deleted relation")
-        );
-        assert!(
-            graph
-                .execute(
-                    "graph_delete_relation",
-                    r#"{"source_id":"robin","target_id":"apollo","relation":"WORKS_ON"}"#,
-                )
-                .await
-                .is_err()
-        );
-    }
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GraphListTypeArgs {
+    entity_type: String,
+}
+
+fn default_graph_depth() -> usize {
+    2
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GraphExploreArgs {
+    entities: Vec<String>,
+    #[serde(default = "default_graph_depth")]
+    max_depth: usize,
 }
 
 impl GraphIntegration {
@@ -182,10 +160,10 @@ impl GraphIntegration {
             ));
 
             // Print properties if not empty object
-            if let Some(obj) = node.properties.as_object() {
-                if !obj.is_empty() {
-                    output.push_str(&format!("  Properties: {:?}\n", obj));
-                }
+            if let Some(obj) = node.properties.as_object()
+                && !obj.is_empty()
+            {
+                output.push_str(&format!("  Properties: {:?}\n", obj));
             }
 
             let neighbors = self.db.graph_get_neighbors(&node.id).await?;
@@ -222,10 +200,10 @@ impl GraphIntegration {
             output.push_str(&format!("- {} (ID: {})\n", node.label, node.id));
 
             // Show connection count
-            if let Ok(neighbors) = self.db.graph_get_neighbors(&node.id).await {
-                if !neighbors.is_empty() {
-                    output.push_str(&format!("  {} connections\n", neighbors.len()));
-                }
+            if let Ok(neighbors) = self.db.graph_get_neighbors(&node.id).await
+                && !neighbors.is_empty()
+            {
+                output.push_str(&format!("  {} connections\n", neighbors.len()));
             }
         }
 
@@ -239,7 +217,7 @@ impl GraphIntegration {
     ) -> anyhow::Result<String> {
         use std::collections::{HashMap, HashSet, VecDeque};
 
-        let max_depth = max_depth.max(1).min(3); // Limit depth to prevent explosion
+        let max_depth = max_depth.clamp(1, 3); // Limit depth to prevent explosion
 
         // Find all entity nodes first
         let mut entity_nodes = Vec::new();
@@ -326,6 +304,92 @@ impl GraphIntegration {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+
+    async fn test_graph() -> GraphIntegration {
+        let db = Database::new("sqlite::memory:").await.unwrap();
+        db.migrate().await.unwrap();
+        GraphIntegration::new(Arc::new(db))
+    }
+
+    #[tokio::test]
+    async fn deletes_nodes_and_connected_relations() {
+        let graph = test_graph().await;
+        graph
+            .execute(
+                "graph_upsert_node",
+                r#"{"id":"robin","label":"Robin","type":"Person","attributes":[]}"#,
+            )
+            .await
+            .unwrap();
+        graph
+            .execute(
+                "graph_upsert_node",
+                r#"{"id":"apollo","label":"Apollo","type":"Project","attributes":[]}"#,
+            )
+            .await
+            .unwrap();
+        graph
+            .execute(
+                "graph_add_relation",
+                r#"{"source_id":"robin","target_id":"apollo","relation":"WORKS_ON","weight":1,"attributes":[]}"#,
+            )
+            .await
+            .unwrap();
+
+        let result = graph
+            .execute("graph_delete_node", r#"{"id":"robin"}"#)
+            .await
+            .unwrap();
+        assert!(result.contains("Deleted graph node"));
+        assert_eq!(graph.db.graph_list_edges(10).await.unwrap().len(), 0);
+        assert!(
+            graph
+                .execute("graph_delete_node", r#"{"id":"robin"}"#)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn deletes_exact_relation() {
+        let graph = test_graph().await;
+        for (id, label) in [("robin", "Robin"), ("apollo", "Apollo")] {
+            graph
+                .add_node(id, label, "Person", serde_json::json!({}))
+                .await
+                .unwrap();
+        }
+        graph
+            .add_edge("robin", "apollo", "WORKS_ON", 1.0, serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert!(
+            graph
+                .execute(
+                    "graph_delete_relation",
+                    r#"{"source_id":"robin","target_id":"apollo","relation":"WORKS_ON"}"#,
+                )
+                .await
+                .unwrap()
+                .contains("Deleted relation")
+        );
+        assert!(
+            graph
+                .execute(
+                    "graph_delete_relation",
+                    r#"{"source_id":"robin","target_id":"apollo","relation":"WORKS_ON"}"#,
+                )
+                .await
+                .is_err()
+        );
+    }
+}
+
 fn normalize_attributes(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Array(items) => {
@@ -363,134 +427,34 @@ impl Integration for GraphIntegration {
 
     fn tools(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition {
-                name: "graph_upsert_node".to_string(),
-                description: "Add or update an entity in the Knowledge Graph. Use consistent IDs (e.g. lowercase names).".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Unique ID (e.g., 'robin_decker', 'project_apollo')"},
-                        "label": {"type": "string", "description": "Display name (e.g., 'Robin Decker')"},
-                        "type": {"type": "string", "description": "Category (Person, Project, Company, etc.)"},
-                        "attributes": {
-                            "type": "array",
-                            "description": "List of attribute entries (use empty array for none)",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "key": {"type": "string", "description": "Attribute name"},
-                                    "value": {"type": "string", "description": "Attribute value"}
-                                },
-                                "required": ["key", "value"],
-                                "additionalProperties": false
-                            }
-                        }
-                    },
-                    "required": ["id", "label", "type", "attributes"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "graph_add_relation".to_string(),
-                description: "Connect two entities in the Knowledge Graph.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "source_id": {"type": "string", "description": "ID of source entity"},
-                        "target_id": {"type": "string", "description": "ID of target entity"},
-                        "relation": {"type": "string", "description": "Relationship type (WORKS_ON, KNOWS, LOCATED_IN, etc.)"},
-                        "weight": {"type": "number", "description": "Confidence/Strength (0.0 - 1.0), default 1.0"},
-                        "attributes": {
-                            "type": "array",
-                            "description": "List of edge attribute entries (use empty array for none)",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "key": {"type": "string", "description": "Attribute name"},
-                                    "value": {"type": "string", "description": "Attribute value"}
-                                },
-                                "required": ["key", "value"],
-                                "additionalProperties": false
-                            }
-                        }
-                    },
-                    "required": ["source_id", "target_id", "relation", "weight", "attributes"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "graph_delete_node".to_string(),
-                description: "Permanently delete a Knowledge Graph entity by its exact ID, along with every relation connected to it. Use only when the user explicitly asks to forget it."
-                    .to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Exact ID of the entity to permanently delete"}
-                    },
-                    "required": ["id"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "graph_delete_relation".to_string(),
-                description: "Permanently delete one exact Knowledge Graph relation. Use only when the user explicitly asks to remove it."
-                    .to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "source_id": {"type": "string", "description": "Exact source entity ID"},
-                        "target_id": {"type": "string", "description": "Exact target entity ID"},
-                        "relation": {"type": "string", "description": "Exact relation type"}
-                    },
-                    "required": ["source_id", "target_id", "relation"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "graph_search".to_string(),
-                description: "Search the Knowledge Graph for entities and their relationships. Use this proactively to understand context before answering questions.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Name or partial name of the entity to look up"}
-                    },
-                    "required": ["query"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "graph_list_by_type".to_string(),
-                description: "List all entities of a specific type (e.g., 'Person', 'Project', 'Company'). Great for getting an overview of all entities in a category.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "entity_type": {"type": "string", "description": "The type/category of entities to list (e.g., 'Person', 'Project', 'Company', 'Event')"}
-                    },
-                    "required": ["entity_type"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "graph_explore_connections".to_string(),
-                description: "Discover how multiple entities are connected through relationships. Finds paths between entities to understand complex connections.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "entities": {
-                            "type": "array",
-                            "description": "List of entity names to explore connections between (minimum 2)",
-                            "items": {"type": "string"}
-                        },
-                        "max_depth": {
-                            "type": "integer",
-                            "description": "Maximum relationship hops to traverse (1-3, default 2)",
-                            "default": 2
-                        }
-                    },
-                    "required": ["entities"],
-                    "additionalProperties": false
-                }),
-            },
+            ToolDefinition::for_args::<GraphUpsertNodeArgs>(
+                "graph_upsert_node",
+                "Add or update an entity in the Knowledge Graph. Use consistent IDs (e.g. lowercase names).",
+            ),
+            ToolDefinition::for_args::<GraphAddRelationArgs>(
+                "graph_add_relation",
+                "Connect two entities in the Knowledge Graph.",
+            ),
+            ToolDefinition::for_args::<GraphNodeIdArgs>(
+                "graph_delete_node",
+                "Permanently delete a Knowledge Graph entity by its exact ID, along with every relation connected to it. Use only when the user explicitly asks to forget it.",
+            ),
+            ToolDefinition::for_args::<GraphRelationArgs>(
+                "graph_delete_relation",
+                "Permanently delete one exact Knowledge Graph relation. Use only when the user explicitly asks to remove it.",
+            ),
+            ToolDefinition::for_args::<GraphSearchArgs>(
+                "graph_search",
+                "Search the Knowledge Graph for entities and their relationships. Use this proactively to understand context before answering questions.",
+            ),
+            ToolDefinition::for_args::<GraphListTypeArgs>(
+                "graph_list_by_type",
+                "List all entities of a specific type (e.g., 'Person', 'Project', 'Company'). Great for getting an overview of all entities in a category.",
+            ),
+            ToolDefinition::for_args::<GraphExploreArgs>(
+                "graph_explore_connections",
+                "Discover how multiple entities are connected through relationships. Finds paths between entities to understand complex connections.",
+            ),
         ]
     }
 
@@ -498,35 +462,13 @@ impl Integration for GraphIntegration {
         tracing::debug!("graph.execute: {tool_name}");
         match tool_name {
             "graph_upsert_node" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    id: String,
-                    label: String,
-                    #[serde(rename = "type")]
-                    node_type: String,
-                    #[serde(default, alias = "properties")]
-                    attributes: serde_json::Value,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
+                let args: GraphUpsertNodeArgs = serde_json::from_str(arguments)?;
                 let attributes = normalize_attributes(args.attributes);
                 self.add_node(&args.id, &args.label, &args.node_type, attributes)
                     .await
             }
             "graph_add_relation" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    source_id: String,
-                    target_id: String,
-                    relation: String,
-                    #[serde(default = "default_weight")]
-                    weight: f64,
-                    #[serde(default, alias = "properties")]
-                    attributes: serde_json::Value,
-                }
-                fn default_weight() -> f64 {
-                    1.0
-                }
-                let args: Args = serde_json::from_str(arguments)?;
+                let args: GraphAddRelationArgs = serde_json::from_str(arguments)?;
                 let attributes = normalize_attributes(args.attributes);
                 self.add_edge(
                     &args.source_id,
@@ -538,51 +480,24 @@ impl Integration for GraphIntegration {
                 .await
             }
             "graph_delete_node" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    id: String,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
+                let args: GraphNodeIdArgs = serde_json::from_str(arguments)?;
                 self.delete_node(&args.id).await
             }
             "graph_delete_relation" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    source_id: String,
-                    target_id: String,
-                    relation: String,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
+                let args: GraphRelationArgs = serde_json::from_str(arguments)?;
                 self.delete_edge(&args.source_id, &args.target_id, &args.relation)
                     .await
             }
             "graph_search" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    query: String,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
+                let args: GraphSearchArgs = serde_json::from_str(arguments)?;
                 self.query_graph(&args.query).await
             }
             "graph_list_by_type" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    entity_type: String,
-                }
-                let args: Args = serde_json::from_str(arguments)?;
+                let args: GraphListTypeArgs = serde_json::from_str(arguments)?;
                 self.list_by_type(&args.entity_type).await
             }
             "graph_explore_connections" => {
-                #[derive(Deserialize)]
-                struct Args {
-                    entities: Vec<String>,
-                    #[serde(default = "default_max_depth")]
-                    max_depth: usize,
-                }
-                fn default_max_depth() -> usize {
-                    2
-                }
-                let args: Args = serde_json::from_str(arguments)?;
+                let args: GraphExploreArgs = serde_json::from_str(arguments)?;
                 self.explore_connections(args.entities, args.max_depth)
                     .await
             }

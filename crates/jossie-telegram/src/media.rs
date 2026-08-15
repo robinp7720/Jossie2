@@ -100,10 +100,10 @@ async fn download_media_group(
         .iter()
         .map(|candidate| candidate.size)
         .sum::<usize>();
-    if total_size > state.telegram_max_download_bytes {
+    if total_size > state.telegram.max_download_bytes {
         anyhow::bail!(
             "Telegram media is too large: {total_size} bytes exceeds {}",
-            state.telegram_max_download_bytes
+            state.telegram.max_download_bytes
         );
     }
     tokio::fs::create_dir_all("uploads").await?;
@@ -116,7 +116,7 @@ async fn download_media_group(
                     .map(|item: &LocalMedia| item.size)
                     .sum::<usize>()
                     + media.size;
-                if total > state.telegram_max_download_bytes {
+                if total > state.telegram.max_download_bytes {
                     let _ = tokio::fs::remove_file(&media.path).await;
                     cleanup_paths(
                         downloaded
@@ -155,7 +155,7 @@ async fn download_candidate(
         bot.download_file(&file.path, &mut destination).await?;
         drop(destination);
         let actual_size = tokio::fs::metadata(&path).await?.len() as usize;
-        if actual_size > state.telegram_max_download_bytes {
+        if actual_size > state.telegram.max_download_bytes {
             anyhow::bail!("Downloaded Telegram file exceeds the configured limit");
         }
         Ok(LocalMedia {
@@ -242,7 +242,7 @@ async fn prepare_audio_for_transcription(
         ));
     }
     let output = PathBuf::from("uploads").join(format!("transcode-{}.webm", Uuid::new_v4()));
-    let status = tokio::process::Command::new(&state.telegram_ffmpeg_path)
+    let status = tokio::process::Command::new(&state.telegram.ffmpeg_path)
         .args(["-nostdin", "-loglevel", "error", "-y", "-i"])
         .arg(&media.path)
         .args(["-c:a", "libopus", "-b:a", "64k"])
@@ -263,7 +263,7 @@ async fn prepare_audio_for_transcription(
 
 async fn ensure_voice_available(state: &AppState) -> anyhow::Result<()> {
     ensure_transcription_enabled(state)?;
-    let output = tokio::process::Command::new(&state.telegram_ffmpeg_path)
+    let output = tokio::process::Command::new(&state.telegram.ffmpeg_path)
         .arg("-version")
         .output()
         .await?;
@@ -307,12 +307,6 @@ async fn persist_media_message(
         saved.push(item.id);
     }
     jossie_server::events::persist_message(state, message).await?;
-    for item in media {
-        state
-            .db
-            .link_message_attachment(message.id, item.id)
-            .await?;
-    }
     Ok(())
 }
 

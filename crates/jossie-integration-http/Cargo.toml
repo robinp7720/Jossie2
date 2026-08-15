@@ -15,6 +15,7 @@ tokio = { workspace = true }
 url = { workspace = true }
 regex = { workspace = true }
 base64 = { workspace = true }
+schemars = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true, features = ["multipart"] }

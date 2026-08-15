@@ -362,6 +362,7 @@ Commands:
 cargo build          # Compile workspace
 cargo check          # Type-check only (faster)
 cargo test           # Run tests
+cargo run -p xtask -- generate-types --check  # Verify Rust/TypeScript API contracts
 cargo run            # Start server (needs config.toml)
 ```
 

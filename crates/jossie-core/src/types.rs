@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
@@ -42,7 +42,7 @@ impl std::str::FromStr for Role {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct Attachment {
     pub id: Uuid,
     pub name: String,
@@ -54,7 +54,7 @@ pub struct Attachment {
     pub data: Option<Arc<[u8]>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct Message {
     pub id: Uuid,
     pub conversation_id: Uuid,
@@ -141,7 +141,7 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct Conversation {
     pub id: Uuid,
     pub title: Option<String>,

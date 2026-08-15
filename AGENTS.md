@@ -108,7 +108,7 @@ The event loop is started unconditionally from `src/main.rs`, so polling, schedu
 
 ## Database Reality
 
-SQLite schema is embedded in `crates/jossie-db/migrations.sql` and applied by `Database::migrate()` in `crates/jossie-db/src/lib.rs`. Domain-specific operations live under `src/repositories/` while `Database` remains the facade.
+SQLite migrations live in `crates/jossie-db/migrations/` and are applied in version order by `Database::migrate()` in `crates/jossie-db/src/lib.rs`. The first upgrade of an older unversioned database creates an adjacent backup before normalizing legacy columns and adopting the version history. Domain-specific operations live under `src/repositories/` while `Database` remains the facade.
 
 Current schema includes:
 
@@ -241,11 +241,14 @@ Useful commands:
 ```sh
 cargo check
 cargo test --workspace
+cargo run -p xtask -- generate-types --check
 cargo run
 cd frontend && npm ci && npm run build
 ```
 
 If you want the served web UI to work, build `frontend/dist` first.
+
+Frontend wire types in `frontend/src/generated/contracts.ts` are generated from Rust DTOs. After changing a serialized API or event type, run `cargo run -p xtask -- generate-types` and commit the result.
 
 ## Conventions
 

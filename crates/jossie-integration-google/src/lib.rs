@@ -1,6 +1,8 @@
 use chrono::{DateTime, Duration, Utc};
 use jossie_core::config::GoogleConfig;
-use jossie_core::integration::{Integration, OnboardingField, OnboardingStatus, ToolDefinition};
+use jossie_core::integration::{
+    EmptyToolArgs, Integration, OnboardingField, OnboardingStatus, ToolDefinition,
+};
 use jossie_db::Database;
 use jossie_db::IntegrationAccount;
 use reqwest::StatusCode;
@@ -14,6 +16,87 @@ pub struct GoogleIntegration {
     client: reqwest::Client,
     tokens: Arc<RwLock<HashMap<String, TokenData>>>,
     db: Option<Arc<Database>>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DriveSearchArgs {
+    account_id: String,
+    query: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DriveReadArgs {
+    account_id: String,
+    file_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DriveListArgs {
+    account_id: String,
+    #[schemars(required)]
+    folder_id: Option<String>,
+    #[schemars(required)]
+    query: Option<String>,
+    #[schemars(required)]
+    page_size: Option<u32>,
+    #[schemars(required)]
+    page_token: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GoogleAccountArgs {
+    account_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CalendarListEventsArgs {
+    account_id: String,
+    #[schemars(required)]
+    calendar_id: Option<String>,
+    query: String,
+    time_min: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CalendarCreateEventArgs {
+    account_id: String,
+    #[schemars(required)]
+    calendar_id: Option<String>,
+    summary: String,
+    start_time: String,
+    end_time: String,
+    description: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CalendarUpdateEventArgs {
+    account_id: String,
+    #[schemars(required)]
+    calendar_id: Option<String>,
+    event_id: String,
+    #[schemars(required)]
+    summary: Option<String>,
+    #[schemars(required)]
+    start_time: Option<String>,
+    #[schemars(required)]
+    end_time: Option<String>,
+    #[schemars(required)]
+    start_date: Option<String>,
+    #[schemars(required)]
+    end_date: Option<String>,
+    #[schemars(required)]
+    description: Option<String>,
+    #[schemars(required)]
+    location: Option<String>,
+    #[schemars(required)]
+    send_updates: Option<String>,
 }
 
 const GOOGLE_INTEGRATION: &str = "google";

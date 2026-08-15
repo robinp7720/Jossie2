@@ -17,7 +17,7 @@ pub struct WorkQuery {
     pub include_archived: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 pub struct WorkSummary {
     pub goals: Vec<jossie_db::GoalWithTasks>,
     pub active_runs: Vec<jossie_db::WorkRun>,
@@ -54,7 +54,7 @@ pub async fn work_summary(
     }))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 pub struct GoalDetail {
     #[serde(flatten)]
     pub goal: jossie_db::GoalWithTasks,

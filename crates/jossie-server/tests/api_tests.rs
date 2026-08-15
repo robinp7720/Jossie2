@@ -8,7 +8,10 @@ use jossie_db::Database;
 use jossie_integration_email::EmailIntegration;
 use jossie_integration_mail::MailIntegration;
 use jossie_llm::LlmClient;
-use jossie_server::{AppState, router};
+use jossie_server::{
+    AgentRuntimeConfig, AppState, BackgroundRuntimeConfig, TelegramRuntimeConfig, WebRuntimeConfig,
+    router,
+};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -36,24 +39,40 @@ async fn setup_app() -> axum::Router {
         )),
         registry: Arc::new(IntegrationRegistry::new()),
         mail_integration,
-        auth_token: "test-token".to_string(),
-        auth_password_hash: test_password_hash(),
-        session_cookie_secure: false,
-        public_base_url: None,
-        system_prompt: "test prompt".to_string(),
-        max_agent_iterations: 5,
-        max_context_messages: 10,
-        event_max_context_messages: 10,
-        openai_optimizations: false,
-        max_context_chars: 120_000,
-        context_compact_target_chars: 80_000,
-        context_keep_recent_dialogue_messages: 12,
-        interactive_run_budget_seconds: 600,
-        llm_request_timeout_seconds: 120,
-        tool_call_timeout_seconds: 90,
-        max_tool_result_chars: 32_000,
-        max_tool_batch_chars: 60_000,
-        max_attachment_bytes_per_request: 25 * 1024 * 1024,
+        agent: AgentRuntimeConfig {
+            system_prompt: "test prompt".to_string(),
+            max_agent_iterations: 5,
+            max_context_messages: 10,
+            event_max_context_messages: 10,
+            openai_optimizations: false,
+            max_context_chars: 120_000,
+            context_compact_target_chars: 80_000,
+            context_keep_recent_dialogue_messages: 12,
+            interactive_run_budget_seconds: 600,
+            llm_request_timeout_seconds: 120,
+            tool_call_timeout_seconds: 90,
+            max_tool_result_chars: 32_000,
+            max_tool_batch_chars: 60_000,
+            max_attachment_bytes_per_request: 25 * 1024 * 1024,
+            enable_self_reflection: false,
+        },
+        web: WebRuntimeConfig {
+            auth_token: "test-token".to_string(),
+            auth_password_hash: test_password_hash(),
+            session_cookie_secure: false,
+            public_base_url: None,
+            cors_origins: vec![],
+            max_request_body_bytes: jossie_core::config::DEFAULT_MAX_REQUEST_BODY_BYTES,
+        },
+        telegram: TelegramRuntimeConfig {
+            token: "".to_string(),
+            max_download_bytes: 20_000_000,
+            ffmpeg_path: "ffmpeg".to_string(),
+        },
+        background: BackgroundRuntimeConfig {
+            heartbeat_enabled: false,
+            heartbeat_interval_secs: 14_400,
+        },
         google_config: jossie_core::config::GoogleConfig {
             client_id: "".to_string(),
             client_secret: "".to_string(),
@@ -61,19 +80,11 @@ async fn setup_app() -> axum::Router {
             debug_gmail_payload: false,
         },
         google_integration: None,
-        telegram_token: "".to_string(),
-        telegram_max_download_bytes: 20_000_000,
-        telegram_ffmpeg_path: "ffmpeg".to_string(),
-        enable_self_reflection: false,
-        heartbeat_enabled: false,
-        heartbeat_interval_secs: 14_400,
         active_conversations: Arc::new(RwLock::new(HashSet::new())),
         cancelled_conversations: Arc::new(RwLock::new(HashSet::new())),
         run_cancellations: Arc::new(RwLock::new(HashMap::new())),
         pending_google_oauth: Arc::new(RwLock::new(HashMap::new())),
         event_tx,
-        cors_origins: vec![],
-        max_request_body_bytes: jossie_core::config::DEFAULT_MAX_REQUEST_BODY_BYTES,
     });
 
     router(state)

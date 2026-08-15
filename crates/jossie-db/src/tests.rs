@@ -1,19 +1,6 @@
 use super::*;
 use std::fs;
 
-#[test]
-fn migration_splitter_ignores_semicolons_in_comments_and_quotes() {
-    let sql = "-- goals; work runs\nCREATE TABLE first (value TEXT DEFAULT 'a;b');\n\
-                   /* another; comment */ CREATE TABLE second (id INTEGER);";
-
-    let statements = split_sql_statements(sql);
-
-    assert_eq!(statements.len(), 2);
-    assert!(statements[0].contains("CREATE TABLE first"));
-    assert!(statements[0].contains("'a;b'"));
-    assert!(statements[1].contains("CREATE TABLE second"));
-}
-
 async fn test_db() -> Database {
     let db = Database::new("sqlite::memory:").await.unwrap();
     db.migrate().await.unwrap();
@@ -97,6 +84,27 @@ async fn save_and_get_messages() {
 }
 
 #[tokio::test]
+async fn corrupt_wire_rows_fail_instead_of_becoming_default_values() {
+    let db = test_db().await;
+    let conversation = db.create_conversation(None).await.unwrap();
+    sqlx::query(
+        "INSERT INTO messages (id, conversation_id, role, content, created_at)
+         VALUES ('not-a-uuid', ?, 'user', 'corrupt', ?)",
+    )
+    .bind(conversation.id.to_string())
+    .bind(Utc::now().to_rfc3339())
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let error = db
+        .get_messages(conversation.id, Some(10))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("invalid message id"));
+}
+
+#[tokio::test]
 async fn migrate_repairs_malformed_files_schema() {
     let db_path = temp_db_path("repair-files-rootpage");
     let db_url = sqlite_url(&db_path);
@@ -167,6 +175,78 @@ async fn migrate_repairs_malformed_files_schema() {
         if file_name.starts_with(&format!("{original_name}.repair-backup-")) {
             fs::remove_file(entry.path()).ok();
         }
+    }
+}
+
+#[tokio::test]
+async fn migrate_versions_and_normalizes_legacy_schema() {
+    let db_path = temp_db_path("legacy-bootstrap");
+    let db_url = sqlite_url(&db_path);
+    let db = Database::new(&db_url).await.unwrap();
+    sqlx::query(
+        "CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TABLE memory_metadata (
+            key TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    db.migrate().await.unwrap();
+    assert!(db.schema_has_table("_sqlx_migrations").await.unwrap());
+    assert!(
+        db.table_has_column("conversations", "archived_at")
+            .await
+            .unwrap()
+    );
+    assert!(
+        db.table_has_column("memory_metadata", "prompt_scope")
+            .await
+            .unwrap()
+    );
+    assert!(
+        db.table_has_column("memory_metadata", "importance")
+            .await
+            .unwrap()
+    );
+    db.migrate().await.unwrap();
+
+    let parent = db_path.parent().unwrap();
+    let original_name = db_path.file_name().unwrap().to_string_lossy();
+    let backup_prefix = format!("{original_name}.repair-backup-");
+    let backups = fs::read_dir(parent)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&backup_prefix)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1);
+
+    drop(db);
+    for suffix in ["", "-wal", "-shm"] {
+        fs::remove_file(sidecar_path(&db_path, suffix)).ok();
+    }
+    for entry in backups {
+        fs::remove_file(entry.path()).ok();
+        fs::remove_file(sidecar_path(&entry.path(), "-wal")).ok();
+        fs::remove_file(sidecar_path(&entry.path(), "-shm")).ok();
     }
 }
 

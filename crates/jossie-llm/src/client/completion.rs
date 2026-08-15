@@ -241,10 +241,10 @@ async fn handle_stream_event(
 
     match event_type {
         "response.output_text.delta" => {
-            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                if !delta.is_empty() {
-                    let _ = tx.send(StreamEvent::Delta(delta.to_string())).await;
-                }
+            if let Some(delta) = value.get("delta").and_then(Value::as_str)
+                && !delta.is_empty()
+            {
+                let _ = tx.send(StreamEvent::Delta(delta.to_string())).await;
             }
         }
         "response.output_item.added" => {
@@ -355,14 +355,14 @@ fn collect_tool_calls(mut pending: HashMap<i32, PendingToolCall>) -> Vec<ToolCal
 
     let mut calls = Vec::new();
     for idx in indices {
-        if let Some(ptc) = pending.remove(&idx) {
-            if let (Some(id), Some(name)) = (ptc.id, ptc.name) {
-                calls.push(ToolCall {
-                    id,
-                    name,
-                    arguments: ptc.arguments,
-                });
-            }
+        if let Some(ptc) = pending.remove(&idx)
+            && let (Some(id), Some(name)) = (ptc.id, ptc.name)
+        {
+            calls.push(ToolCall {
+                id,
+                name,
+                arguments: ptc.arguments,
+            });
         }
     }
     calls

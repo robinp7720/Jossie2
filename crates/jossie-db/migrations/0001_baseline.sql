@@ -6,7 +6,6 @@ CREATE TABLE IF NOT EXISTS conversations (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-ALTER TABLE conversations ADD COLUMN archived_at TEXT;
 CREATE INDEX IF NOT EXISTS idx_conversations_archived_updated
     ON conversations(archived_at, updated_at DESC, id DESC);
 
@@ -36,9 +35,6 @@ CREATE TABLE IF NOT EXISTS memory_metadata (
     prompt_scope TEXT NOT NULL DEFAULT 'none',
     importance INTEGER NOT NULL DEFAULT 0
 );
-
-ALTER TABLE memory_metadata ADD COLUMN prompt_scope TEXT NOT NULL DEFAULT 'none';
-ALTER TABLE memory_metadata ADD COLUMN importance INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS telegram_chats (
     telegram_chat_id INTEGER PRIMARY KEY,

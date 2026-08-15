@@ -71,7 +71,7 @@ fn choose_preferred_body(text: String, html: String) -> String {
     }
 
     let text_len = text_trimmed.len();
-    let html_visible_len = approx_visible_len(html_trimmed);
+    let html_visible_len = jossie_core::text::approx_visible_len(html_trimmed);
 
     // Prefer HTML if it contains substantially more visible content.
     if html_visible_len > text_len.saturating_mul(2)
@@ -81,10 +81,6 @@ fn choose_preferred_body(text: String, html: String) -> String {
     }
 
     text
-}
-
-fn approx_visible_len(html: &str) -> usize {
-    jossie_core::text::approx_visible_len(html)
 }
 
 fn collect_attachments(payload: &serde_json::Value) -> Vec<serde_json::Value> {
@@ -132,21 +128,20 @@ async fn extract_content(
 ) -> Option<String> {
     let mut stack = vec![payload];
     while let Some(part) = stack.pop() {
-        if let Some(mime) = part.get("mimeType").and_then(|m| m.as_str()) {
-            if mime.to_lowercase().starts_with(target_mime) {
-                if let Some(data) = part.pointer("/body/data").and_then(|d| d.as_str()) {
-                    if let Some(decoded) = decode_base64_url(data) {
-                        return Some(decoded);
-                    }
-                    log_decode_failure("body.data", message_id, mime, data, debug);
+        if let Some(mime) = part.get("mimeType").and_then(|m| m.as_str())
+            && mime.to_lowercase().starts_with(target_mime)
+        {
+            if let Some(data) = part.pointer("/body/data").and_then(|d| d.as_str()) {
+                if let Some(decoded) = decode_base64_url(data) {
+                    return Some(decoded);
                 }
-                if let Some(att_id) = part.pointer("/body/attachmentId").and_then(|a| a.as_str()) {
-                    if let Some(decoded) =
-                        fetch_attachment_text(client, token, message_id, att_id, mime, debug).await
-                    {
-                        return Some(decoded);
-                    }
-                }
+                log_decode_failure("body.data", message_id, mime, data, debug);
+            }
+            if let Some(att_id) = part.pointer("/body/attachmentId").and_then(|a| a.as_str())
+                && let Some(decoded) =
+                    fetch_attachment_text(client, token, message_id, att_id, mime, debug).await
+            {
+                return Some(decoded);
             }
         }
         if let Some(parts) = part.get("parts").and_then(|p| p.as_array()) {
@@ -205,9 +200,7 @@ async fn fetch_attachment_text(
         }
     };
 
-    let Some(raw) = data.get("data").and_then(|d| d.as_str()) else {
-        return None;
-    };
+    let raw = data.get("data").and_then(|d| d.as_str())?;
     let decoded = decode_base64_url(raw);
     if decoded.is_none() {
         log_decode_failure("attachment.data", message_id, mime, raw, debug);

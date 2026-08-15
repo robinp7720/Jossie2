@@ -3,6 +3,7 @@ use super::*;
 impl Database {
     // Scheduled Tasks
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_scheduled_task(
         &self,
         conversation_id: Uuid,
@@ -79,7 +80,7 @@ impl Database {
              ORDER BY next_run_at IS NULL, next_run_at ASC
              LIMIT ?",
         )
-        .bind(limit.max(1).min(20) as i64)
+        .bind(limit.clamp(1, 20) as i64)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(Into::into).collect())
@@ -249,10 +250,10 @@ impl Database {
         )
         .bind(conversation_id.to_string())
         .bind(last_message_id)
-        .bind(limit.max(1).min(500) as i64)
+        .bind(limit.clamp(1, 500) as i64)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(Into::into).collect())
+        rows.into_iter().map(Message::try_from).collect()
     }
 
     // Out-of-Band Messages

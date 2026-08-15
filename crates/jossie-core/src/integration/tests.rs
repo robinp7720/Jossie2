@@ -226,6 +226,31 @@ fn test_classify_unknown() {
     );
 }
 
+#[test]
+fn tool_schema_comes_from_argument_type() {
+    #[derive(serde::Deserialize, schemars::JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct Args {
+        required_value: String,
+        optional_value: Option<u32>,
+    }
+
+    let tool = ToolDefinition::for_args::<Args>("typed", "typed arguments");
+    assert_eq!(tool.parameters["type"], "object");
+    assert_eq!(tool.parameters["additionalProperties"], false);
+    assert_eq!(
+        tool.parameters["required"],
+        serde_json::json!(["required_value"])
+    );
+    assert!(
+        tool.parameters["properties"]
+            .get("optional_value")
+            .is_some()
+    );
+    assert!(tool.parameters.get("$schema").is_none());
+}
+
 #[tokio::test]
 async fn test_tool_output_truncation() {
     let mut reg = IntegrationRegistry::new();

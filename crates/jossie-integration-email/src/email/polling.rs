@@ -86,19 +86,18 @@ impl EmailIntegration {
 
         if let (Some(stored_uid_validity), Some(mailbox_uid_validity)) =
             (stored_uid_validity, mailbox_uid_validity)
+            && stored_uid_validity != mailbox_uid_validity
         {
-            if stored_uid_validity != mailbox_uid_validity {
-                return MailboxPollAction::SeedCursor {
-                    last_seen_uid: current_last_uid,
-                };
-            }
+            return MailboxPollAction::SeedCursor {
+                last_seen_uid: current_last_uid,
+            };
         }
 
         let last_seen_uid = stored_last_seen_uid.unwrap_or_default();
-        if let Some(mailbox_uid_next) = mailbox_uid_next {
-            if mailbox_uid_next <= last_seen_uid.saturating_add(1) {
-                return MailboxPollAction::NoChange;
-            }
+        if let Some(mailbox_uid_next) = mailbox_uid_next
+            && mailbox_uid_next <= last_seen_uid.saturating_add(1)
+        {
+            return MailboxPollAction::NoChange;
         }
 
         MailboxPollAction::PollFrom {
@@ -119,10 +118,10 @@ impl EmailIntegration {
 
         if let Some(db) = &self.db {
             for account in db.list_integration_accounts(EMAIL_INTEGRATION).await? {
-                if let Ok(config) = serde_json::from_str::<EmailConfig>(&account.data) {
-                    if !config.imap_host.trim().is_empty() {
-                        accounts.push(Self::poll_account_from_db(account, config));
-                    }
+                if let Ok(config) = serde_json::from_str::<EmailConfig>(&account.data)
+                    && !config.imap_host.trim().is_empty()
+                {
+                    accounts.push(Self::poll_account_from_db(account, config));
                 }
             }
         }
@@ -326,11 +325,11 @@ impl EmailIntegration {
     async fn get_account_config(&self, account_id: Option<&str>) -> anyhow::Result<EmailConfig> {
         match account_id {
             Some(id) if id != "default" => {
-                if let Some(db) = &self.db {
-                    if let Some(acc) = db.get_integration_account(id).await? {
-                        let config: EmailConfig = serde_json::from_str(&acc.data)?;
-                        return Ok(config);
-                    }
+                if let Some(db) = &self.db
+                    && let Some(acc) = db.get_integration_account(id).await?
+                {
+                    let config: EmailConfig = serde_json::from_str(&acc.data)?;
+                    return Ok(config);
                 }
                 anyhow::bail!("Account not found: {}", id)
             }

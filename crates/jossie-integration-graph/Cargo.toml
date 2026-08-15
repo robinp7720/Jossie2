@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+schemars = { workspace = true }
 jossie-core = { workspace = true }
 jossie-db = { workspace = true }
 serde = { workspace = true }

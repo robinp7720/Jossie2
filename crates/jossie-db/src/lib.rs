@@ -2,11 +2,14 @@ use anyhow::Context;
 use chrono::{Duration, Utc};
 use jossie_core::types::{Conversation, Message, Role};
 use sqlx::QueryBuilder;
+use sqlx::Row;
 use sqlx::sqlite::{Sqlite, SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use uuid::Uuid;
+
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 mod work;
 pub use work::*;
@@ -44,28 +47,32 @@ impl Database {
     }
 
     pub async fn migrate(&self) -> anyhow::Result<()> {
-        if self.attachment_schema_needs_repair().await? {
+        let repaired_attachment_schema = self.attachment_schema_needs_repair().await?;
+        if repaired_attachment_schema {
             self.repair_attachment_schema_with_backup(
                 "Detected invalid attachment schema entry in sqlite_schema; attempting repair",
             )
             .await?;
+            self.ensure_attachment_schema().await?;
         }
 
-        if let Err(error) = self.run_migrations().await {
-            if self.is_repairable_attachment_schema_error(&error) {
-                self.repair_attachment_schema_with_backup(
-                    "Detected malformed attachment schema while migrating SQLite database; attempting repair",
-                )
-                .await?;
-                self.run_migrations().await?;
-                return Ok(());
+        let is_versioned = self.schema_has_table("_sqlx_migrations").await?;
+        let is_legacy = !is_versioned && self.schema_has_table("conversations").await?;
+        if is_legacy {
+            let backup_path = self.backup_database_file().await?;
+            if let Some(path) = backup_path.as_ref() {
+                tracing::warn!(
+                    "Created backup before versioning legacy SQLite schema: {}",
+                    path.display()
+                );
             }
-
-            tracing::error!("Migration failed: {error}");
-            return Err(error);
+            self.normalize_legacy_schema().await?;
         }
 
-        Ok(())
+        MIGRATOR
+            .run(&self.pool)
+            .await
+            .context("Failed to apply versioned SQLite migrations")
     }
 
     async fn repair_attachment_schema_with_backup(&self, message: &str) -> anyhow::Result<()> {
@@ -82,33 +89,6 @@ impl Database {
         Ok(())
     }
 
-    async fn run_migrations(&self) -> anyhow::Result<()> {
-        // Split migrations into individual statements and run each one. The
-        // splitter must understand comments and quoted values because those may
-        // legitimately contain semicolons.
-        // IF NOT EXISTS clauses handle idempotency; real errors are propagated.
-        let sql = include_str!("../../jossie-db/migrations.sql");
-        for statement in split_sql_statements(sql) {
-            let statement = statement.trim();
-            if statement.is_empty() {
-                continue;
-            }
-            if let Err(e) = sqlx::query(statement).execute(&self.pool).await {
-                // FTS5 virtual tables can't use IF NOT EXISTS, so ignore "already exists" errors
-                let msg = e.to_string();
-                if msg.contains("already exists") || msg.contains("duplicate column name") {
-                    tracing::debug!(
-                        "Migration statement skipped (already exists): {}",
-                        &statement[..statement.len().min(80)]
-                    );
-                } else {
-                    return Err(e.into());
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn is_repairable_attachment_schema_message(&self, message: &str) -> bool {
         let message = message.to_lowercase();
         if !message.contains("malformed database schema") {
@@ -121,8 +101,87 @@ impl Database {
             || message.contains("sqlite_autoindex_message_attachments_")
     }
 
-    fn is_repairable_attachment_schema_error(&self, error: &anyhow::Error) -> bool {
-        self.is_repairable_attachment_schema_message(&error.to_string())
+    async fn schema_has_table(&self, table: &str) -> anyhow::Result<bool> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?)",
+        )
+        .bind(table)
+        .fetch_one(&self.pool)
+        .await?
+            != 0)
+    }
+
+    async fn table_has_column(&self, table: &str, column: &str) -> anyhow::Result<bool> {
+        let pragma = match table {
+            "conversations" => "PRAGMA table_info(conversations)",
+            "memory_metadata" => "PRAGMA table_info(memory_metadata)",
+            _ => anyhow::bail!("Unsupported legacy table inspection: {table}"),
+        };
+        let rows = sqlx::query(pragma).fetch_all(&self.pool).await?;
+        Ok(rows.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .is_ok_and(|name| name == column)
+        }))
+    }
+
+    async fn normalize_legacy_schema(&self) -> anyhow::Result<()> {
+        if !self
+            .table_has_column("conversations", "archived_at")
+            .await?
+        {
+            sqlx::query("ALTER TABLE conversations ADD COLUMN archived_at TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
+        if self.schema_has_table("memory_metadata").await? {
+            if !self
+                .table_has_column("memory_metadata", "prompt_scope")
+                .await?
+            {
+                sqlx::query(
+                    "ALTER TABLE memory_metadata ADD COLUMN prompt_scope TEXT NOT NULL DEFAULT 'none'",
+                )
+                .execute(&self.pool)
+                .await?;
+            }
+            if !self
+                .table_has_column("memory_metadata", "importance")
+                .await?
+            {
+                sqlx::query(
+                    "ALTER TABLE memory_metadata ADD COLUMN importance INTEGER NOT NULL DEFAULT 0",
+                )
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn ensure_attachment_schema(&self) -> anyhow::Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS files (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                mime_type TEXT,
+                size INTEGER NOT NULL,
+                path TEXT NOT NULL,
+                conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS message_attachments (
+                message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                PRIMARY KEY (message_id, file_id)
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn attachment_schema_needs_repair(&self) -> anyhow::Result<bool> {
@@ -291,80 +350,6 @@ mod memory_prompt;
 #[path = "repositories/scheduler.rs"]
 mod scheduler;
 
-fn split_sql_statements(sql: &str) -> Vec<String> {
-    let mut statements = Vec::new();
-    let mut statement = String::new();
-    let mut chars = sql.chars().peekable();
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut in_line_comment = false;
-    let mut in_block_comment = false;
-
-    while let Some(ch) = chars.next() {
-        statement.push(ch);
-
-        if in_line_comment {
-            if ch == '\n' {
-                in_line_comment = false;
-            }
-            continue;
-        }
-
-        if in_block_comment {
-            if ch == '*' && chars.peek() == Some(&'/') {
-                statement.push(chars.next().expect("peeked block-comment terminator"));
-                in_block_comment = false;
-            }
-            continue;
-        }
-
-        if in_single_quote {
-            if ch == '\'' {
-                if chars.peek() == Some(&'\'') {
-                    statement.push(chars.next().expect("peeked escaped quote"));
-                } else {
-                    in_single_quote = false;
-                }
-            }
-            continue;
-        }
-
-        if in_double_quote {
-            if ch == '"' {
-                if chars.peek() == Some(&'"') {
-                    statement.push(chars.next().expect("peeked escaped identifier quote"));
-                } else {
-                    in_double_quote = false;
-                }
-            }
-            continue;
-        }
-
-        match ch {
-            '-' if chars.peek() == Some(&'-') => {
-                statement.push(chars.next().expect("peeked line-comment marker"));
-                in_line_comment = true;
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                statement.push(chars.next().expect("peeked block-comment marker"));
-                in_block_comment = true;
-            }
-            '\'' => in_single_quote = true,
-            '"' => in_double_quote = true,
-            ';' => {
-                statements.push(std::mem::take(&mut statement));
-            }
-            _ => {}
-        }
-    }
-
-    if !statement.trim().is_empty() {
-        statements.push(statement);
-    }
-
-    statements
-}
-
 fn backup_path_for(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
@@ -417,7 +402,7 @@ pub struct FileRecord {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 pub struct ConversationListItem {
     #[serde(flatten)]
     pub conversation: Conversation,
@@ -432,7 +417,7 @@ pub struct ConversationDeleteFile {
     pub path: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sqlx::FromRow, ts_rs::TS)]
 pub struct ChatImport {
     pub id: String,
     pub file_id: String,
@@ -471,34 +456,44 @@ struct MessageAttachmentFileRow {
     created_at: String,
 }
 
-impl From<FileRow> for FileRecord {
-    fn from(r: FileRow) -> Self {
-        FileRecord {
-            id: r.id.parse().unwrap_or_default(),
+impl TryFrom<FileRow> for FileRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(r: FileRow) -> Result<Self, Self::Error> {
+        Ok(FileRecord {
+            id: r.id.parse().context("invalid file id")?,
             name: r.name,
             mime_type: r.mime_type,
             size: r.size,
             path: r.path,
-            conversation_id: r.conversation_id.and_then(|s| s.parse().ok()),
+            conversation_id: r
+                .conversation_id
+                .map(|id| id.parse().context("invalid file conversation id"))
+                .transpose()?,
             created_at: r.created_at,
-        }
+        })
     }
 }
 
-impl From<MessageAttachmentFileRow> for FileRecord {
-    fn from(r: MessageAttachmentFileRow) -> Self {
-        FileRecord {
-            id: r.id.parse().unwrap_or_default(),
+impl TryFrom<MessageAttachmentFileRow> for FileRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(r: MessageAttachmentFileRow) -> Result<Self, Self::Error> {
+        Ok(FileRecord {
+            id: r.id.parse().context("invalid attachment file id")?,
             name: r.name,
             mime_type: r.mime_type,
             size: r.size,
             path: r.path,
-            conversation_id: r.conversation_id.and_then(|id| id.parse().ok()),
+            conversation_id: r
+                .conversation_id
+                .map(|id| id.parse().context("invalid attachment conversation id"))
+                .transpose()?,
             created_at: r.created_at,
-        }
+        })
     }
 }
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 pub struct GraphNode {
     pub id: String,
     pub label: String,
@@ -506,7 +501,7 @@ pub struct GraphNode {
     pub properties: serde_json::Value,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 pub struct GraphEdge {
     pub id: String,
     pub source_id: String,
@@ -719,57 +714,49 @@ fn extract_memory_search_terms(query: &str) -> Vec<String> {
     terms
 }
 
-impl From<ConversationRow> for Conversation {
-    fn from(r: ConversationRow) -> Self {
-        Conversation {
-            id: r.id.parse().unwrap_or_else(|e| {
-                tracing::warn!("Failed to parse conversation id '{}': {e}", r.id);
-                Uuid::default()
-            }),
+impl TryFrom<ConversationRow> for Conversation {
+    type Error = anyhow::Error;
+
+    fn try_from(r: ConversationRow) -> Result<Self, Self::Error> {
+        Ok(Conversation {
+            id: r.id.parse().context("invalid conversation id")?,
             title: r.title,
-            archived_at: r.archived_at.and_then(|value| {
-                value
-                    .parse()
-                    .map_err(|e| {
-                        tracing::warn!("Failed to parse conversation archived_at '{value}': {e}");
-                        e
-                    })
-                    .ok()
-            }),
-            created_at: r.created_at.parse().unwrap_or_else(|e| {
-                tracing::warn!(
-                    "Failed to parse conversation created_at '{}': {e}",
-                    r.created_at
-                );
-                chrono::DateTime::default()
-            }),
-            updated_at: r.updated_at.parse().unwrap_or_else(|e| {
-                tracing::warn!(
-                    "Failed to parse conversation updated_at '{}': {e}",
-                    r.updated_at
-                );
-                chrono::DateTime::default()
-            }),
-        }
+            archived_at: r
+                .archived_at
+                .map(|value| value.parse().context("invalid conversation archived_at"))
+                .transpose()?,
+            created_at: r
+                .created_at
+                .parse()
+                .context("invalid conversation created_at")?,
+            updated_at: r
+                .updated_at
+                .parse()
+                .context("invalid conversation updated_at")?,
+        })
     }
 }
 
-impl From<ConversationListRow> for ConversationListItem {
-    fn from(row: ConversationListRow) -> Self {
-        let conversation = ConversationRow {
+impl TryFrom<ConversationListRow> for ConversationListItem {
+    type Error = anyhow::Error;
+
+    fn try_from(row: ConversationListRow) -> Result<Self, Self::Error> {
+        let conversation = Conversation::try_from(ConversationRow {
             id: row.id,
             title: row.title,
             archived_at: row.archived_at,
             created_at: row.created_at,
             updated_at: row.updated_at,
-        }
-        .into();
-        Self {
+        })?;
+        Ok(Self {
             conversation,
             preview: row.preview,
-            matched_message_id: row.matched_message_id.and_then(|id| id.parse().ok()),
+            matched_message_id: row
+                .matched_message_id
+                .map(|id| id.parse().context("invalid matched message id"))
+                .transpose()?,
             message_count: row.message_count,
-        }
+        })
     }
 }
 
@@ -785,39 +772,28 @@ struct MessageRow {
     created_at: String,
 }
 
-impl From<MessageRow> for Message {
-    fn from(r: MessageRow) -> Self {
-        Message {
-            id: r.id.parse().unwrap_or_else(|e| {
-                tracing::warn!("Failed to parse message id '{}': {e}", r.id);
-                Uuid::default()
-            }),
-            conversation_id: r.conversation_id.parse().unwrap_or_else(|e| {
-                tracing::warn!(
-                    "Failed to parse message conversation_id '{}': {e}",
-                    r.conversation_id
-                );
-                Uuid::default()
-            }),
-            role: r.role.parse().unwrap_or(Role::User),
+impl TryFrom<MessageRow> for Message {
+    type Error = anyhow::Error;
+
+    fn try_from(r: MessageRow) -> Result<Self, Self::Error> {
+        Ok(Message {
+            id: r.id.parse().context("invalid message id")?,
+            conversation_id: r
+                .conversation_id
+                .parse()
+                .context("invalid message conversation id")?,
+            role: r.role.parse().map_err(anyhow::Error::msg)?,
             content: r.content,
-            tool_calls: r.tool_calls.and_then(|s| {
-                serde_json::from_str(&s)
-                    .map_err(|e| {
-                        tracing::warn!("Failed to parse tool_calls JSON: {e}");
-                        e
-                    })
-                    .ok()
-            }),
+            tool_calls: r
+                .tool_calls
+                .map(|json| serde_json::from_str(&json).context("invalid tool_calls JSON"))
+                .transpose()?,
             tool_call_id: r.tool_call_id,
             name: r.name,
             attachments: None, // Populated separately in get_messages
             response_items: None,
-            created_at: r.created_at.parse().unwrap_or_else(|e| {
-                tracing::warn!("Failed to parse message created_at '{}': {e}", r.created_at);
-                chrono::DateTime::default()
-            }),
-        }
+            created_at: r.created_at.parse().context("invalid message created_at")?,
+        })
     }
 }
 
@@ -835,7 +811,7 @@ pub struct MemoryKeyInfo {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 pub struct MemoryEntryWithMetadata {
     pub key: String,
     pub content: String,
@@ -860,7 +836,7 @@ pub struct AuthSession {
     pub expires_at: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 pub struct ActivityEvent {
     pub id: String,
     pub conversation_id: Option<Uuid>,
@@ -885,7 +861,7 @@ pub struct NewPendingAction {
     pub effect: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 pub struct PendingAction {
     pub id: String,
     pub batch_id: String,
@@ -894,6 +870,7 @@ pub struct PendingAction {
     pub call_id: String,
     pub tool_name: String,
     #[serde(skip_serializing)]
+    #[ts(skip)]
     pub arguments: String,
     pub title: String,
     pub summary: String,
@@ -924,12 +901,17 @@ struct PendingActionRow {
     resolved_at: Option<String>,
 }
 
-impl From<PendingActionRow> for PendingAction {
-    fn from(row: PendingActionRow) -> Self {
-        Self {
+impl TryFrom<PendingActionRow> for PendingAction {
+    type Error = anyhow::Error;
+
+    fn try_from(row: PendingActionRow) -> Result<Self, Self::Error> {
+        Ok(Self {
             id: row.id,
             batch_id: row.batch_id,
-            conversation_id: row.conversation_id.parse().unwrap_or_default(),
+            conversation_id: row
+                .conversation_id
+                .parse()
+                .context("invalid pending action conversation id")?,
             run_id: row.run_id,
             call_id: row.call_id,
             tool_name: row.tool_name,
@@ -942,7 +924,7 @@ impl From<PendingActionRow> for PendingAction {
             created_at: row.created_at,
             updated_at: row.updated_at,
             resolved_at: row.resolved_at,
-        }
+        })
     }
 }
 
@@ -1090,7 +1072,7 @@ struct SchemaEntryRow {
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 pub struct ScheduledTask {
     pub id: String,
     pub conversation_id: String,

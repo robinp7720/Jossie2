@@ -34,7 +34,7 @@ impl Database {
             .bind(&id_str)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row.map(Into::into))
+        row.map(FileRecord::try_from).transpose()
     }
 
     pub async fn delete_file_record(&self, id: &Uuid) -> anyhow::Result<()> {
@@ -94,41 +94,7 @@ impl Database {
         .bind(&conv_str)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(Into::into).collect())
-    }
-
-    pub async fn link_message_attachment(
-        &self,
-        message_id: Uuid,
-        file_id: Uuid,
-    ) -> anyhow::Result<()> {
-        let msg_str = message_id.to_string();
-        let file_str = file_id.to_string();
-        sqlx::query(
-            "INSERT OR IGNORE INTO message_attachments (message_id, file_id) VALUES (?, ?)",
-        )
-        .bind(&msg_str)
-        .bind(&file_str)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn get_message_attachments(
-        &self,
-        message_id: Uuid,
-    ) -> anyhow::Result<Vec<FileRecord>> {
-        let msg_str = message_id.to_string();
-        let rows = sqlx::query_as::<_, FileRow>(
-            "SELECT f.* FROM files f
-             JOIN message_attachments ma ON f.id = ma.file_id
-             WHERE ma.message_id = ?
-             ORDER BY f.created_at ASC",
-        )
-        .bind(&msg_str)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.into_iter().map(Into::into).collect())
+        rows.into_iter().map(FileRecord::try_from).collect()
     }
 
     pub async fn create_chat_import(
@@ -210,6 +176,7 @@ impl Database {
         Ok(result.rows_affected() == 1)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn complete_chat_import(
         &self,
         id: &str,
@@ -345,7 +312,7 @@ impl Database {
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(Into::into))
+        row.map(PendingAction::try_from).transpose()
     }
 
     pub async fn list_pending_actions(
@@ -374,7 +341,7 @@ impl Database {
             .fetch_all(&self.pool)
             .await?
         };
-        Ok(rows.into_iter().map(Into::into).collect())
+        rows.into_iter().map(PendingAction::try_from).collect()
     }
 
     pub async fn claim_pending_action(&self, id: &str) -> anyhow::Result<Option<PendingAction>> {

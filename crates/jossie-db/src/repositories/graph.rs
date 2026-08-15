@@ -160,7 +160,7 @@ impl Database {
             }
         }
         builder.push(" ORDER BY updated_at DESC LIMIT ");
-        builder.push_bind(limit.max(1).min(50) as i64);
+        builder.push_bind(limit.clamp(1, 50) as i64);
         let rows = builder
             .build_query_as::<GraphNodeRow>()
             .fetch_all(&self.pool)
@@ -278,7 +278,7 @@ impl Database {
              SELECT root_id, direction, edge_id, relation, weight, node_id, label, node_type, node_properties\n\
              FROM ranked WHERE rank <= ",
         );
-        builder.push_bind(per_node_limit.max(1).min(20) as i64);
+        builder.push_bind(per_node_limit.clamp(1, 20) as i64);
 
         let rows = builder
             .build_query_as::<GraphContextNeighborRow>()
@@ -293,7 +293,7 @@ impl Database {
     }
 
     pub async fn graph_list_nodes(&self, limit: usize) -> anyhow::Result<Vec<GraphNode>> {
-        let limit = limit.max(1).min(5000);
+        let limit = limit.clamp(1, 5000);
         let rows = sqlx::query_as::<_, GraphNodeRow>(
             "SELECT * FROM graph_nodes ORDER BY updated_at DESC LIMIT ?",
         )
@@ -305,7 +305,7 @@ impl Database {
     }
 
     pub async fn graph_list_edges(&self, limit: usize) -> anyhow::Result<Vec<GraphEdge>> {
-        let limit = limit.max(1).min(5000);
+        let limit = limit.clamp(1, 5000);
         let rows = sqlx::query_as::<_, GraphEdgeRow>(
             "SELECT * FROM graph_edges ORDER BY updated_at DESC LIMIT ?",
         )
@@ -346,7 +346,7 @@ impl Database {
             }
         }
         builder.push(") ORDER BY updated_at DESC LIMIT ");
-        builder.push_bind(limit.max(1).min(100) as i64);
+        builder.push_bind(limit.clamp(1, 100) as i64);
         let rows = builder
             .build_query_as::<GraphNodeRow>()
             .fetch_all(&self.pool)
@@ -354,21 +354,9 @@ impl Database {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
-    /// Get the most recently updated nodes (for fresh context)
-    pub async fn graph_recent_nodes(&self, limit: usize) -> anyhow::Result<Vec<GraphNode>> {
-        let limit = limit.max(1).min(100);
-        let rows = sqlx::query_as::<_, GraphNodeRow>(
-            "SELECT * FROM graph_nodes ORDER BY updated_at DESC LIMIT ?",
-        )
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.into_iter().map(Into::into).collect())
-    }
-
     /// Get nodes with the most connections (important/central entities)
     pub async fn graph_central_nodes(&self, limit: usize) -> anyhow::Result<Vec<(GraphNode, i64)>> {
-        let limit = limit.max(1).min(50);
+        let limit = limit.clamp(1, 50);
 
         #[derive(sqlx::FromRow)]
         struct CentralNodeRow {

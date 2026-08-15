@@ -30,7 +30,7 @@ impl Database {
              LIMIT ?",
         )
         .bind(scope)
-        .bind(limit.max(1).min(50) as i64)
+        .bind(limit.clamp(1, 50) as i64)
         .fetch_all(&self.pool)
         .await?;
 
@@ -72,7 +72,7 @@ impl Database {
             )
             .bind(&match_query)
             .bind(&scope)
-            .bind(limit.max(1).min(50) as i64)
+            .bind(limit.clamp(1, 50) as i64)
             .fetch_all(&self.pool)
             .await;
 
@@ -120,7 +120,7 @@ impl Database {
              LIMIT ?",
         )
         .bind(match_query)
-        .bind(limit.max(1).min(100) as i64)
+        .bind(limit.clamp(1, 100) as i64)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)

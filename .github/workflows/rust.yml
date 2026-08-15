@@ -16,10 +16,18 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
+    - name: Install Rust quality components
+      run: rustup component add rustfmt clippy
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+    - name: Run Clippy
+      run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+    - name: Check workspace
+      run: cargo check --workspace --all-targets
+    - name: Check generated frontend contracts
+      run: cargo run -p xtask -- generate-types --check
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --workspace --verbose
     - uses: actions/setup-node@v4
       with:
         node-version: 22
@@ -31,6 +39,9 @@ jobs:
     - name: Run frontend tests
       working-directory: frontend
       run: npm test
+    - name: Type-check frontend
+      working-directory: frontend
+      run: npm run typecheck
     - name: Build served frontend assets
       working-directory: frontend
       run: npm run build

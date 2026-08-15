@@ -7,7 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Serialize)]
+#[derive(Serialize, ts_rs::TS)]
 pub struct AccountConfig {
     pub id: String,
     pub integration: String,

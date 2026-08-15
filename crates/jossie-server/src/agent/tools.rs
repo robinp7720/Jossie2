@@ -69,12 +69,7 @@ impl RunToolset {
         state: &AppState,
         call: &jossie_core::ToolCall,
     ) -> (jossie_core::ToolResult, Vec<String>) {
-        #[derive(Deserialize)]
-        struct Args {
-            capabilities: Vec<String>,
-        }
-
-        let args = match serde_json::from_str::<Args>(&call.arguments) {
+        let args = match serde_json::from_str::<CapabilityActivationArgs>(&call.arguments) {
             Ok(args) => args,
             Err(error) => {
                 return (
@@ -127,58 +122,17 @@ impl RunToolset {
 }
 
 fn capability_activation_tool() -> jossie_core::ToolDefinition {
-    jossie_core::ToolDefinition {
-        name: "activate_capabilities".to_string(),
-        description: "Enable only the capability groups needed for the current task. Activate groups before attempting their tools; activation is cumulative for this run.".to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "capabilities": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": ["knowledge", "files", "mail", "calendar", "drive", "web", "scheduler"]
-                    }
-                }
-            },
-            "required": ["capabilities"],
-            "additionalProperties": false
-        }),
-    }
+    jossie_core::ToolDefinition::for_args::<CapabilityActivationArgs>(
+        "activate_capabilities",
+        "Enable only the capability groups needed for the current task. Activate groups before attempting their tools; activation is cumulative for this run.",
+    )
 }
 
 fn work_plan_tool() -> jossie_core::ToolDefinition {
-    jossie_core::ToolDefinition {
-        name: "update_work_plan".to_string(),
-        description: "Create or update durable user-visible progress for substantial work. Call this tool by itself. Use it when the request has at least two independently verifiable outcomes, is explicitly described as a goal, or spans deferred/recurring runs. Do not create a goal for ordinary questions or single-step actions. Keep task titles outcome-oriented and safe to show to the user.".to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "goal_id": { "type": ["string", "null"] },
-                "title": { "type": "string" },
-                "objective": { "type": "string" },
-                "goal_status": { "type": "string", "enum": ["active", "blocked", "completed"] },
-                "blocker": { "type": ["string", "null"] },
-                "tasks": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": ["string", "null"] },
-                            "title": { "type": "string" },
-                            "status": { "type": "string", "enum": ["pending", "in_progress", "waiting", "blocked", "completed", "failed", "cancelled"] },
-                            "summary": { "type": ["string", "null"] },
-                            "blocker": { "type": ["string", "null"] }
-                        },
-                        "required": ["title", "status"],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "required": ["title", "objective", "goal_status", "tasks"],
-            "additionalProperties": false
-        }),
-    }
+    jossie_core::ToolDefinition::for_args::<WorkPlanArgs>(
+        "update_work_plan",
+        "Create or update durable user-visible progress for substantial work. Call this tool by itself. Use it when the request has at least two independently verifiable outcomes, is explicitly described as a goal, or spans deferred/recurring runs. Do not create a goal for ordinary questions or single-step actions. Keep task titles outcome-oriented and safe to show to the user.",
+    )
 }
 
 async fn prepare_run_context(
@@ -188,7 +142,7 @@ async fn prepare_run_context(
 ) -> anyhow::Result<(RunToolset, Vec<Message>, String, GoalTracker, usize, String)> {
     let mut messages = state
         .db
-        .get_messages(conv_id, Some(state.max_context_messages))
+        .get_messages(conv_id, Some(state.agent.max_context_messages))
         .await?;
 
     let last_user_msg = messages
@@ -211,9 +165,9 @@ async fn prepare_run_context(
     sanitize_context_window(&mut messages);
     bound_context_window(
         &mut messages,
-        state.max_context_chars,
-        state.context_compact_target_chars,
-        state.context_keep_recent_dialogue_messages,
+        state.agent.max_context_chars,
+        state.agent.context_compact_target_chars,
+        state.agent.context_keep_recent_dialogue_messages,
     );
     hydrate_attachment_payloads(state, &mut messages).await;
     let prompt_cache_key =
@@ -266,13 +220,13 @@ async fn prepare_run_context(
         messages,
         last_user_msg.clone(),
         goal_tracker,
-        if state.enable_self_reflection { 1 } else { 0 },
+        if state.agent.enable_self_reflection { 1 } else { 0 },
         prompt_cache_key,
     ))
 }
 
 async fn hydrate_attachment_payloads(state: &AppState, messages: &mut [Message]) {
-    let mut remaining = state.max_attachment_bytes_per_request;
+    let mut remaining = state.agent.max_attachment_bytes_per_request;
     for attachment in messages
         .iter_mut()
         .rev()
@@ -412,44 +366,39 @@ fn prepare_tool_calls_for_execution(
         .iter()
         .map(|call| {
             let mut call_with_context = call.clone();
-            if call.name.starts_with("schedule_")
+            if (call.name.starts_with("schedule_")
                 || call.name == "send_user_message"
                 || call.name == "list_scheduled_tasks"
-                || call.name == "list_files"
+                || call.name == "list_files")
+                && let Ok(mut args) = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                && let Some(obj) = args.as_object_mut()
             {
-                if let Ok(mut args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
-                    if let Some(obj) = args.as_object_mut() {
+                obj.insert(
+                    "__conversation_id".to_string(),
+                    serde_json::Value::String(conv_id.to_string()),
+                );
+                if call.name.starts_with("schedule_") {
+                    obj.insert(
+                        "__authorization_context".to_string(),
+                        serde_json::Value::String(authorization_context.to_string()),
+                    );
+                    if let Some(goal) = goal {
                         obj.insert(
-                            "__conversation_id".to_string(),
-                            serde_json::Value::String(conv_id.to_string()),
+                            "__goal_id".to_string(),
+                            serde_json::Value::String(goal.goal.id.clone()),
                         );
-                        if call.name.starts_with("schedule_") {
+                        if let Some(task) = goal.tasks.iter().find(|task| {
+                            matches!(task.status.as_str(), "in_progress" | "waiting" | "pending")
+                        }) {
                             obj.insert(
-                                "__authorization_context".to_string(),
-                                serde_json::Value::String(authorization_context.to_string()),
+                                "__goal_task_id".to_string(),
+                                serde_json::Value::String(task.id.clone()),
                             );
-                            if let Some(goal) = goal {
-                                obj.insert(
-                                    "__goal_id".to_string(),
-                                    serde_json::Value::String(goal.goal.id.clone()),
-                                );
-                                if let Some(task) = goal.tasks.iter().find(|task| {
-                                    matches!(
-                                        task.status.as_str(),
-                                        "in_progress" | "waiting" | "pending"
-                                    )
-                                }) {
-                                    obj.insert(
-                                        "__goal_task_id".to_string(),
-                                        serde_json::Value::String(task.id.clone()),
-                                    );
-                                }
-                            }
-                        }
-                        if let Ok(json_str) = serde_json::to_string(&args) {
-                            call_with_context.arguments = json_str;
                         }
                     }
+                }
+                if let Ok(json_str) = serde_json::to_string(&args) {
+                    call_with_context.arguments = json_str;
                 }
             }
             call_with_context
@@ -468,7 +417,7 @@ async fn execute_tool_batch(
     for (idx, call) in calls.into_iter().enumerate() {
         if state.registry.metadata_for(&call).concurrent {
             let registry = state.registry.clone();
-            let timeout = Duration::from_secs(state.tool_call_timeout_seconds);
+            let timeout = Duration::from_secs(state.agent.tool_call_timeout_seconds);
             join_set.spawn(async move {
                 let result = execute_tool_with_timeout(&registry, &call, timeout).await;
                 (idx, call, result)
@@ -500,7 +449,7 @@ async fn execute_tool_batch(
             result = execute_tool_with_timeout(
                 &state.registry,
                 &call,
-                Duration::from_secs(state.tool_call_timeout_seconds),
+                Duration::from_secs(state.agent.tool_call_timeout_seconds),
             ) => result,
         };
         results.push((idx, call, result));
@@ -508,8 +457,8 @@ async fn execute_tool_batch(
     results.sort_by_key(|(idx, _, _)| *idx);
     compact_tool_batch(
         &mut results,
-        state.max_tool_result_chars,
-        state.max_tool_batch_chars,
+        state.agent.max_tool_result_chars,
+        state.agent.max_tool_batch_chars,
     );
     results
 }
@@ -565,6 +514,7 @@ fn truncate_tool_result(content: &str, max_chars: usize) -> String {
     output
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_capability_activation(
     state: &AppState,
     conv_id: Uuid,
@@ -636,26 +586,8 @@ async fn process_work_plan_updates(
         return Ok(false);
     };
 
-    #[derive(Deserialize)]
-    struct TaskUpdate {
-        id: Option<String>,
-        title: String,
-        status: String,
-        summary: Option<String>,
-        blocker: Option<String>,
-    }
-    #[derive(Deserialize)]
-    struct Args {
-        goal_id: Option<String>,
-        title: String,
-        objective: String,
-        goal_status: String,
-        blocker: Option<String>,
-        tasks: Vec<TaskUpdate>,
-    }
-
     let result: anyhow::Result<jossie_db::GoalWithTasks> = async {
-        let args: Args = serde_json::from_str(&call.arguments)?;
+        let args: WorkPlanArgs = serde_json::from_str(&call.arguments)?;
         if args.title.trim().is_empty() || args.objective.trim().is_empty() || args.tasks.is_empty()
         {
             anyhow::bail!("A tracked goal needs a title, objective, and at least one task");
@@ -1021,4 +953,34 @@ async fn partition_authorized_calls(
     }
     Ok((executable, pending))
 }
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CapabilityActivationArgs {
+    capabilities: Vec<String>,
+}
 
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WorkPlanTaskUpdate {
+    #[serde(default)]
+    id: Option<String>,
+    title: String,
+    status: String,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    blocker: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WorkPlanArgs {
+    #[serde(default)]
+    goal_id: Option<String>,
+    title: String,
+    objective: String,
+    goal_status: String,
+    #[serde(default)]
+    blocker: Option<String>,
+    tasks: Vec<WorkPlanTaskUpdate>,
+}

@@ -12,3 +12,4 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+schemars = { workspace = true }

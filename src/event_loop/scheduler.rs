@@ -12,12 +12,12 @@ async fn process_scheduled_tasks(state: &Arc<AppState>) -> anyhow::Result<()> {
         }
 
         // Check if max runs exceeded
-        if let Some(max) = task.max_runs {
-            if task.run_count >= max {
-                state.db.mark_task_completed(&task.id).await?;
-                tracing::info!("Task {} completed (max runs reached)", task.id);
-                continue;
-            }
+        if let Some(max) = task.max_runs
+            && task.run_count >= max
+        {
+            state.db.mark_task_completed(&task.id).await?;
+            tracing::info!("Task {} completed (max runs reached)", task.id);
+            continue;
         }
 
         // Spawn task execution in background
@@ -36,7 +36,6 @@ async fn process_scheduled_tasks(state: &Arc<AppState>) -> anyhow::Result<()> {
 
     Ok(())
 }
-
 async fn execute_scheduled_task(
     state: &Arc<AppState>,
     task: &jossie_db::ScheduledTask,
@@ -148,17 +147,12 @@ async fn execute_scheduled_task(
             };
 
             // Send response via Telegram if configured
-            if !state.telegram_token.trim().is_empty() {
-                if let Some(chat) = state.db.get_latest_telegram_chat().await? {
-                    if chat.conversation_id == conversation_id {
-                        jossie_telegram::send_message(
-                            &state.telegram_token,
-                            chat.chat_id,
-                            &response,
-                        )
-                        .await?;
-                    }
-                }
+            if !state.telegram.token.trim().is_empty()
+                && let Some(chat) = state.db.get_latest_telegram_chat().await?
+                && chat.conversation_id == conversation_id
+            {
+                jossie_telegram::send_message(&state.telegram.token, chat.chat_id, &response)
+                    .await?;
             }
         }
         _ => {
@@ -249,9 +243,9 @@ async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
             resolved
         };
 
-        if !state.telegram_token.trim().is_empty() {
+        if !state.telegram.token.trim().is_empty() {
             if let Some(chat_id) = chat_id {
-                match jossie_telegram::send_message(&state.telegram_token, chat_id, &msg.content)
+                match jossie_telegram::send_message(&state.telegram.token, chat_id, &msg.content)
                     .await
                 {
                     Ok(_) => {

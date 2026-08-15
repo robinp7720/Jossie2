@@ -189,7 +189,7 @@ impl Database {
         &self,
         limit: usize,
     ) -> anyhow::Result<Vec<MemoryEntryWithMetadata>> {
-        let limit = limit.max(1).min(500);
+        let limit = limit.clamp(1, 500);
         let rows = sqlx::query_as::<_, MemoryEntryMetadataRow>(
             "SELECT m.key, m.content, m.tags, mm.created_at, mm.updated_at,
                     COALESCE(mm.prompt_scope, 'none') AS prompt_scope,
@@ -223,7 +223,7 @@ impl Database {
         prompt_scope: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<MemoryEntryWithMetadata>> {
-        let limit = limit.max(1).min(100);
+        let limit = limit.clamp(1, 100);
         let query = query.unwrap_or("").trim();
         let prompt_scope = prompt_scope.unwrap_or("").trim();
         let has_query = !query.is_empty();

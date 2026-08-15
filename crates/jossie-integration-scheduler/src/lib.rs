@@ -11,6 +11,99 @@ pub struct SchedulerIntegration {
     db: Arc<Database>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ScheduleTaskArgs {
+    prompt: String,
+    run_at: String,
+    #[serde(default, rename = "__authorization_context")]
+    #[schemars(skip)]
+    authorization_context: String,
+    #[serde(default, rename = "__goal_id")]
+    #[schemars(skip)]
+    goal_id: Option<String>,
+    #[serde(default, rename = "__goal_task_id")]
+    #[schemars(skip)]
+    goal_task_id: Option<String>,
+    #[serde(default, rename = "__conversation_id")]
+    #[schemars(skip)]
+    _conversation_id: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ScheduleRecurringArgs {
+    prompt: String,
+    interval_seconds: i64,
+    #[serde(default)]
+    max_runs: Option<i64>,
+    #[serde(default, rename = "__authorization_context")]
+    #[schemars(skip)]
+    authorization_context: String,
+    #[serde(default, rename = "__goal_id")]
+    #[schemars(skip)]
+    goal_id: Option<String>,
+    #[serde(default, rename = "__goal_task_id")]
+    #[schemars(skip)]
+    goal_task_id: Option<String>,
+    #[serde(default, rename = "__conversation_id")]
+    #[schemars(skip)]
+    _conversation_id: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ScheduleCronArgs {
+    prompt: String,
+    cron_expression: String,
+    #[serde(default)]
+    max_runs: Option<i64>,
+    #[serde(default, rename = "__authorization_context")]
+    #[schemars(skip)]
+    authorization_context: String,
+    #[serde(default, rename = "__goal_id")]
+    #[schemars(skip)]
+    goal_id: Option<String>,
+    #[serde(default, rename = "__goal_task_id")]
+    #[schemars(skip)]
+    goal_task_id: Option<String>,
+    #[serde(default, rename = "__conversation_id")]
+    #[schemars(skip)]
+    _conversation_id: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CancelScheduledTaskArgs {
+    task_id: String,
+    #[serde(default, rename = "__conversation_id")]
+    #[schemars(skip)]
+    _conversation_id: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListScheduledTasksArgs {
+    #[serde(default, rename = "__conversation_id")]
+    #[schemars(skip)]
+    _conversation_id: Option<String>,
+}
+
+fn default_message_priority() -> String {
+    "normal".to_string()
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SendUserMessageArgs {
+    message: String,
+    #[serde(default = "default_message_priority")]
+    priority: String,
+    #[serde(default, rename = "__conversation_id")]
+    #[schemars(skip)]
+    _conversation_id: Option<String>,
+}
+
 impl SchedulerIntegration {
     pub fn new(db: Arc<Database>) -> Self {
         Self { db }
@@ -59,18 +152,7 @@ impl SchedulerIntegration {
         args: &str,
         conversation_id: Uuid,
     ) -> anyhow::Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            prompt: String,
-            run_at: String,
-            #[serde(default, rename = "__authorization_context")]
-            authorization_context: String,
-            #[serde(default, rename = "__goal_id")]
-            goal_id: Option<String>,
-            #[serde(default, rename = "__goal_task_id")]
-            goal_task_id: Option<String>,
-        }
-        let args: Args = serde_json::from_str(args)?;
+        let args: ScheduleTaskArgs = serde_json::from_str(args)?;
 
         // Parse the run_at timestamp
         let run_at: DateTime<Utc> = args
@@ -130,20 +212,7 @@ impl SchedulerIntegration {
         args: &str,
         conversation_id: Uuid,
     ) -> anyhow::Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            prompt: String,
-            interval_seconds: i64,
-            #[serde(default)]
-            max_runs: Option<i64>,
-            #[serde(default, rename = "__authorization_context")]
-            authorization_context: String,
-            #[serde(default, rename = "__goal_id")]
-            goal_id: Option<String>,
-            #[serde(default, rename = "__goal_task_id")]
-            goal_task_id: Option<String>,
-        }
-        let args: Args = serde_json::from_str(args)?;
+        let args: ScheduleRecurringArgs = serde_json::from_str(args)?;
 
         if args.interval_seconds < 60 {
             anyhow::bail!("Interval must be at least 60 seconds");
@@ -208,20 +277,7 @@ impl SchedulerIntegration {
         args: &str,
         conversation_id: Uuid,
     ) -> anyhow::Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            prompt: String,
-            cron_expression: String,
-            #[serde(default)]
-            max_runs: Option<i64>,
-            #[serde(default, rename = "__authorization_context")]
-            authorization_context: String,
-            #[serde(default, rename = "__goal_id")]
-            goal_id: Option<String>,
-            #[serde(default, rename = "__goal_task_id")]
-            goal_task_id: Option<String>,
-        }
-        let args: Args = serde_json::from_str(args)?;
+        let args: ScheduleCronArgs = serde_json::from_str(args)?;
 
         let cron_expression = args.cron_expression.trim().to_string();
         let cron = Cron::from_str(&cron_expression)
@@ -279,11 +335,7 @@ impl SchedulerIntegration {
     }
 
     async fn handle_cancel_task(&self, args: &str) -> anyhow::Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            task_id: String,
-        }
-        let args: Args = serde_json::from_str(args)?;
+        let args: CancelScheduledTaskArgs = serde_json::from_str(args)?;
 
         self.db.cancel_scheduled_task(&args.task_id).await?;
         Ok(format!("Cancelled task {}", args.task_id))
@@ -329,18 +381,7 @@ impl SchedulerIntegration {
         args: &str,
         conversation_id: Uuid,
     ) -> anyhow::Result<String> {
-        #[derive(Deserialize)]
-        struct Args {
-            message: String,
-            #[serde(default = "default_priority")]
-            priority: String,
-        }
-
-        fn default_priority() -> String {
-            "normal".to_string()
-        }
-
-        let args: Args = serde_json::from_str(args)?;
+        let args: SendUserMessageArgs = serde_json::from_str(args)?;
 
         // Validate priority
         if !["low", "normal", "high", "urgent"].contains(&args.priority.as_str()) {
@@ -367,115 +408,30 @@ impl Integration for SchedulerIntegration {
 
     fn tools(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition {
-                name: "schedule_task".to_string(),
-                description: "Schedule a one-time task for the agent to run at a specific time. Optional context can be added to the prompt if needed.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "prompt": {
-                            "type": "string",
-                            "description": "The prompt/task for the agent to execute when the task runs. You can include any necessary context directly in the prompt."
-                        },
-                        "run_at": {
-                            "type": "string",
-                            "description": "ISO 8601 timestamp when to run the task (e.g., '2026-02-01T12:00:00Z')"
-                        }
-                    },
-                    "required": ["prompt", "run_at"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "schedule_recurring_task".to_string(),
-                description: "Schedule a recurring task that runs at regular intervals. Use max_runs to limit how many executions happen.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "prompt": {
-                            "type": "string",
-                            "description": "The prompt/task for the agent to execute on each run. Keep this focused on the actual work to do during one run."
-                        },
-                        "interval_seconds": {
-                            "type": "integer",
-                            "description": "Interval in seconds between runs (minimum 60)"
-                        },
-                        "max_runs": {
-                            "type": "integer",
-                            "description": "Optional maximum number of runs before auto-completion. Omit for indefinite."
-                        }
-                    },
-                    "required": ["prompt", "interval_seconds"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "schedule_cron_task".to_string(),
-                description: "Schedule a recurring task on a cron expression (e.g. weekday mornings, the first of the month) instead of a fixed interval. Use this when the cadence follows a calendar pattern rather than a simple repeat interval; use schedule_recurring_task for plain fixed intervals.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "prompt": {
-                            "type": "string",
-                            "description": "The prompt/task for the agent to execute on each run. Keep this focused on the actual work to do during one run."
-                        },
-                        "cron_expression": {
-                            "type": "string",
-                            "description": "Standard 5-field cron expression (minute hour day-of-month month day-of-week), e.g. '0 8 * * 1-5' for weekday mornings at 8am UTC. A 6-field form with a leading seconds field is also accepted."
-                        },
-                        "max_runs": {
-                            "type": "integer",
-                            "description": "Optional maximum number of runs before auto-completion. Omit for indefinite."
-                        }
-                    },
-                    "required": ["prompt", "cron_expression"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "cancel_scheduled_task".to_string(),
-                description: "Cancel a previously scheduled task".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "task_id": {
-                            "type": "string",
-                            "description": "The ID of the task to cancel"
-                        }
-                    },
-                    "required": ["task_id"],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "list_scheduled_tasks".to_string(),
-                description: "List all active scheduled tasks for this conversation".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": false
-                }),
-            },
-            ToolDefinition {
-                name: "send_user_message".to_string(),
-                description: "Send a message to the user outside of the normal chat flow (out-of-band notification). Default priority is 'normal'.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "message": {
-                            "type": "string",
-                            "description": "The message content to send to the user"
-                        },
-                        "priority": {
-                            "type": "string",
-                            "description": "Optional delivery priority: one of `low`, `normal`, `high`, or `urgent`. Defaults to `normal`."
-                        }
-                    },
-                    "required": ["message"],
-                    "additionalProperties": false
-                }),
-            },
+            ToolDefinition::for_args::<ScheduleTaskArgs>(
+                "schedule_task",
+                "Schedule a one-time task for the agent to run at a specific time. Optional context can be added to the prompt if needed.",
+            ),
+            ToolDefinition::for_args::<ScheduleRecurringArgs>(
+                "schedule_recurring_task",
+                "Schedule a recurring task that runs at regular intervals. Use max_runs to limit how many executions happen.",
+            ),
+            ToolDefinition::for_args::<ScheduleCronArgs>(
+                "schedule_cron_task",
+                "Schedule a recurring task on a cron expression (e.g. weekday mornings, the first of the month) instead of a fixed interval. Use this when the cadence follows a calendar pattern rather than a simple repeat interval; use schedule_recurring_task for plain fixed intervals.",
+            ),
+            ToolDefinition::for_args::<CancelScheduledTaskArgs>(
+                "cancel_scheduled_task",
+                "Cancel a previously scheduled task",
+            ),
+            ToolDefinition::for_args::<ListScheduledTasksArgs>(
+                "list_scheduled_tasks",
+                "List all active scheduled tasks for this conversation",
+            ),
+            ToolDefinition::for_args::<SendUserMessageArgs>(
+                "send_user_message",
+                "Send a message to the user outside of the normal chat flow (out-of-band notification). Default priority is 'normal'.",
+            ),
         ]
     }
 

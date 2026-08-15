@@ -109,6 +109,30 @@ pub struct HttpIntegration {
     allowed_domains: Vec<String>,
 }
 
+#[derive(Deserialize, Debug, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct HttpRequestArgs {
+    /// HTTP method: GET, POST, PUT, PATCH, DELETE, or HEAD.
+    method: String,
+    /// Absolute target URL.
+    url: String,
+    /// Request headers encoded as a JSON object string.
+    #[schemars(required)]
+    headers: Option<String>,
+    /// Query parameters encoded as a JSON object string.
+    #[schemars(required)]
+    query: Option<String>,
+    /// Plain-text body or JSON encoded as a string.
+    #[schemars(required)]
+    body: Option<String>,
+    /// Timeout in milliseconds; defaults to 20000.
+    #[schemars(required)]
+    timeout_ms: Option<u64>,
+    /// Whether redirects should be followed; defaults to false.
+    #[schemars(required)]
+    follow_redirects: Option<bool>,
+}
+
 #[derive(Deserialize, Debug)]
 struct MultipartField {
     name: String,
@@ -126,8 +150,7 @@ struct MultipartFile {
 #[derive(Deserialize, Debug)]
 struct MultipartBody {
     #[serde(rename = "type")]
-    #[allow(dead_code)]
-    body_type: String, // must be "multipart"
+    _body_type: String, // must be "multipart"
     fields: Option<Vec<MultipartField>>,
     files: Option<Vec<MultipartFile>>,
 }

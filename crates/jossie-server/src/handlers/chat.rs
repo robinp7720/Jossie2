@@ -174,12 +174,7 @@ pub async fn chat_handler(
     if let Some(ref fids) = req.file_ids {
         let mut attachments = Vec::new();
         for fid in fids {
-            if let Some(record) = state
-                .db
-                .get_file_record(fid)
-                .await
-                .map_err(anyhow::Error::from)?
-            {
+            if let Some(record) = state.db.get_file_record(fid).await? {
                 attachments.push(jossie_core::types::Attachment {
                     id: record.id,
                     name: record.name,
@@ -192,17 +187,6 @@ pub async fn chat_handler(
         user_msg = user_msg.with_attachments(attachments);
     }
     persist_message(&state, &user_msg).await?;
-
-    // Link attachments in DB
-    if let Some(fids) = req.file_ids {
-        for fid in fids {
-            state
-                .db
-                .link_message_attachment(user_msg.id, fid)
-                .await
-                .map_err(anyhow::Error::from)?;
-        }
-    }
 
     let response = run_agent_loop(&state, conv_id).await?;
 
@@ -375,13 +359,6 @@ async fn handle_ws(state: Arc<AppState>, mut socket: ws::WebSocket) {
             continue;
         }
 
-        // Link attachments in DB
-        if !duplicate && let Some(fids) = req.file_ids {
-            for fid in fids {
-                let _ = state.db.link_message_attachment(user_msg.id, fid).await;
-            }
-        }
-
         let source_id = user_msg.id.to_string();
         let existing_run = state
             .db
@@ -511,10 +488,10 @@ async fn handle_events_ws(
                 let Ok(event) = event else {
                     continue;
                 };
-                if let Some(filter) = conversation_filter {
-                    if event.conversation_id().is_some_and(|conversation_id| conversation_id != filter) {
-                        continue;
-                    }
+                if let Some(filter) = conversation_filter
+                    && event.conversation_id().is_some_and(|conversation_id| conversation_id != filter)
+                {
+                    continue;
                 }
 
                 let payload = match serde_json::to_string(&event) {

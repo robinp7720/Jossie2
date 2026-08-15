@@ -1,4 +1,5 @@
 impl HttpIntegration {
+    #[allow(clippy::too_many_arguments)]
     async fn http_request(
         &self,
         method: &str,
@@ -129,8 +130,9 @@ impl HttpIntegration {
         loop {
             // SECURITY CHECK: Domain Allowlist for Secrets
             // If we have Authorization header, check if domain is allowed.
-            if final_headers.contains_key(reqwest::header::AUTHORIZATION) {
-                if let Some(host) = current_url.host_str() {
+            if final_headers.contains_key(reqwest::header::AUTHORIZATION)
+                && let Some(host) = current_url.host_str()
+            {
                     let host_lower = host.to_lowercase();
                     // If allowlist is empty, we allow everything (per user request).
                     // If allowlist is NOT empty, we check if domain is in it or if "*" is present.
@@ -165,7 +167,6 @@ impl HttpIntegration {
                     } else {
                         tracing::debug!("Domain '{}' is in allowed_domains list for auth", host);
                     }
-                }
             }
 
             // Log complete request details
@@ -206,9 +207,12 @@ impl HttpIntegration {
             );
 
             // Check if redirect
-            if status.is_redirection() && follow_redirects && attempts < max_attempts {
-                if let Some(location) = resp.headers().get("Location") {
-                    if let Ok(loc_str) = location.to_str() {
+            if status.is_redirection()
+                && follow_redirects
+                && attempts < max_attempts
+                && let Some(location) = resp.headers().get("Location")
+                && let Ok(loc_str) = location.to_str()
+            {
                         let next_url = match Url::parse(loc_str) {
                             Ok(u) => u,
                             Err(url::ParseError::RelativeUrlWithoutBase) => {
@@ -267,9 +271,7 @@ impl HttpIntegration {
                         } else {
                             tracing::debug!("Redirect {} preserves method and body", status);
                         }
-                        continue;
-                    }
-                }
+                continue;
             }
 
             // Final response

@@ -1,11 +1,11 @@
 impl GoogleIntegration {
-    pub async fn mail_search(
+    pub async fn mail_search_value(
         &self,
         account_id: &str,
         query: &str,
         max_results: Option<u32>,
         page_token: Option<&str>,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<serde_json::Value> {
         let token = self.get_access_token(account_id).await?;
         let max_results = max_results.unwrap_or(20).to_string();
         let mut req = self
@@ -42,10 +42,10 @@ impl GoogleIntegration {
         let list: ListResponse = resp.json().await?;
 
         if list.messages.is_empty() {
-            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+            return Ok(serde_json::json!({
                 "messages": [],
                 "next_page_token": list.next_page_token
-            }))?);
+            }));
         }
 
         // Fetch metadata concurrently, but keep bounded pressure on Gmail and
@@ -91,13 +91,17 @@ impl GoogleIntegration {
             .map(|(_, message)| message)
             .collect::<Vec<_>>();
 
-        Ok(serde_json::to_string_pretty(&serde_json::json!({
+        Ok(serde_json::json!({
             "messages": results,
             "next_page_token": list.next_page_token
-        }))?)
+        }))
     }
 
-    pub async fn mail_read(&self, account_id: &str, message_id: &str) -> anyhow::Result<String> {
+    pub async fn mail_read_value(
+        &self,
+        account_id: &str,
+        message_id: &str,
+    ) -> anyhow::Result<serde_json::Value> {
         let token = self.get_access_token(account_id).await?;
         let url = format!("https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}");
         let resp = self
@@ -171,8 +175,7 @@ impl GoogleIntegration {
             "body_source": if debug_info.is_empty() { "full" } else { "snippet" },
             "attachments": attachments,
             "debug_structure": if !debug_info.is_empty() { Some(debug_info) } else { None },
-        })
-        .to_string())
+        }))
     }
 
     pub async fn mail_download_attachment(
@@ -232,7 +235,10 @@ impl GoogleIntegration {
         Ok(format!("Email sent to {to}"))
     }
 
-    pub async fn mail_labels(&self, account_id: &str) -> anyhow::Result<String> {
+    pub async fn mail_label_values(
+        &self,
+        account_id: &str,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
         let token = self.get_access_token(account_id).await?;
         let resp = self
             .client
@@ -252,7 +258,7 @@ impl GoogleIntegration {
             .and_then(|value| value.as_array())
             .cloned()
             .unwrap_or_default();
-        Ok(serde_json::to_string_pretty(&labels)?)
+        Ok(labels)
     }
 
 }

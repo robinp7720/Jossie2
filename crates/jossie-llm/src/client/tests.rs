@@ -474,7 +474,6 @@ mod tests {
                     "arguments": "{\"q\":\"test\"}"
                 }),
             ],
-            status: Some("completed".to_string()),
             error: None,
             usage: Some(ResponseUsage {
                 input_tokens: 10,

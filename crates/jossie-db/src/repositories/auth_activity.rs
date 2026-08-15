@@ -89,7 +89,7 @@ impl Database {
         limit: usize,
         before: Option<&str>,
     ) -> anyhow::Result<Vec<ActivityEvent>> {
-        let limit = limit.max(1).min(100);
+        let limit = limit.clamp(1, 100);
         let before = before.unwrap_or("");
         let rows = sqlx::query_as::<_, ActivityEventRow>(
             "SELECT id, conversation_id, run_id, category, title, detail, tone, created_at

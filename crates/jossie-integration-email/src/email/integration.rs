@@ -162,10 +162,6 @@ fn parse_recipient_list(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn truncate_with_notice(text: String, max_chars: usize) -> String {
-    jossie_core::text::truncate_with_notice(text, max_chars)
-}
-
 fn text_fallback_preview(raw_message: &[u8]) -> String {
     let preview_len = raw_message.len().min(32_000);
     let preview = String::from_utf8_lossy(&raw_message[..preview_len]);
@@ -255,12 +251,12 @@ fn collect_message_parts(
                     text_parts.push(body.to_string());
                 }
             }
-        } else if mime == "text/html" {
-            if let Ok(body) = part.get_body() {
-                let body = html_to_text(&body);
-                if !body.is_empty() {
-                    html_parts.push(body);
-                }
+        } else if mime == "text/html"
+            && let Ok(body) = part.get_body()
+        {
+            let body = jossie_core::text::html_to_text(&body);
+            if !body.is_empty() {
+                html_parts.push(body);
             }
         }
         return;
@@ -269,8 +265,4 @@ fn collect_message_parts(
     for child in &part.subparts {
         collect_message_parts(child, text_parts, html_parts);
     }
-}
-
-fn html_to_text(html: &str) -> String {
-    jossie_core::text::html_to_text(html)
 }

@@ -5,7 +5,7 @@
 /// normal event-mode triage in `generate_event_message` decide whether there
 /// is a genuine reason to speak up. Most ticks should produce nothing.
 async fn maybe_run_heartbeat(state: &Arc<AppState>) -> anyhow::Result<()> {
-    if !state.heartbeat_enabled {
+    if !state.background.heartbeat_enabled {
         return Ok(());
     }
 
@@ -15,7 +15,7 @@ async fn maybe_run_heartbeat(state: &Arc<AppState>) -> anyhow::Result<()> {
         .await?;
     if !heartbeat_is_due(
         last_run.as_deref(),
-        state.heartbeat_interval_secs,
+        state.background.heartbeat_interval_secs,
         Utc::now(),
     ) {
         return Ok(());
@@ -254,4 +254,3 @@ async fn build_heartbeat_event(
         last_error: None,
     })
 }
-

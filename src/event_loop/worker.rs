@@ -29,12 +29,12 @@ pub async fn start_event_loop(state: Arc<AppState>) -> anyhow::Result<()> {
         &state,
         "heartbeat",
         "Heartbeat checks",
-        if state.heartbeat_enabled {
+        if state.background.heartbeat_enabled {
             "idle"
         } else {
             "disabled"
         },
-        Some(if state.heartbeat_enabled {
+        Some(if state.background.heartbeat_enabled {
             "Ready"
         } else {
             "Disabled in configuration"
@@ -217,7 +217,7 @@ pub async fn start_event_loop(state: Arc<AppState>) -> anyhow::Result<()> {
             }
         }
 
-        if state.heartbeat_enabled {
+        if state.background.heartbeat_enabled {
             update_worker(
                 &state,
                 "heartbeat",

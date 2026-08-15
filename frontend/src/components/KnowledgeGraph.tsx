@@ -99,7 +99,7 @@ export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
   const selectedConnections = useMemo<GraphConnection[]>(() => {
     if (!data || !selectedNode) return []
     const nodesById = new Map(data.nodes.map((node) => [node.id, node]))
-    return data.edges.flatMap((edge) => {
+    return data.edges.flatMap<GraphConnection>((edge) => {
       if (edge.source_id === selectedNode.id) {
         const node = nodesById.get(edge.target_id)
         return node ? [{ edge, node, direction: 'outgoing' as const }] : []
@@ -229,7 +229,7 @@ export function KnowledgeGraph({ apiConfig }: KnowledgeGraphProps) {
               </li>)}
             </ul> : <p className="inspector-empty">No connected entities are stored for this node.</p>}
           </section>
-          {Object.keys(selectedNode.properties).length > 0 && <details className="inspector-properties">
+          {selectedNode.properties && typeof selectedNode.properties === 'object' && !Array.isArray(selectedNode.properties) && Object.keys(selectedNode.properties).length > 0 && <details className="inspector-properties">
             <summary>Stored properties</summary>
             <pre>{JSON.stringify(selectedNode.properties, null, 2)}</pre>
           </details>}

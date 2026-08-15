@@ -479,3 +479,9 @@ impl BrowserIntegration {
     }
 
 }
+
+impl Default for BrowserIntegration {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -5,24 +5,10 @@ impl Integration for HttpIntegration {
     }
 
     fn tools(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "http_request".to_string(),
-            description: "Makes an HTTP request with custom method, headers, and body. Supports JSON automatically.".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"], "description": "HTTP Method" },
-                    "url": { "type": "string", "description": "Target URL (must be absolute)" },
-                    "headers": { "type": ["string", "null"], "description": "Request headers as a JSON string (e.g. '{\"Content-Type\": \"application/json\"}')." },
-                    "query": { "type": ["string", "null"], "description": "Query parameters as a JSON string (e.g. '{\"q\": \"search\"}')." },
-                    "body": { "type": ["string", "null"], "description": "Request body as a JSON string. For plain text, pass directly. For JSON data, stringify the object. For multipart/form-data, stringify an object with structure: {\"type\": \"multipart\", \"fields\": [{\"name\": \"...\", \"value\": \"...\"}], \"files\": [{\"name\": \"...\", \"filename\": \"...\", \"content_type\": \"...\", \"data_base64\": \"...\"}]}." },
-                    "timeout_ms": { "type": ["number", "null"], "description": "Timeout in milliseconds (default 20000)" },
-                    "follow_redirects": { "type": ["boolean", "null"], "description": "Whether to follow redirects (default false)" }
-                },
-                "required": ["method", "url", "headers", "query", "body", "timeout_ms", "follow_redirects"],
-                "additionalProperties": false
-            }),
-        }]
+        vec![ToolDefinition::for_args::<HttpRequestArgs>(
+            "http_request",
+            "Makes an HTTP request with custom method, headers, and body. Supports JSON automatically.",
+        )]
     }
 
     async fn execute(&self, tool_name: &str, arguments: &str) -> anyhow::Result<String> {
@@ -30,18 +16,12 @@ impl Integration for HttpIntegration {
             anyhow::bail!("Unknown tool: {}", tool_name);
         }
 
-        let args: Value = serde_json::from_str(arguments)?;
+        let args: HttpRequestArgs = serde_json::from_str(arguments)?;
+        let method = args.method.as_str();
+        let url = args.url.as_str();
 
-        // Extract args manually to handle types
-        let method = args["method"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing 'method'"))?;
-        let url = args["url"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing 'url'"))?;
-
-        let headers = match args.get("headers") {
-            Some(Value::String(s)) => {
+        let headers = match args.headers.as_deref() {
+            Some(s) => {
                 let m: HashMap<String, String> = serde_json::from_str(s)
                     .map_err(|e| anyhow::anyhow!("Failed to parse headers JSON string: {}", e))?;
                 Some(m)
@@ -49,8 +29,8 @@ impl Integration for HttpIntegration {
             _ => None,
         };
 
-        let query = match args.get("query") {
-            Some(Value::String(s)) => {
+        let query = match args.query.as_deref() {
+            Some(s) => {
                 let m: HashMap<String, Value> = serde_json::from_str(s)
                     .map_err(|e| anyhow::anyhow!("Failed to parse query JSON string: {}", e))?;
                 Some(m)
@@ -59,11 +39,7 @@ impl Integration for HttpIntegration {
         };
 
         // Body Parsing
-        let raw_body_val = args.get("body");
-        let body_content = if let Some(val) = raw_body_val {
-            match val {
-                Value::Null => BodyContent::None,
-                Value::String(s) => {
+        let body_content = if let Some(s) = args.body.as_deref() {
                     // Try to parse as JSON to detect multipart structure
                     if let Ok(parsed) = serde_json::from_str::<Value>(s) {
                         if let Value::Object(map) = &parsed {
@@ -122,35 +98,21 @@ impl Integration for HttpIntegration {
                             }
                         } else {
                             // Not an object, treat as text
-                            BodyContent::Text(s.clone())
+                            BodyContent::Text(s.to_string())
                         }
                     } else {
                         // Not valid JSON, treat as plain text
-                        BodyContent::Text(s.clone())
+                        BodyContent::Text(s.to_string())
                     }
-                }
-                // Fallback for JSON object/array (legacy, shouldn't happen with new schema)
-                obj @ Value::Object(_) | obj @ Value::Array(_) => {
-                    let bytes = serde_json::to_vec(&obj)?;
-                    BodyContent::Json(bytes)
-                }
-                _ => BodyContent::None,
-            }
         } else {
             BodyContent::None
         };
 
         // Handle number/null for timeout
-        let timeout_ms = match args.get("timeout_ms") {
-            Some(Value::Number(n)) => n.as_u64(),
-            _ => None,
-        };
+        let timeout_ms = args.timeout_ms;
 
         // Handle boolean/null for follow_redirects
-        let follow_redirects = match args.get("follow_redirects") {
-            Some(Value::Bool(b)) => *b,
-            _ => false,
-        };
+        let follow_redirects = args.follow_redirects.unwrap_or(false);
 
         self.http_request(
             method,

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use url::Url;
 use uuid::Uuid;
 
-#[derive(Serialize)]
+#[derive(Serialize, ts_rs::TS)]
 pub struct IntegrationStatus {
     name: String,
     #[serde(flatten)]
@@ -144,14 +144,15 @@ pub async fn oauth_callback_handler(
             {
                 return Html(format!("<h1>Error Saving Account</h1><p>{}</p>", e));
             }
-            Html(format!(
+            Html(
                 r#"
                 <h1>Success!</h1>
                 <p>Google integration configured successfully.</p>
                 <p>You can close this window.</p>
                 <script>setTimeout(() => window.close(), 3000);</script>
                 "#
-            ))
+                .to_string(),
+            )
         }
         Err(e) => Html(format!("<h1>Exchange Error</h1><p>{}</p>", e)),
     }
@@ -165,8 +166,8 @@ fn prune_expired_oauth_states(pending: &mut std::collections::HashMap<String, Pe
 }
 
 fn resolve_public_base_url(state: &AppState, headers: &HeaderMap) -> Result<String, AppError> {
-    if let Some(base_url) = state.public_base_url.as_deref() {
-        return Ok(normalize_public_base_url(base_url)?);
+    if let Some(base_url) = state.web.public_base_url.as_deref() {
+        return normalize_public_base_url(base_url);
     }
 
     let host = headers

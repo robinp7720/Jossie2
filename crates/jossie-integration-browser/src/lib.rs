@@ -59,15 +59,14 @@ fn decode_duckduckgo_redirect(raw_href: &str) -> String {
         raw_href.to_string()
     };
 
-    if let Ok(url) = Url::parse(&candidate) {
-        if url.domain() == Some("duckduckgo.com") && url.path() == "/l/" {
-            if let Some(target) = url
-                .query_pairs()
-                .find_map(|(key, value)| (key == "uddg").then_some(value.into_owned()))
-            {
-                return target;
-            }
-        }
+    if let Ok(url) = Url::parse(&candidate)
+        && url.domain() == Some("duckduckgo.com")
+        && url.path() == "/l/"
+        && let Some(target) = url
+            .query_pairs()
+            .find_map(|(key, value)| (key == "uddg").then_some(value.into_owned()))
+    {
+        return target;
     }
 
     candidate
@@ -123,19 +122,32 @@ struct BrowserPageSnapshot {
     actions: Vec<BrowserElementSummary>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct BrowserReadPageArgs {
+    /// The URL to visit.
+    url: String,
+    /// Optional CSS selector to focus on. If omitted, captures the whole body.
+    #[schemars(required)]
+    selector: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct BrowserOpenSessionArgs {
     url: String,
     #[serde(default)]
     wait_for: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct BrowserSessionSnapshotArgs {
     session_id: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct BrowserNavigateArgs {
     session_id: String,
     url: String,
@@ -143,7 +155,8 @@ struct BrowserNavigateArgs {
     wait_for: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct BrowserFillInputArgs {
     session_id: String,
     #[serde(default)]
@@ -159,7 +172,8 @@ struct BrowserFillInputArgs {
     value: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct BrowserClickArgs {
     session_id: String,
     #[serde(default)]
@@ -172,7 +186,8 @@ struct BrowserClickArgs {
     wait_after_ms: u64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct BrowserSelectOptionArgs {
     session_id: String,
     #[serde(default)]
@@ -191,7 +206,8 @@ struct BrowserSelectOptionArgs {
     wait_after_ms: u64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct BrowserCloseSessionArgs {
     session_id: String,
 }
@@ -201,6 +217,13 @@ struct BrowserMutationResult {
     ok: bool,
     #[serde(default)]
     message: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct BrowserSearchArgs {
+    /// The search query.
+    query: String,
 }
 
 fn default_interaction_wait_ms() -> u64 {

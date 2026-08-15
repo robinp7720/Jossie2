@@ -14,7 +14,30 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl ToolDefinition {
+    /// Build a tool definition from the same Rust type used to deserialize its arguments.
+    pub fn for_args<A: schemars::JsonSchema>(
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        let mut parameters = serde_json::to_value(schemars::schema_for!(A))
+            .expect("JSON Schema serialization cannot fail");
+        if let Some(object) = parameters.as_object_mut() {
+            object.remove("$schema");
+        }
+        Self {
+            name: name.into(),
+            description: description.into(),
+            parameters,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EmptyToolArgs {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -28,7 +51,7 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 pub struct OnboardingField {
     pub name: String,
     pub label: String,
@@ -37,7 +60,7 @@ pub struct OnboardingField {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "status", content = "details")]
 pub enum OnboardingStatus {
     Configured,

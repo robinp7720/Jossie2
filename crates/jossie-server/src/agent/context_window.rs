@@ -162,10 +162,10 @@ async fn enrich_candidates_with_context(
             .take(3)
             .map(|node| node.label.clone()),
     );
-    if let Ok(Some(freq_entities)) = frequent_entities {
-        if let Ok(entities) = serde_json::from_str::<Vec<String>>(&freq_entities.content) {
-            candidates.extend(entities.into_iter().take(3));
-        }
+    if let Ok(Some(freq_entities)) = frequent_entities
+        && let Ok(entities) = serde_json::from_str::<Vec<String>>(&freq_entities.content)
+    {
+        candidates.extend(entities.into_iter().take(3));
     }
 
     // Deduplicate while preserving order
@@ -522,8 +522,9 @@ fn sanitize_context_window(messages: &mut Vec<Message>) {
             continue;
         }
 
-        if message.role == Role::Assistant {
-            if let Some(tool_calls_value) = &message.tool_calls {
+        if message.role == Role::Assistant
+            && let Some(tool_calls_value) = &message.tool_calls
+        {
                 let mut block_end = idx + 1;
                 let mut matched_call_ids = std::collections::HashSet::new();
                 while block_end < messages.len() && messages[block_end].role == Role::Tool {
@@ -563,7 +564,6 @@ fn sanitize_context_window(messages: &mut Vec<Message>) {
 
                 idx = block_end;
                 continue;
-            }
         }
 
         sanitized.push(message.clone());
@@ -574,4 +574,3 @@ fn sanitize_context_window(messages: &mut Vec<Message>) {
         *messages = sanitized;
     }
 }
-

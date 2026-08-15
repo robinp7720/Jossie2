@@ -21,7 +21,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
-thiserror = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 tower = { workspace = true }
@@ -32,3 +31,5 @@ regex = { workspace = true }
 subtle = { workspace = true }
 argon2 = { workspace = true }
 sha2 = { workspace = true }
+ts-rs = { workspace = true }
+schemars = { workspace = true }
