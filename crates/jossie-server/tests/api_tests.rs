@@ -5,6 +5,8 @@ use axum::{
 };
 use jossie_core::integration::IntegrationRegistry;
 use jossie_db::Database;
+use jossie_integration_email::EmailIntegration;
+use jossie_integration_mail::MailIntegration;
 use jossie_llm::LlmClient;
 use jossie_server::{AppState, router};
 use serde_json::Value;
@@ -21,6 +23,10 @@ async fn setup_app() -> axum::Router {
 
     let db = Arc::new(db);
     let llm = LlmClient::new("http://localhost:8080", "key", "model");
+    let mail_integration = Arc::new(MailIntegration::new(
+        Arc::new(EmailIntegration::new(&Default::default())),
+        None,
+    ));
     let state = Arc::new(AppState {
         db: db.clone(),
         llm: llm.clone(),
@@ -29,6 +35,7 @@ async fn setup_app() -> axum::Router {
             db, llm, false,
         )),
         registry: Arc::new(IntegrationRegistry::new()),
+        mail_integration,
         auth_token: "test-token".to_string(),
         auth_password_hash: test_password_hash(),
         session_cookie_secure: false,

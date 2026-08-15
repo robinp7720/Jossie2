@@ -107,6 +107,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gmail_base64_decoder_preserves_binary_attachment_bytes() {
+        assert_eq!(decode_base64_url_bytes("AAEC_w"), Some(vec![0, 1, 2, 255]));
+    }
+
+    #[test]
     fn calendar_update_body_builds_timed_patch() {
         let body = build_calendar_update_body(CalendarEventUpdate {
             summary: Some("Project sync".to_string()),

@@ -189,6 +189,54 @@ fn extract_message_body(parsed: &ParsedMail<'_>) -> String {
     parsed.get_body().unwrap_or_default().trim().to_string()
 }
 
+fn collect_message_attachments(
+    part: &ParsedMail<'_>,
+    part_id: &str,
+    attachments: &mut Vec<EmailAttachment>,
+) {
+    let disposition = part.get_content_disposition();
+    let filename = disposition
+        .params
+        .get("filename")
+        .or_else(|| part.ctype.params.get("name"))
+        .cloned()
+        .unwrap_or_default();
+    let is_attachment = disposition.disposition == DispositionType::Attachment
+        || (!filename.is_empty() && part.subparts.is_empty());
+
+    if is_attachment {
+        let size = part.get_body_raw().map(|body| body.len()).unwrap_or_default();
+        attachments.push(EmailAttachment {
+            part_id: part_id.to_string(),
+            filename,
+            mime_type: part.ctype.mimetype.to_ascii_lowercase(),
+            size,
+        });
+        return;
+    }
+
+    for (index, child) in part.subparts.iter().enumerate() {
+        let child_id = if part_id.is_empty() {
+            (index + 1).to_string()
+        } else {
+            format!("{part_id}.{}", index + 1)
+        };
+        collect_message_attachments(child, &child_id, attachments);
+    }
+}
+
+fn find_message_attachment<'a>(part: &'a ParsedMail<'a>, part_id: &str) -> Option<&'a ParsedMail<'a>> {
+    let mut current = part;
+    if part_id.is_empty() {
+        return Some(current);
+    }
+    for segment in part_id.split('.') {
+        let index = segment.parse::<usize>().ok()?.checked_sub(1)?;
+        current = current.subparts.get(index)?;
+    }
+    Some(current)
+}
+
 fn collect_message_parts(
     part: &ParsedMail<'_>,
     text_parts: &mut Vec<String>,

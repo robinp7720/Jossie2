@@ -168,10 +168,37 @@ impl GoogleIntegration {
             "subject": get_header("Subject"),
             "date": get_header("Date"),
             "body": body_text,
+            "body_source": if debug_info.is_empty() { "full" } else { "snippet" },
             "attachments": attachments,
             "debug_structure": if !debug_info.is_empty() { Some(debug_info) } else { None },
         })
         .to_string())
+    }
+
+    pub async fn mail_download_attachment(
+        &self,
+        account_id: &str,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        anyhow::ensure!(!attachment_id.trim().is_empty(), "Missing Gmail attachment ID");
+        let token = self.get_access_token(account_id).await?;
+        let url = format!(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}/attachments/{attachment_id}"
+        );
+        let resp = self.client.get(url).bearer_auth(&token).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Gmail attachment download failed ({status}): {body}");
+        }
+        let payload: serde_json::Value = resp.json().await?;
+        let raw = payload
+            .get("data")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Gmail attachment response has no data"))?;
+        decode_base64_url_bytes(raw)
+            .ok_or_else(|| anyhow::anyhow!("Gmail attachment data is not valid base64"))
     }
 
     pub async fn mail_send(

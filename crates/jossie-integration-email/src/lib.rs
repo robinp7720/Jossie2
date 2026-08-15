@@ -61,6 +61,26 @@ pub struct EmailIntegration {
     db: Option<Arc<Database>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct EmailAttachment {
+    pub part_id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub size: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmailMessageContent {
+    pub uid: u32,
+    pub from: String,
+    pub to: Vec<String>,
+    pub subject: String,
+    pub date: String,
+    pub body: String,
+    pub body_source: String,
+    pub attachments: Vec<EmailAttachment>,
+}
+
 include!("email/polling.rs");
 include!("email/provider.rs");
 include!("email/integration.rs");

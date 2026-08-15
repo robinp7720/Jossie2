@@ -79,6 +79,31 @@ impl EmailIntegration {
         uid: u32,
         folder: &str,
     ) -> anyhow::Result<String> {
+        let content = self.do_email_read_content(config, uid, folder).await?;
+        Ok(serde_json::json!({
+            "uid": content.uid,
+            "from": content.from,
+            "to": content.to,
+            "subject": content.subject,
+            "date": content.date,
+            "body": content.body,
+            "body_source": content.body_source,
+            "attachments": content.attachments.iter().map(|attachment| serde_json::json!({
+                "part_id": attachment.part_id,
+                "filename": attachment.filename,
+                "mimeType": attachment.mime_type,
+                "size": attachment.size,
+            })).collect::<Vec<_>>(),
+        })
+        .to_string())
+    }
+
+    async fn do_email_read_content(
+        &self,
+        config: &EmailConfig,
+        uid: u32,
+        folder: &str,
+    ) -> anyhow::Result<EmailMessageContent> {
         let mut session = Self::imap_connect(config).await?;
         session.select(folder).await?;
 
@@ -101,38 +126,73 @@ impl EmailIntegration {
                         &parsed.headers.get_first_value("To").unwrap_or_default(),
                     );
                     let date = parsed.headers.get_first_value("Date").unwrap_or_default();
-                    let body_text =
-                        truncate_with_notice(extract_message_body(&parsed), MAX_EMAIL_BODY_CHARS);
-                    serde_json::json!({
-                        "uid": uid,
-                        "from": from,
-                        "to": to,
-                        "subject": subject,
-                        "date": date,
-                        "body": body_text,
-                    })
-                    .to_string()
+                    let body = extract_message_body(&parsed);
+                    let mut attachments = Vec::new();
+                    collect_message_attachments(&parsed, "", &mut attachments);
+                    EmailMessageContent {
+                        uid,
+                        from,
+                        to,
+                        subject,
+                        date,
+                        body_source: if body.trim().is_empty() {
+                            "empty".to_string()
+                        } else {
+                            "full".to_string()
+                        },
+                        body: truncate_with_notice(body, MAX_EMAIL_BODY_CHARS),
+                        attachments,
+                    }
                 }
                 Err(_) => {
                     let (from, subject, date) = extract_header_fields(raw_message);
-                    serde_json::json!({
-                        "uid": uid,
-                        "from": from,
-                        "to": Vec::<String>::new(),
-                        "subject": subject,
-                        "date": date,
-                        "body": truncate_with_notice(text_fallback_preview(raw_message), MAX_FALLBACK_PREVIEW_CHARS),
-                        "note": "Email body parsing failed; returned a trimmed raw preview instead.",
-                    })
-                    .to_string()
+                    EmailMessageContent {
+                        uid,
+                        from,
+                        to: Vec::new(),
+                        subject,
+                        date,
+                        body: truncate_with_notice(
+                            text_fallback_preview(raw_message),
+                            MAX_FALLBACK_PREVIEW_CHARS,
+                        ),
+                        body_source: "raw_preview".to_string(),
+                        attachments: Vec::new(),
+                    }
                 }
             }
         } else {
-            "Email not found".to_string()
+            anyhow::bail!("Email not found")
         };
 
         session.logout().await.ok();
         Ok(result)
+    }
+
+    async fn do_email_read_attachment(
+        &self,
+        config: &EmailConfig,
+        uid: u32,
+        folder: &str,
+        part_id: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        let mut session = Self::imap_connect(config).await?;
+        session.select(folder).await?;
+        let fetch_stream = session.uid_fetch(uid.to_string(), "RFC822").await?;
+        let fetched: Vec<_> = {
+            use futures::TryStreamExt;
+            fetch_stream.try_collect().await?
+        };
+        let raw_message = fetched
+            .first()
+            .and_then(|message| message.body())
+            .ok_or_else(|| anyhow::anyhow!("Email not found"))?;
+        let parsed = mailparse::parse_mail(raw_message)?;
+        let part = find_message_attachment(&parsed, part_id)
+            .ok_or_else(|| anyhow::anyhow!("Email attachment part not found: {part_id}"))?;
+        let bytes = part.get_body_raw()?;
+        session.logout().await.ok();
+        Ok(bytes)
     }
 
     async fn do_email_send(
@@ -261,6 +321,40 @@ impl EmailIntegration {
         Ok(serde_json::from_str(
             &self.do_email_read(&config, uid, folder).await?,
         )?)
+    }
+
+    pub async fn mail_read_content(
+        &self,
+        account_id: &str,
+        uid: u32,
+        folder: Option<&str>,
+    ) -> anyhow::Result<EmailMessageContent> {
+        let config = self
+            .get_account_config(Self::provider_account_id(account_id))
+            .await?;
+        let folder = folder
+            .map(str::trim)
+            .filter(|folder| !folder.is_empty())
+            .unwrap_or(DEFAULT_FOLDER);
+        self.do_email_read_content(&config, uid, folder).await
+    }
+
+    pub async fn mail_read_attachment(
+        &self,
+        account_id: &str,
+        uid: u32,
+        folder: Option<&str>,
+        part_id: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        let config = self
+            .get_account_config(Self::provider_account_id(account_id))
+            .await?;
+        let folder = folder
+            .map(str::trim)
+            .filter(|folder| !folder.is_empty())
+            .unwrap_or(DEFAULT_FOLDER);
+        self.do_email_read_attachment(&config, uid, folder, part_id)
+            .await
     }
 
     pub async fn mail_send(

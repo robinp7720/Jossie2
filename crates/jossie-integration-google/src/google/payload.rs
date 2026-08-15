@@ -24,6 +24,10 @@ fn summarize_structure(payload: &serde_json::Value, depth: usize) -> String {
     out
 }
 fn decode_base64_url(data: &str) -> Option<String> {
+    decode_base64_url_bytes(data).map(|decoded| String::from_utf8_lossy(&decoded).to_string())
+}
+
+fn decode_base64_url_bytes(data: &str) -> Option<Vec<u8>> {
     use base64::Engine;
 
     // Gmail sometimes includes line breaks or padding; normalize before decode.
@@ -37,7 +41,6 @@ fn decode_base64_url(data: &str) -> Option<String> {
         .or_else(|| try_decode(base64::engine::general_purpose::URL_SAFE))
         .or_else(|| try_decode(base64::engine::general_purpose::STANDARD_NO_PAD))
         .or_else(|| try_decode(base64::engine::general_purpose::STANDARD))
-        .map(|decoded| String::from_utf8_lossy(&decoded).to_string())
 }
 
 async fn extract_body_from_payload(

@@ -136,10 +136,11 @@ async fn main() -> Result<()> {
         tracing::info!("Registered Google integration");
     }
 
-    registry.register(Arc::new(jossie_integration_mail::MailIntegration::new(
+    let mail_integration = Arc::new(jossie_integration_mail::MailIntegration::new(
         email.clone(),
         google_integration.clone(),
-    )));
+    ));
+    registry.register(mail_integration.clone());
     tracing::info!("Registered mail integration");
 
     // Browser Integration
@@ -185,6 +186,7 @@ async fn main() -> Result<()> {
         kg_llm,
         chat_export_importer,
         registry: Arc::new(registry),
+        mail_integration,
         auth_token: config.server.auth_token.clone(),
         auth_password_hash: config.server.auth_password_hash.clone(),
         session_cookie_secure: config.server.session_cookie_secure.unwrap_or_else(|| {

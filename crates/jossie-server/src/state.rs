@@ -2,6 +2,7 @@ use crate::events::ServerEvent;
 use jossie_core::integration::IntegrationRegistry;
 use jossie_db::Database;
 use jossie_integration_google::GoogleIntegration;
+use jossie_integration_mail::MailIntegration;
 use jossie_llm::LlmClient;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -20,6 +21,7 @@ pub struct AppState {
     pub kg_llm: LlmClient,
     pub chat_export_importer: Arc<jossie_integration_files::ChatExportImporter>,
     pub registry: Arc<IntegrationRegistry>,
+    pub mail_integration: Arc<MailIntegration>,
     pub auth_token: String,
     pub auth_password_hash: String,
     pub session_cookie_secure: bool,

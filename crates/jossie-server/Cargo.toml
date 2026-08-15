@@ -8,6 +8,8 @@ jossie-core = { workspace = true }
 jossie-llm = { workspace = true }
 jossie-db = { workspace = true }
 jossie-integration-google = { workspace = true }
+jossie-integration-email = { workspace = true }
+jossie-integration-mail = { workspace = true }
 jossie-integration-browser = { workspace = true }
 jossie-integration-files = { workspace = true }
 axum = { workspace = true }

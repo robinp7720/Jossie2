@@ -70,6 +70,28 @@ mod tests {
     }
 
     #[test]
+    fn discovers_and_reads_mime_attachments_by_part_id() {
+        let raw = concat!(
+            "Subject: Document\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: multipart/mixed; boundary=\"MIX\"\r\n\r\n",
+            "--MIX\r\nContent-Type: text/plain\r\n\r\nPlease see the file.\r\n",
+            "--MIX\r\nContent-Type: application/pdf; name=\"report.pdf\"\r\n",
+            "Content-Disposition: attachment; filename=\"report.pdf\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\n",
+            "UERGREFUQQ==\r\n--MIX--\r\n"
+        );
+        let parsed = mailparse::parse_mail(raw.as_bytes()).unwrap();
+        let mut attachments = Vec::new();
+        collect_message_attachments(&parsed, "", &mut attachments);
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].part_id, "2");
+        assert_eq!(attachments[0].filename, "report.pdf");
+        let part = find_message_attachment(&parsed, &attachments[0].part_id).unwrap();
+        assert_eq!(part.get_body_raw().unwrap(), b"PDFDATA");
+    }
+
+    #[test]
     fn extract_header_fields_reads_common_headers() {
         let raw = concat!(
             "From: sender@example.com\r\n",

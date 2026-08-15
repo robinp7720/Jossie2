@@ -2,7 +2,7 @@ use crate::events::{ServerEvent, persist_message, preview_text};
 use crate::state::AppState;
 use futures::FutureExt;
 use jossie_core::integration::{CapabilityGroup, IntegrationRegistry, ToolEffect, tool_metadata};
-use jossie_core::types::{Message, Role};
+use jossie_core::types::{Attachment, Message, Role};
 use jossie_db::{IntegrationEvent, MemoryEntry, MemoryPromptEntry, NewPendingAction};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
