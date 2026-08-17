@@ -51,7 +51,6 @@ async fn setup_app() -> axum::Router {
             interactive_run_budget_seconds: 600,
             llm_request_timeout_seconds: 120,
             tool_call_timeout_seconds: 90,
-            max_tool_result_chars: 32_000,
             max_tool_batch_chars: 60_000,
             max_attachment_bytes_per_request: 25 * 1024 * 1024,
             enable_self_reflection: false,

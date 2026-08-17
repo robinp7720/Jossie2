@@ -1,7 +1,7 @@
 use chrono::Utc;
 use jossie_core::config::EmailConfig;
 use jossie_core::events::NEW_EMAIL;
-use jossie_core::integration::{Integration, OnboardingField, OnboardingStatus, ToolDefinition};
+use jossie_core::integration::{Integration, OnboardingField, OnboardingStatus};
 use jossie_db::Database;
 use jossie_db::IntegrationAccount;
 use mailparse::{DispositionType, MailHeaderMap, ParsedMail};

@@ -476,11 +476,7 @@ async fn execute_tool_batch(
         results.push((idx, call, result));
     }
     results.sort_by_key(|(idx, _, _)| *idx);
-    compact_tool_batch(
-        &mut results,
-        state.agent.max_tool_result_chars,
-        state.agent.max_tool_batch_chars,
-    );
+    compact_tool_batch(&mut results, state.agent.max_tool_batch_chars);
     results
 }
 
@@ -505,16 +501,14 @@ async fn execute_tool_with_timeout(
 
 fn compact_tool_batch(
     results: &mut [(usize, jossie_core::ToolCall, jossie_core::ToolResult)],
-    max_result_chars: usize,
     max_batch_chars: usize,
 ) {
     if results.is_empty() {
         return;
     }
     let fair_share = (max_batch_chars / results.len()).max(256);
-    let per_result = max_result_chars.min(fair_share);
     for (_, _, result) in results {
-        result.content = truncate_tool_result(&result.content, per_result);
+        result.content = truncate_tool_result(&result.content, fair_share);
     }
 }
 

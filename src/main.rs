@@ -101,22 +101,22 @@ async fn main() -> Result<()> {
         tracing::info!("Resumed {resumed_imports} queued chat import(s)");
     }
 
-    let mut registry = IntegrationRegistry::new();
-    registry.register(Arc::new(MemoryIntegration::new(db.clone())));
+    let mut registry = IntegrationRegistry::with_max_output_chars(config.llm.max_tool_result_chars);
+    registry.register(Arc::new(MemoryIntegration::new(db.clone())))?;
     registry.register(Arc::new(jossie_integration_files::FilesIntegration::new(
         db.clone(),
         chat_export_importer.clone(),
-    )));
+    )))?;
 
     // Knowledge Graph
     registry.register(Arc::new(jossie_integration_graph::GraphIntegration::new(
         db.clone(),
-    )));
+    )))?;
 
     let mut email = jossie_integration_email::EmailIntegration::new(&config.email);
     email.set_db(db.clone());
     let email = Arc::new(email);
-    registry.register(email.clone());
+    registry.register(email.clone())?;
     tracing::info!("Registered email integration");
 
     let mut google_integration: Option<Arc<jossie_integration_google::GoogleIntegration>> = None;
@@ -124,7 +124,7 @@ async fn main() -> Result<()> {
         let mut google = jossie_integration_google::GoogleIntegration::new(&config.google);
         google.set_db(db.clone());
         let google = Arc::new(google);
-        registry.register(google.clone());
+        registry.register(google.clone())?;
         google_integration = Some(google);
         tracing::info!("Registered Google integration");
     }
@@ -133,23 +133,23 @@ async fn main() -> Result<()> {
         email.clone(),
         google_integration.clone(),
     ));
-    registry.register(mail_integration.clone());
+    registry.register(mail_integration.clone())?;
     tracing::info!("Registered mail integration");
 
     // Browser Integration
     registry.register(Arc::new(
         jossie_integration_browser::BrowserIntegration::new(),
-    ));
+    ))?;
     tracing::info!("Registered browser integration");
 
     // HTTP Integration
     registry.register(Arc::new(HttpIntegration::new(
         config.http.allowed_domains.clone(),
-    )));
+    )))?;
     tracing::info!("Registered http integration");
 
     // Scheduler Integration
-    registry.register(Arc::new(SchedulerIntegration::new(db.clone())));
+    registry.register(Arc::new(SchedulerIntegration::new(db.clone())))?;
     tracing::info!("Registered scheduler integration");
 
     let unclassified_tools = registry.unclassified_agent_tools();
@@ -192,7 +192,6 @@ async fn main() -> Result<()> {
             interactive_run_budget_seconds: config.llm.interactive_run_budget_seconds,
             llm_request_timeout_seconds: config.llm.llm_request_timeout_seconds,
             tool_call_timeout_seconds: config.llm.tool_call_timeout_seconds,
-            max_tool_result_chars: config.llm.max_tool_result_chars,
             max_tool_batch_chars: config.llm.max_tool_batch_chars,
             max_attachment_bytes_per_request: config.llm.max_attachment_bytes_per_request,
             enable_self_reflection: config.llm.enable_self_reflection,

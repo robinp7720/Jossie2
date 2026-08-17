@@ -70,14 +70,18 @@ pub enum OnboardingStatus {
 #[async_trait::async_trait]
 pub trait Integration: Send + Sync {
     fn name(&self) -> &str;
-    fn tools(&self) -> Vec<ToolDefinition>;
+    fn tools(&self) -> Vec<ToolDefinition> {
+        Vec::new()
+    }
     fn agent_tools(&self) -> Vec<ToolDefinition> {
         self.tools()
     }
     fn show_in_onboarding(&self) -> bool {
         true
     }
-    async fn execute(&self, tool_name: &str, arguments: &str) -> anyhow::Result<String>;
+    async fn execute(&self, tool_name: &str, _arguments: &str) -> anyhow::Result<String> {
+        anyhow::bail!("Unknown {} tool: {tool_name}", self.name())
+    }
     async fn check_onboarding(&self) -> anyhow::Result<OnboardingStatus> {
         Ok(OnboardingStatus::Configured)
     }
@@ -91,28 +95,58 @@ pub struct IntegrationRegistry {
     tool_map: HashMap<String, usize>,
     tool_definitions: Vec<ToolDefinition>,
     agent_tool_definitions: Vec<ToolDefinition>,
+    max_output_chars: usize,
 }
 
 impl IntegrationRegistry {
     pub fn new() -> Self {
+        Self::with_max_output_chars(32_000)
+    }
+
+    pub fn with_max_output_chars(max_output_chars: usize) -> Self {
         Self {
             integrations: Vec::new(),
             tool_map: HashMap::new(),
             tool_definitions: Vec::new(),
             agent_tool_definitions: Vec::new(),
+            max_output_chars: max_output_chars.max(1),
         }
     }
 
-    pub fn register(&mut self, integration: Arc<dyn Integration>) {
+    pub fn register(&mut self, integration: Arc<dyn Integration>) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self
+                .integrations
+                .iter()
+                .any(|registered| registered.name() == integration.name()),
+            "Integration '{}' is already registered",
+            integration.name()
+        );
         let idx = self.integrations.len();
         let tools = integration.tools();
+        let agent_tools = integration.agent_tools();
+        for tool in &tools {
+            anyhow::ensure!(
+                !self.tool_map.contains_key(&tool.name),
+                "Tool '{}' is already registered",
+                tool.name
+            );
+        }
+        for tool in &agent_tools {
+            anyhow::ensure!(
+                tools.iter().any(|registered| registered.name == tool.name),
+                "Agent-visible tool '{}' is not executable by integration '{}'",
+                tool.name,
+                integration.name()
+            );
+        }
         for tool in &tools {
             self.tool_map.insert(tool.name.clone(), idx);
         }
         self.tool_definitions.extend(tools);
-        self.agent_tool_definitions
-            .extend(integration.agent_tools());
+        self.agent_tool_definitions.extend(agent_tools);
         self.integrations.push(integration);
+        Ok(())
     }
 
     pub fn all_tool_definitions(&self) -> Vec<ToolDefinition> {
@@ -127,18 +161,19 @@ impl IntegrationRegistry {
         &self,
         capabilities: &std::collections::HashSet<CapabilityGroup>,
     ) -> Vec<ToolDefinition> {
-        self.all_agent_tool_definitions()
-            .into_iter()
+        self.agent_tool_definitions
+            .iter()
             .filter(|tool| {
                 capabilities.contains(&tool_metadata(&tool.name, "{}").capability)
                     || (tool.name == "google_list_accounts"
                         && capabilities.contains(&CapabilityGroup::Drive))
             })
+            .cloned()
             .collect()
     }
 
     pub fn has_agent_tools_for(&self, capability: CapabilityGroup) -> bool {
-        self.all_agent_tool_definitions()
+        self.agent_tool_definitions
             .iter()
             .any(|tool| tool_metadata(&tool.name, "{}").capability == capability)
     }
@@ -148,10 +183,10 @@ impl IntegrationRegistry {
     }
 
     pub fn unclassified_agent_tools(&self) -> Vec<String> {
-        self.all_agent_tool_definitions()
-            .into_iter()
+        self.agent_tool_definitions
+            .iter()
             .filter(|tool| tool_metadata(&tool.name, "{}").capability == CapabilityGroup::Core)
-            .map(|tool| tool.name)
+            .map(|tool| tool.name.clone())
             .collect()
     }
 
@@ -169,7 +204,6 @@ impl IntegrationRegistry {
         };
 
         const MAX_RETRIES: usize = 2;
-        const MAX_OUTPUT_SIZE: usize = 32_000;
         let backoff_ms = [500, 1000];
 
         let mut last_error = String::new();
@@ -189,17 +223,17 @@ impl IntegrationRegistry {
                     let original_len = content.chars().count();
                     let mut final_content = content;
 
-                    if original_len > MAX_OUTPUT_SIZE {
+                    if original_len > self.max_output_chars {
                         tracing::warn!(
                             "Tool '{}' returned large output: {} chars. Truncating to {} chars.",
                             call.name,
                             original_len,
-                            MAX_OUTPUT_SIZE
+                            self.max_output_chars
                         );
-                        final_content = final_content.chars().take(MAX_OUTPUT_SIZE).collect();
+                        final_content = final_content.chars().take(self.max_output_chars).collect();
                         final_content.push_str(&format!(
                             "\n\n[NOTICE: Output truncated to {} characters for efficiency. Original size: {} chars. If essential information is missing, please try a more specific query.]",
-                            MAX_OUTPUT_SIZE,
+                            self.max_output_chars,
                             original_len
                         ));
                     }

@@ -27,7 +27,6 @@ pub struct AgentRuntimeConfig {
     pub interactive_run_budget_seconds: u64,
     pub llm_request_timeout_seconds: u64,
     pub tool_call_timeout_seconds: u64,
-    pub max_tool_result_chars: usize,
     pub max_tool_batch_chars: usize,
     pub max_attachment_bytes_per_request: usize,
     pub enable_self_reflection: bool,

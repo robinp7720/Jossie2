@@ -45,11 +45,22 @@ impl Integration for MockIntegration {
 fn registry_collects_tool_definitions() {
     let mut reg = IntegrationRegistry::new();
     assert_eq!(reg.all_tool_definitions().len(), 0);
-    reg.register(Arc::new(MockIntegration));
+    reg.register(Arc::new(MockIntegration)).unwrap();
     let tools = reg.all_tool_definitions();
     assert_eq!(tools.len(), 2);
     assert_eq!(tools[0].name, "mock_tool");
     assert_eq!(tools[1].name, "mock_echo");
+}
+
+#[test]
+fn registry_rejects_duplicate_integrations_without_mutating_definitions() {
+    let mut registry = IntegrationRegistry::new();
+    registry.register(Arc::new(MockIntegration)).unwrap();
+
+    let error = registry.register(Arc::new(MockIntegration)).unwrap_err();
+
+    assert!(error.to_string().contains("already registered"));
+    assert_eq!(registry.all_tool_definitions().len(), 2);
 }
 
 #[test]
@@ -90,7 +101,7 @@ fn http_effect_depends_on_method() {
 #[tokio::test]
 async fn registry_dispatches_to_correct_integration() {
     let mut reg = IntegrationRegistry::new();
-    reg.register(Arc::new(MockIntegration));
+    reg.register(Arc::new(MockIntegration)).unwrap();
 
     let call = ToolCall {
         id: "call_1".to_string(),
@@ -118,7 +129,7 @@ async fn registry_returns_error_for_unknown_tool() {
 #[tokio::test]
 async fn registry_execute_echo() {
     let mut reg = IntegrationRegistry::new();
-    reg.register(Arc::new(MockIntegration));
+    reg.register(Arc::new(MockIntegration)).unwrap();
 
     let call = ToolCall {
         id: "call_2".to_string(),
@@ -253,7 +264,7 @@ fn tool_schema_comes_from_argument_type() {
 
 #[tokio::test]
 async fn test_tool_output_truncation() {
-    let mut reg = IntegrationRegistry::new();
+    let mut reg = IntegrationRegistry::with_max_output_chars(1_000);
 
     struct LargeIntegration;
     #[async_trait::async_trait]
@@ -273,7 +284,7 @@ async fn test_tool_output_truncation() {
         }
     }
 
-    reg.register(Arc::new(LargeIntegration));
+    reg.register(Arc::new(LargeIntegration)).unwrap();
     let call = ToolCall {
         id: "call_1".to_string(),
         name: "large_tool".to_string(),
@@ -282,6 +293,7 @@ async fn test_tool_output_truncation() {
 
     let result = reg.execute(&call).await;
     assert!(result.content.contains("Original size: 150000 chars"));
+    assert!(result.content.starts_with(&"a".repeat(1_000)));
     // Content includes truncation marker + validation hint for partial results
     assert!(result.content.contains("[NOTICE: Output truncated"));
     assert!(result.content.contains("[HINT:"));

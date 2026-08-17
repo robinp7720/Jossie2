@@ -1,24 +1,21 @@
 use anyhow::{Context, anyhow};
 use jossie_core::integration::{EmptyToolArgs, Integration, ToolDefinition};
-use jossie_integration_email::{EmailIntegration, EmailSearchRequest};
+use jossie_integration_email::EmailIntegration;
 use jossie_integration_google::GoogleIntegration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
+
+mod provider;
+
+use provider::{GmailMailProvider, ImapMailProvider, MailProvider};
 
 const IMAP_PROVIDER: &str = "imap";
 const GMAIL_PROVIDER: &str = "gmail";
 const MAX_UNIFIED_MAIL_BODY_CHARS: usize = 12_000;
 
 pub struct MailIntegration {
-    email: Arc<EmailIntegration>,
-    google: Option<Arc<GoogleIntegration>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MailProvider {
-    Imap,
-    Gmail,
+    providers: Vec<Arc<dyn MailProvider>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
@@ -120,203 +117,83 @@ struct MailboxArgs {
 
 impl MailIntegration {
     pub fn new(email: Arc<EmailIntegration>, google: Option<Arc<GoogleIntegration>>) -> Self {
-        Self { email, google }
+        let mut providers: Vec<Arc<dyn MailProvider>> =
+            vec![Arc::new(ImapMailProvider::new(email))];
+        if let Some(google) = google {
+            providers.push(Arc::new(GmailMailProvider::new(google)));
+        }
+        Self { providers }
     }
 
-    fn unified_account_id(provider: MailProvider, provider_account_id: &str) -> String {
-        let prefix = match provider {
-            MailProvider::Imap => IMAP_PROVIDER,
-            MailProvider::Gmail => GMAIL_PROVIDER,
-        };
-        format!("{prefix}:{provider_account_id}")
+    fn unified_account_id(provider: &str, provider_account_id: &str) -> String {
+        format!("{provider}:{provider_account_id}")
     }
 
-    fn split_account_id(account_id: &str) -> anyhow::Result<(MailProvider, &str)> {
+    fn split_account_id(account_id: &str) -> anyhow::Result<(&str, &str)> {
         let (provider, provider_account_id) = account_id
             .split_once(':')
             .ok_or_else(|| anyhow!("Unsupported mail account ID: {account_id}"))?;
-        let provider = match provider {
-            IMAP_PROVIDER => MailProvider::Imap,
-            GMAIL_PROVIDER => MailProvider::Gmail,
-            _ => anyhow::bail!("Unknown mail provider prefix: {provider}"),
-        };
         if provider_account_id.trim().is_empty() {
             anyhow::bail!("Missing provider account ID in {account_id}");
         }
         Ok((provider, provider_account_id))
     }
 
-    async fn list_imap_accounts(&self) -> anyhow::Result<Vec<Value>> {
-        let accounts = self.email.mail_accounts().await?;
-
-        Ok(accounts
-            .into_iter()
-            .map(|account| {
-                let provider_account_id = account
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                json!({
-                    "id": Self::unified_account_id(MailProvider::Imap, provider_account_id),
-                    "provider": IMAP_PROVIDER,
-                    "provider_account_id": provider_account_id,
-                    "name": account.get("name").and_then(|value| value.as_str()).unwrap_or_default(),
-                    "email": account.get("email").and_then(|value| value.as_str()).unwrap_or_default(),
-                    "capabilities": ["search", "read", "send", "list_mailboxes"],
-                })
-            })
-            .collect())
-    }
-
-    async fn list_gmail_accounts(&self) -> anyhow::Result<Vec<Value>> {
-        let Some(google) = &self.google else {
-            return Ok(Vec::new());
-        };
-
-        let accounts = google.account_values().await?;
-
-        Ok(accounts
-            .into_iter()
-            .map(|account| {
-                let provider_account_id = account
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                json!({
-                    "id": Self::unified_account_id(MailProvider::Gmail, provider_account_id),
-                    "provider": GMAIL_PROVIDER,
-                    "provider_account_id": provider_account_id,
-                    "name": account.get("name").and_then(|value| value.as_str()).unwrap_or_default(),
-                    "email": account.get("email").and_then(|value| value.as_str()).unwrap_or_default(),
-                    "capabilities": ["search", "read", "send", "list_mailboxes"],
-                })
-            })
-            .collect())
+    fn provider(&self, name: &str) -> anyhow::Result<&dyn MailProvider> {
+        self.providers
+            .iter()
+            .find(|provider| provider.name() == name)
+            .map(AsRef::as_ref)
+            .ok_or_else(|| anyhow!("Unknown or unconfigured mail provider: {name}"))
     }
 
     async fn mail_list_accounts(&self) -> anyhow::Result<String> {
-        let mut accounts = self.list_imap_accounts().await?;
-        accounts.extend(self.list_gmail_accounts().await?);
+        let mut accounts = Vec::new();
+        for provider in &self.providers {
+            for account in provider.list_accounts().await? {
+                accounts.push(json!({
+                    "id": Self::unified_account_id(provider.name(), &account.id),
+                    "provider": provider.name(),
+                    "provider_account_id": account.id,
+                    "name": account.name,
+                    "email": account.email,
+                    "capabilities": ["search", "read", "send", "list_mailboxes"],
+                }));
+            }
+        }
         Ok(serde_json::to_string_pretty(&accounts)?)
     }
 
     async fn mail_search(&self, args: MailSearchArgs) -> anyhow::Result<String> {
         let account_id = args.account_id.clone();
-        let (provider, provider_account_id) = Self::split_account_id(&account_id)?;
-        match provider {
-            MailProvider::Imap => self.mail_search_imap(provider_account_id, args).await,
-            MailProvider::Gmail => self.mail_search_gmail(provider_account_id, args).await,
-        }
-    }
-
-    async fn mail_search_imap(
-        &self,
-        provider_account_id: &str,
-        args: MailSearchArgs,
-    ) -> anyhow::Result<String> {
-        let payload = self
-            .email
-            .mail_search(
-                provider_account_id,
-                EmailSearchRequest {
-                    query: args.query.clone(),
-                    terms: args.terms.clone(),
-                    match_mode: args.r#match.clone(),
-                    from: args.from.clone(),
-                    subject: args.subject.clone(),
-                    after: args.after.clone(),
-                    before: args.before.clone(),
-                    max_results: args.max_results,
-                    page_token: args.page_token.clone(),
-                    folder: args.mailbox.clone(),
-                },
-            )
-            .await?;
-        let messages = payload
-            .get("messages")
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let mailbox = normalize_optional_mailbox(args.mailbox.as_deref());
-        let normalized: Vec<Value> = messages
+        let (provider_name, provider_account_id) = Self::split_account_id(&account_id)?;
+        let provider = self.provider(provider_name)?;
+        let page = provider.search(provider_account_id, &args).await?;
+        let normalized: Vec<Value> = page
+            .messages
             .into_iter()
             .map(|message| {
-                let uid = message
-                    .get("uid")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or_default();
-                let uid_str = uid.to_string();
                 json!({
-                    "message_ref": Self::build_imap_message_ref(provider_account_id, &uid_str, mailbox.as_deref()),
-                    "from": message.get("from").and_then(|value| value.as_str()).unwrap_or_default(),
-                    "to": Vec::<String>::new(),
-                    "subject": message.get("subject").and_then(|value| value.as_str()).unwrap_or_default(),
-                    "date": message.get("date").and_then(|value| value.as_str()).unwrap_or_default(),
-                    "snippet": "",
-                    "mailbox": mailbox.clone().unwrap_or_else(|| "INBOX".to_string()),
+                    "message_ref": MessageRef {
+                        provider: provider.name().to_string(),
+                        account_id: Self::unified_account_id(provider.name(), provider_account_id),
+                        external_id: message.external_id,
+                        mailbox: message.mailbox.clone(),
+                        native: message.native,
+                    },
+                    "from": message.from,
+                    "to": message.to,
+                    "subject": message.subject,
+                    "date": message.date,
+                    "snippet": message.snippet,
+                    "mailbox": message.mailbox,
                 })
             })
             .collect();
 
         Ok(serde_json::to_string_pretty(&json!({
             "messages": normalized,
-            "next_page_token": payload.get("next_page_token").cloned().unwrap_or(Value::Null),
-        }))?)
-    }
-
-    async fn mail_search_gmail(
-        &self,
-        provider_account_id: &str,
-        args: MailSearchArgs,
-    ) -> anyhow::Result<String> {
-        let google = self
-            .google
-            .as_ref()
-            .ok_or_else(|| anyhow!("Google integration is not configured"))?;
-        let query = build_gmail_search_query(&args);
-        let payload = google
-            .mail_search_value(
-                provider_account_id,
-                &query,
-                args.max_results,
-                args.page_token.as_deref(),
-            )
-            .await?;
-        let messages = payload
-            .get("messages")
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let normalized: Vec<Value> = messages
-            .into_iter()
-            .map(|message| {
-                let headers = message
-                    .get("headers")
-                    .and_then(|value| value.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                let mailbox = normalize_optional_mailbox(args.mailbox.as_deref());
-                let external_id = message
-                    .get("id")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default();
-                json!({
-                    "message_ref": Self::build_gmail_message_ref(provider_account_id, external_id, mailbox.as_deref()),
-                    "from": header_value(&headers, "From"),
-                    "to": split_recipients(&header_value(&headers, "To")),
-                    "subject": header_value(&headers, "Subject"),
-                    "date": header_value(&headers, "Date"),
-                    "snippet": message.get("snippet").and_then(|value| value.as_str()).unwrap_or_default(),
-                    "mailbox": mailbox,
-                })
-            })
-            .collect();
-
-        Ok(serde_json::to_string_pretty(&json!({
-            "messages": normalized,
-            "next_page_token": payload.get("next_page_token").cloned().unwrap_or(Value::Null),
+            "next_page_token": page.next_page_token,
         }))?)
     }
 
@@ -340,112 +217,39 @@ impl MailIntegration {
         &self,
         message_ref: MessageRef,
     ) -> anyhow::Result<MailMessageEvidence> {
-        let account_id = message_ref.account_id.clone();
-        let (provider, provider_account_id) = Self::split_account_id(&account_id)?;
-        match provider {
-            MailProvider::Imap => {
-                let content = self
-                    .email
-                    .mail_read_content(
-                        provider_account_id,
-                        parse_imap_uid(&message_ref.external_id)?,
-                        message_ref.mailbox.as_deref(),
-                    )
-                    .await?;
-                Ok(MailMessageEvidence {
-                    message_ref,
-                    from: content.from,
-                    to: content.to,
-                    subject: content.subject,
-                    date: content.date,
-                    body: compact_mail_body(&content.body),
-                    body_source: content.body_source,
-                    attachments: content
-                        .attachments
-                        .into_iter()
-                        .map(|attachment| MailAttachmentRef {
-                            provider: IMAP_PROVIDER.to_string(),
-                            attachment_id: attachment.part_id,
-                            filename: attachment.filename,
-                            mime_type: attachment.mime_type,
-                            size: attachment.size,
-                        })
-                        .collect(),
+        let (provider_name, provider_account_id) = Self::split_account_id(&message_ref.account_id)?;
+        let provider = self.provider(provider_name)?;
+        anyhow::ensure!(
+            message_ref.provider == provider.name(),
+            "Message reference provider mismatch"
+        );
+        let content = provider
+            .read(
+                provider_account_id,
+                &message_ref.external_id,
+                message_ref.mailbox.as_deref(),
+            )
+            .await?;
+        Ok(MailMessageEvidence {
+            message_ref,
+            from: content.from,
+            to: content.to,
+            subject: content.subject,
+            date: content.date,
+            body: compact_mail_body(&content.body),
+            body_source: content.body_source,
+            attachments: content
+                .attachments
+                .into_iter()
+                .map(|attachment| MailAttachmentRef {
+                    provider: provider.name().to_string(),
+                    attachment_id: attachment.id,
+                    filename: attachment.filename,
+                    mime_type: attachment.mime_type,
+                    size: attachment.size,
                 })
-            }
-            MailProvider::Gmail => {
-                let google = self
-                    .google
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("Google integration is not configured"))?;
-                let payload = google
-                    .mail_read_value(provider_account_id, &message_ref.external_id)
-                    .await?;
-                let attachments = payload
-                    .get("attachments")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|attachment| {
-                        Some(MailAttachmentRef {
-                            provider: GMAIL_PROVIDER.to_string(),
-                            attachment_id: attachment.get("attachmentId")?.as_str()?.to_string(),
-                            filename: attachment
-                                .get("filename")
-                                .and_then(Value::as_str)
-                                .unwrap_or("attachment")
-                                .to_string(),
-                            mime_type: attachment
-                                .get("mimeType")
-                                .and_then(Value::as_str)
-                                .unwrap_or("application/octet-stream")
-                                .to_string(),
-                            size: attachment
-                                .get("size")
-                                .and_then(Value::as_u64)
-                                .and_then(|size| usize::try_from(size).ok())
-                                .unwrap_or_default(),
-                        })
-                    })
-                    .collect();
-                Ok(MailMessageEvidence {
-                    message_ref,
-                    from: payload
-                        .get("from")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    to: split_recipients(
-                        payload
-                            .get("to")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default(),
-                    ),
-                    subject: payload
-                        .get("subject")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    date: payload
-                        .get("date")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    body: compact_mail_body(
-                        payload
-                            .get("body")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default(),
-                    ),
-                    body_source: payload
-                        .get("body_source")
-                        .and_then(Value::as_str)
-                        .unwrap_or("full")
-                        .to_string(),
-                    attachments,
-                })
-            }
-        }
+                .collect(),
+        })
     }
 
     pub async fn download_attachment(
@@ -453,136 +257,45 @@ impl MailIntegration {
         message_ref: &MessageRef,
         attachment: &MailAttachmentRef,
     ) -> anyhow::Result<Vec<u8>> {
-        let (provider, provider_account_id) = Self::split_account_id(&message_ref.account_id)?;
-        match provider {
-            MailProvider::Imap => {
-                anyhow::ensure!(
-                    attachment.provider == IMAP_PROVIDER,
-                    "Attachment provider mismatch"
-                );
-                self.email
-                    .mail_read_attachment(
-                        provider_account_id,
-                        parse_imap_uid(&message_ref.external_id)?,
-                        message_ref.mailbox.as_deref(),
-                        &attachment.attachment_id,
-                    )
-                    .await
-            }
-            MailProvider::Gmail => {
-                anyhow::ensure!(
-                    attachment.provider == GMAIL_PROVIDER,
-                    "Attachment provider mismatch"
-                );
-                let google = self
-                    .google
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("Google integration is not configured"))?;
-                google
-                    .mail_download_attachment(
-                        provider_account_id,
-                        &message_ref.external_id,
-                        &attachment.attachment_id,
-                    )
-                    .await
-            }
-        }
+        let (provider_name, provider_account_id) = Self::split_account_id(&message_ref.account_id)?;
+        let provider = self.provider(provider_name)?;
+        anyhow::ensure!(
+            message_ref.provider == provider.name() && attachment.provider == provider.name(),
+            "Attachment provider mismatch"
+        );
+        provider
+            .download_attachment(
+                provider_account_id,
+                &message_ref.external_id,
+                message_ref.mailbox.as_deref(),
+                &attachment.attachment_id,
+            )
+            .await
     }
 
     async fn mail_send(&self, args: MailSendArgs) -> anyhow::Result<String> {
-        let (provider, provider_account_id) = Self::split_account_id(&args.account_id)?;
-        let result = match provider {
-            MailProvider::Imap => {
-                self.email
-                    .mail_send(provider_account_id, &args.to, &args.subject, &args.body)
-                    .await?
-            }
-            MailProvider::Gmail => {
-                let google = self
-                    .google
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("Google integration is not configured"))?;
-                google
-                    .mail_send(provider_account_id, &args.to, &args.subject, &args.body)
-                    .await?
-            }
-        };
+        let (provider_name, provider_account_id) = Self::split_account_id(&args.account_id)?;
+        let provider = self.provider(provider_name)?;
+        let result = provider
+            .send(provider_account_id, &args.to, &args.subject, &args.body)
+            .await?;
 
         Ok(serde_json::to_string_pretty(&json!({
             "status": "sent",
-            "provider": provider_name(provider),
+            "provider": provider.name(),
             "account_id": args.account_id,
             "result": result,
         }))?)
     }
 
     async fn mail_list_mailboxes(&self, args: MailboxArgs) -> anyhow::Result<String> {
-        let (provider, provider_account_id) = Self::split_account_id(&args.account_id)?;
-        let mailboxes = match provider {
-            MailProvider::Imap => {
-                let folders = self.email.mail_folders(provider_account_id).await?;
-                folders
-                    .into_iter()
-                    .map(|name| {
-                        json!({
-                            "name": name,
-                            "display_name": name,
-                            "kind": "folder",
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            }
-            MailProvider::Gmail => {
-                let google = self
-                    .google
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("Google integration is not configured"))?;
-                let labels = google.mail_label_values(provider_account_id).await?;
-                labels
-                    .into_iter()
-                    .map(|label| {
-                        json!({
-                            "name": label.get("name").and_then(|value| value.as_str()).unwrap_or_default(),
-                            "display_name": label.get("name").and_then(|value| value.as_str()).unwrap_or_default(),
-                            "kind": label.get("type").and_then(|value| value.as_str()).unwrap_or("label").to_ascii_lowercase(),
-                            "id": label.get("id").and_then(|value| value.as_str()).unwrap_or_default(),
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            }
-        };
+        let (provider_name, provider_account_id) = Self::split_account_id(&args.account_id)?;
+        let mailboxes = self
+            .provider(provider_name)?
+            .list_mailboxes(provider_account_id)
+            .await?;
 
         Ok(serde_json::to_string_pretty(&mailboxes)?)
-    }
-
-    fn build_imap_message_ref(
-        provider_account_id: &str,
-        external_id: &str,
-        mailbox: Option<&str>,
-    ) -> MessageRef {
-        MessageRef {
-            provider: IMAP_PROVIDER.to_string(),
-            account_id: Self::unified_account_id(MailProvider::Imap, provider_account_id),
-            external_id: external_id.to_string(),
-            mailbox: mailbox.map(|value| value.to_string()),
-            native: Some(json!({
-                "uid": external_id.parse::<u32>().ok(),
-            })),
-        }
-    }
-
-    fn build_gmail_message_ref(
-        provider_account_id: &str,
-        external_id: &str,
-        mailbox: Option<&str>,
-    ) -> MessageRef {
-        MessageRef {
-            provider: GMAIL_PROVIDER.to_string(),
-            account_id: Self::unified_account_id(MailProvider::Gmail, provider_account_id),
-            external_id: external_id.to_string(),
-            mailbox: mailbox.map(|value| value.to_string()),
-            native: None,
-        }
     }
 }
 
@@ -642,13 +355,6 @@ impl Integration for MailIntegration {
             }
             _ => anyhow::bail!("Unknown mail tool: {tool_name}"),
         }
-    }
-}
-
-fn provider_name(provider: MailProvider) -> &'static str {
-    match provider {
-        MailProvider::Imap => IMAP_PROVIDER,
-        MailProvider::Gmail => GMAIL_PROVIDER,
     }
 }
 
@@ -758,8 +464,9 @@ fn header_value(headers: &[Value], name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MailIntegration, MailProvider, MailSearchArgs, MessageRef, build_gmail_search_query,
-        compact_mail_body, header_value, merge_gmail_query, split_recipients,
+        GMAIL_PROVIDER, IMAP_PROVIDER, MailIntegration, MailSearchArgs, MessageRef,
+        build_gmail_search_query, compact_mail_body, header_value, merge_gmail_query,
+        split_recipients,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -770,11 +477,11 @@ mod tests {
     #[test]
     fn builds_prefixed_unified_account_ids() {
         assert_eq!(
-            MailIntegration::unified_account_id(MailProvider::Imap, "default"),
+            MailIntegration::unified_account_id(IMAP_PROVIDER, "default"),
             "imap:default"
         );
         assert_eq!(
-            MailIntegration::unified_account_id(MailProvider::Gmail, "acc_1"),
+            MailIntegration::unified_account_id(GMAIL_PROVIDER, "acc_1"),
             "gmail:acc_1"
         );
     }

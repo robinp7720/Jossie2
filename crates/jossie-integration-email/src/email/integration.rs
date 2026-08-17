@@ -4,14 +4,6 @@ impl Integration for EmailIntegration {
         "email"
     }
 
-    fn tools(&self) -> Vec<ToolDefinition> {
-        Vec::new()
-    }
-
-    async fn execute(&self, tool_name: &str, _arguments: &str) -> anyhow::Result<String> {
-        anyhow::bail!("Unknown email tool: {tool_name}")
-    }
-
     async fn check_onboarding(&self) -> anyhow::Result<OnboardingStatus> {
         // If default config exists, we are good.
         if self.default_config.is_some() {
