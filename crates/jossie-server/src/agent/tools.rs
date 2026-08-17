@@ -2,10 +2,34 @@ pub async fn run_agent_loop(state: &AppState, conv_id: Uuid) -> anyhow::Result<S
     run_agent_loop_with_options(state, conv_id, AgentRunOptions::default()).await
 }
 
+#[derive(Debug)]
+struct ConversationBusy {
+    conversation_id: Uuid,
+}
+
+impl std::fmt::Display for ConversationBusy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Conversation {} is already being processed",
+            self.conversation_id
+        )
+    }
+}
+
+impl std::error::Error for ConversationBusy {}
+
+fn is_conversation_busy(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ConversationBusy>().is_some()
+}
+
 async fn claim_conversation(state: &AppState, conv_id: Uuid) -> anyhow::Result<()> {
     let mut active = state.active_conversations.write().await;
     if !active.insert(conv_id) {
-        anyhow::bail!("Conversation {} is already being processed", conv_id);
+        return Err(ConversationBusy {
+            conversation_id: conv_id,
+        }
+        .into());
     }
     drop(active);
     state.clear_cancel(conv_id).await;
@@ -321,11 +345,8 @@ async fn emit_stream_event(
     event_tx: Option<&tokio::sync::mpsc::Sender<ServerEvent>>,
     event: ServerEvent,
 ) {
-    crate::events::persist_activity_event(&state.db, &event).await;
-    let work_events = crate::events::persist_work_event(&state.db, &event).await;
-    let _ = state.event_tx.send(event.clone());
+    let work_events = state.publish_event(event.clone()).await;
     for work_event in work_events {
-        let _ = state.event_tx.send(work_event.clone());
         if let Some(tx) = event_tx {
             let _ = tx.send(work_event).await;
         }

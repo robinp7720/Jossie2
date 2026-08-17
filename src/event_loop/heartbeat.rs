@@ -167,7 +167,8 @@ async fn maybe_run_heartbeat(state: &Arc<AppState>) -> anyhow::Result<()> {
         conversation_id: target.conversation_id,
         source: "heartbeat".to_string(),
         message: assistant_msg.content.clone(),
-    });
+    })
+    .await;
     state
         .db
         .update_work_run(

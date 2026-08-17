@@ -1,6 +1,10 @@
 use crate::events::{ServerEvent, persist_message, preview_text};
 use crate::state::AppState;
 use futures::FutureExt;
+use jossie_core::events::{
+    CALENDAR_EVENT, CALENDAR_EVENT_BATCH, CALENDAR_EVENT_UPDATED, GMAIL_NEW_MESSAGE,
+    HEARTBEAT_CHECK, IntegrationEventKind, NEW_EMAIL, NEW_EMAIL_BATCH, integration_event_kind,
+};
 use jossie_core::integration::{CapabilityGroup, IntegrationRegistry, ToolEffect, tool_metadata};
 use jossie_core::types::{Attachment, Message, Role};
 use jossie_db::{IntegrationEvent, MemoryEntry, MemoryPromptEntry, NewPendingAction};
@@ -23,3 +27,7 @@ include!("agent/event_mode.rs");
 include!("agent/context_window.rs");
 include!("agent/tests.rs");
 include!("agent/knowledge_models.rs");
+
+pub fn is_conversation_busy_error(error: &anyhow::Error) -> bool {
+    is_conversation_busy(error)
+}

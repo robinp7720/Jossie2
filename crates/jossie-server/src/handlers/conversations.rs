@@ -88,12 +88,14 @@ pub async fn update_conversation(
         .update_conversation(id, title, request.archived)
         .await?
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("Conversation not found")))?;
-    state.publish_event(ServerEvent::ConversationUpdated {
-        conversation_id: id,
-        title: conversation.title.clone(),
-        archived_at: conversation.archived_at.map(|value| value.to_rfc3339()),
-        updated_at: conversation.updated_at.to_rfc3339(),
-    });
+    state
+        .publish_event(ServerEvent::ConversationUpdated {
+            conversation_id: id,
+            title: conversation.title.clone(),
+            archived_at: conversation.archived_at.map(|value| value.to_rfc3339()),
+            updated_at: conversation.updated_at.to_rfc3339(),
+        })
+        .await;
     Ok(Json(conversation))
 }
 
@@ -367,9 +369,11 @@ pub async fn delete_conversation(
             );
         }
     }
-    state.publish_event(ServerEvent::ConversationDeleted {
-        conversation_id: id,
-    });
+    state
+        .publish_event(ServerEvent::ConversationDeleted {
+            conversation_id: id,
+        })
+        .await;
     Ok(Json(DeleteConversationResponse {
         conversation_id: id,
         deleted: true,

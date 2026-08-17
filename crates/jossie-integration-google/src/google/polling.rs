@@ -42,7 +42,7 @@ impl GoogleIntegration {
                         .insert_integration_event(
                             "google",
                             &acc.id,
-                            "gmail_new_message",
+                            GMAIL_NEW_MESSAGE,
                             &msg.id,
                             &payload,
                         )
@@ -132,7 +132,7 @@ impl GoogleIntegration {
                             .insert_integration_event(
                                 "google",
                                 &acc.id,
-                                "calendar_event_updated",
+                                CALENDAR_EVENT_UPDATED,
                                 &dedupe_key,
                                 &payload,
                             )

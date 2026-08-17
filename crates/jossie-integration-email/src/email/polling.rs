@@ -254,7 +254,7 @@ impl EmailIntegration {
             db.insert_integration_event(
                 EMAIL_INTEGRATION,
                 &account.id,
-                "new_email",
+                NEW_EMAIL,
                 &message.message_unique_id,
                 &payload,
             )

@@ -734,18 +734,22 @@ mod tests {
 
 pub async fn persist_message(state: &AppState, message: &Message) -> anyhow::Result<()> {
     state.db.save_message(message).await?;
-    state.publish_event(ServerEvent::MessageCreated {
-        conversation_id: message.conversation_id,
-        message: message.clone(),
-    });
+    state
+        .publish_event(ServerEvent::MessageCreated {
+            conversation_id: message.conversation_id,
+            message: message.clone(),
+        })
+        .await;
 
     if let Some(conversation) = state.db.get_conversation(message.conversation_id).await? {
-        state.publish_event(ServerEvent::ConversationUpdated {
-            conversation_id: conversation.id,
-            title: conversation.title,
-            archived_at: conversation.archived_at.map(|value| value.to_rfc3339()),
-            updated_at: conversation.updated_at.to_rfc3339(),
-        });
+        state
+            .publish_event(ServerEvent::ConversationUpdated {
+                conversation_id: conversation.id,
+                title: conversation.title,
+                archived_at: conversation.archived_at.map(|value| value.to_rfc3339()),
+                updated_at: conversation.updated_at.to_rfc3339(),
+            })
+            .await;
     }
 
     Ok(())

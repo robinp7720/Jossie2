@@ -295,7 +295,8 @@ async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
             conversation_id,
             source: "oob_message".to_string(),
             message: assistant_msg.content.clone(),
-        });
+        })
+        .await;
         state.db.mark_oob_message_sent(&msg.id).await?;
         state
             .db

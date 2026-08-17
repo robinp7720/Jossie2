@@ -131,7 +131,7 @@ pub async fn run_agent_loop_when_available(
         match run_agent_loop_with_options(state, conv_id, options.clone()).await {
             Ok(response) => return Ok(response),
             Err(error)
-                if error.to_string().contains("already being processed")
+                if is_conversation_busy(&error)
                     && attempt + 1 < CONVERSATION_BUSY_RETRY_ATTEMPTS =>
             {
                 if attempt == 0 {
@@ -216,6 +216,315 @@ async fn complete_agent_iteration(
             state.agent.llm_request_timeout_seconds
         )
     })?
+}
+
+enum AgentIterationOutcome {
+    Continue,
+    Final(String),
+    WaitingForApproval(String),
+    Paused(String),
+    Cancelled,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_agent_iteration_output(
+    state: &AppState,
+    conv_id: Uuid,
+    run_id: &str,
+    content: String,
+    tool_calls: Vec<jossie_core::ToolCall>,
+    response_items: Vec<serde_json::Value>,
+    event_tx: Option<&tokio::sync::mpsc::Sender<ServerEvent>>,
+    authorization_context: &str,
+    last_user_msg: &str,
+    messages: &mut Vec<Message>,
+    chained_messages: &mut Vec<Message>,
+    previous_response_id: &mut Option<String>,
+    toolset: &mut RunToolset,
+    goal_tracker: &mut GoalTracker,
+    reflection_retries_remaining: &mut usize,
+    premature_goal_finals: &mut usize,
+) -> anyhow::Result<AgentIterationOutcome> {
+    if tool_calls.is_empty() {
+        if *reflection_retries_remaining > 0
+            && let Some(feedback) = self_reflect(state, messages, last_user_msg, &content).await
+        {
+            *reflection_retries_remaining -= 1;
+            tracing::info!(conversation_id = %conv_id, run_id, "Self-reflection retry: {feedback}");
+            emit_stream_event(
+                state,
+                event_tx,
+                ServerEvent::ReflectionRetry {
+                    conversation_id: conv_id,
+                    run_id: run_id.to_string(),
+                    feedback: feedback.clone(),
+                },
+            )
+            .await;
+            emit_stream_event(
+                state,
+                event_tx,
+                ServerEvent::AssistantReset {
+                    conversation_id: conv_id,
+                    run_id: run_id.to_string(),
+                    reason: "reflection_retry".to_string(),
+                },
+            )
+            .await;
+            messages.push(
+                Message::transient(Role::Assistant, content).with_response_items(response_items),
+            );
+            let feedback_message = Message::transient(
+                Role::System,
+                format!(
+                    "[SELF-REFLECTION FEEDBACK: Your response needs improvement. {feedback}. Please revise your response.]"
+                ),
+            );
+            messages.push(feedback_message.clone());
+            chained_messages.push(feedback_message);
+            return Ok(AgentIterationOutcome::Continue);
+        }
+
+        if let Some(continuation) = goal_tracker.active_goal_continuation_message() {
+            *premature_goal_finals += 1;
+            tracing::warn!(
+                conversation_id = %conv_id,
+                run_id,
+                attempt = *premature_goal_finals,
+                "Withholding a final reply because its tracked goal is still active"
+            );
+            emit_stream_event(
+                state,
+                event_tx,
+                ServerEvent::AssistantReset {
+                    conversation_id: conv_id,
+                    run_id: run_id.to_string(),
+                    reason: "active_goal_continuation".to_string(),
+                },
+            )
+            .await;
+            if *premature_goal_finals >= PREMATURE_GOAL_FINAL_LIMIT {
+                let partial = pause_run_with_checkpoint(
+                    state,
+                    conv_id,
+                    run_id,
+                    goal_tracker,
+                    "The agent repeatedly stopped while its tracked goal was still active",
+                    event_tx,
+                )
+                .await?;
+                emit_partial_response(state, conv_id, run_id, event_tx, &partial).await;
+                return Ok(AgentIterationOutcome::Paused(partial));
+            }
+            messages.push(
+                Message::transient(Role::Assistant, content).with_response_items(response_items),
+            );
+            let continuation = Message::transient(Role::System, continuation)
+                .with_name("active_goal_continuation".to_string());
+            messages.push(continuation.clone());
+            chained_messages.push(continuation);
+            return Ok(AgentIterationOutcome::Continue);
+        }
+
+        persist_final_assistant_response(state, conv_id, last_user_msg.to_string(), content.clone())
+            .await?;
+        return Ok(AgentIterationOutcome::Final(content));
+    }
+
+    if let Some(loop_warning) = goal_tracker.note_tool_batch(&tool_calls) {
+        tracing::warn!(conversation_id = %conv_id, run_id, "Loop guard triggered: {loop_warning}");
+        emit_stream_event(
+            state,
+            event_tx,
+            ServerEvent::AssistantReset {
+                conversation_id: conv_id,
+                run_id: run_id.to_string(),
+                reason: "loop_guard".to_string(),
+            },
+        )
+        .await;
+        if goal_tracker.should_stop_for_repetition() {
+            if goal_tracker.active_goal_continuation_message().is_some() {
+                let partial = pause_run_with_checkpoint(
+                    state,
+                    conv_id,
+                    run_id,
+                    goal_tracker,
+                    "The agent repeated the same action without advancing its tracked goal",
+                    event_tx,
+                )
+                .await?;
+                emit_partial_response(state, conv_id, run_id, event_tx, &partial).await;
+                return Ok(AgentIterationOutcome::Paused(partial));
+            }
+            let fallback = goal_tracker.build_stuck_message();
+            emit_partial_response(state, conv_id, run_id, event_tx, &fallback).await;
+            let message = Message::new(conv_id, Role::Assistant, fallback.clone());
+            persist_message(state, &message).await?;
+            return Ok(AgentIterationOutcome::Final(fallback));
+        }
+
+        messages.push(Message::transient(Role::Assistant, content));
+        messages.push(Message::transient(
+            Role::System,
+            format!("[LOOP GUARD: {loop_warning}]"),
+        ));
+        *previous_response_id = None;
+        return Ok(AgentIterationOutcome::Continue);
+    }
+
+    // Record every accepted tool-call batch at the same point for streaming and
+    // non-streaming runs, including internal planning/capability calls.
+    goal_tracker.record_tool_calls(&tool_calls);
+    let assistant_message = Message::new(conv_id, Role::Assistant, content)
+        .with_tool_calls(serde_json::to_value(&tool_calls)?)
+        .with_response_items(response_items);
+    persist_message(state, &assistant_message).await?;
+    messages.push(assistant_message);
+
+    let capability_message_start = messages.len();
+    if process_work_plan_updates(
+        state,
+        conv_id,
+        run_id,
+        event_tx,
+        &tool_calls,
+        messages,
+        goal_tracker,
+    )
+    .await?
+        || process_capability_activation(
+            state,
+            conv_id,
+            run_id,
+            event_tx,
+            toolset,
+            &tool_calls,
+            messages,
+            goal_tracker,
+        )
+        .await?
+    {
+        chained_messages.extend_from_slice(&messages[capability_message_start..]);
+        return Ok(AgentIterationOutcome::Continue);
+    }
+
+    let prepared_calls = prepare_tool_calls_for_execution(
+        &tool_calls,
+        conv_id,
+        last_user_msg,
+        goal_tracker.durable_goal.as_ref(),
+    );
+    let (prepared_calls, pending_actions) = partition_authorized_calls(
+        state,
+        conv_id,
+        run_id,
+        event_tx,
+        prepared_calls,
+        authorization_context,
+        messages,
+    )
+    .await?;
+    let (prepared_calls, repeated_results) = goal_tracker.split_repeated_reads(prepared_calls);
+
+    for call in &prepared_calls {
+        tracing::info!(tool = %call.name, arguments = %call.arguments, "Executing tool");
+        emit_stream_event(
+            state,
+            event_tx,
+            ServerEvent::ToolCalled {
+                conversation_id: conv_id,
+                run_id: run_id.to_string(),
+                call_id: call.id.clone(),
+                tool: call.name.clone(),
+                arguments_preview: preview_text(&call.arguments, 160),
+            },
+        )
+        .await;
+        emit_stream_event(
+            state,
+            event_tx,
+            ServerEvent::ToolStarted {
+                conversation_id: conv_id,
+                run_id: run_id.to_string(),
+                call_id: call.id.clone(),
+                tool: call.name.clone(),
+            },
+        )
+        .await;
+    }
+
+    let mut results = execute_tool_batch(state, conv_id, prepared_calls).await;
+    results.extend(repeated_results);
+    if ensure_run_not_cancelled(state, conv_id, run_id, event_tx)
+        .await
+        .is_err()
+    {
+        return Ok(AgentIterationOutcome::Cancelled);
+    }
+
+    for (_, call, result) in results {
+        emit_stream_event(
+            state,
+            event_tx,
+            ServerEvent::ToolFinished {
+                conversation_id: conv_id,
+                run_id: run_id.to_string(),
+                call_id: call.id.clone(),
+                tool: call.name.clone(),
+                result_preview: preview_text(&result.content, 220),
+                is_error: result.is_error,
+            },
+        )
+        .await;
+        goal_tracker.record_tool_result(&call, &result);
+        let tool_message = Message::new(conv_id, Role::Tool, result.content)
+            .with_tool_call_id(call.id)
+            .with_name(call.name);
+        persist_message(state, &tool_message).await?;
+        messages.push(tool_message.clone());
+        chained_messages.push(tool_message);
+    }
+
+    if let Some(action) = pending_actions.first() {
+        emit_stream_event(
+            state,
+            event_tx,
+            ServerEvent::RunWaitingForApproval {
+                conversation_id: conv_id,
+                run_id: run_id.to_string(),
+                batch_id: action.batch_id.clone(),
+            },
+        )
+        .await;
+        return Ok(AgentIterationOutcome::WaitingForApproval(format!(
+            "I need your approval before I {}. Review the pending action to continue.",
+            action.title.to_lowercase()
+        )));
+    }
+
+    Ok(AgentIterationOutcome::Continue)
+}
+
+async fn emit_partial_response(
+    state: &AppState,
+    conv_id: Uuid,
+    run_id: &str,
+    event_tx: Option<&tokio::sync::mpsc::Sender<ServerEvent>>,
+    content: &str,
+) {
+    if event_tx.is_some() {
+        emit_stream_event(
+            state,
+            event_tx,
+            ServerEvent::AssistantDelta {
+                conversation_id: conv_id,
+                run_id: run_id.to_string(),
+                content: content.to_string(),
+            },
+        )
+        .await;
+    }
 }
 
 async fn run_agent_loop_inner(
@@ -337,220 +646,31 @@ async fn run_agent_loop_inner(
         }
         previous_response_id = output.response_id.clone();
         chained_messages.clear();
-        let content = output.content;
-        let tool_calls = output.tool_calls;
-        let response_items = output.response_items;
-
-        if tool_calls.is_empty() {
-            if reflection_retries_remaining > 0
-                && let Some(feedback) =
-                    self_reflect(state, &messages, &last_user_msg, &content).await
-            {
-                    reflection_retries_remaining -= 1;
-                    tracing::info!("Self-reflection retry. Feedback: {feedback}");
-                    // Add the assistant's response and feedback, then continue the loop
-                    messages.push(
-                        Message::transient(Role::Assistant, content.clone())
-                            .with_response_items(response_items.clone()),
-                    );
-                    let feedback_message = Message::transient(
-                        Role::System,
-                        format!(
-                            "[SELF-REFLECTION FEEDBACK: Your response needs improvement. {}. Please revise your response.]",
-                            feedback
-                        ),
-                    );
-                    messages.push(feedback_message.clone());
-                    chained_messages.push(feedback_message);
-                    continue;
-            }
-
-            if let Some(continuation) = goal_tracker.active_goal_continuation_message() {
-                premature_goal_finals += 1;
-                tracing::warn!(
-                    conversation_id = %conv_id,
-                    run_id,
-                    attempt = premature_goal_finals,
-                    "Withholding a final reply because its tracked goal is still active"
-                );
-                if premature_goal_finals >= PREMATURE_GOAL_FINAL_LIMIT {
-                    return pause_run_with_checkpoint(
-                        state,
-                        conv_id,
-                        run_id,
-                        &goal_tracker,
-                        "The agent repeatedly stopped while its tracked goal was still active",
-                        None,
-                    )
-                    .await;
-                }
-                messages.push(
-                    Message::transient(Role::Assistant, content)
-                        .with_response_items(response_items),
-                );
-                let continuation = Message::transient(Role::System, continuation)
-                    .with_name("active_goal_continuation".to_string());
-                messages.push(continuation.clone());
-                chained_messages.push(continuation);
-                continue;
-            }
-
-            persist_final_assistant_response(state, conv_id, last_user_msg, content.clone())
-                .await?;
-            return Ok(content);
-        }
-
-        if let Some(loop_warning) = goal_tracker.note_tool_batch(&tool_calls) {
-            tracing::warn!("Loop guard triggered for conversation {conv_id}: {loop_warning}");
-            if goal_tracker.should_stop_for_repetition() {
-                if goal_tracker.active_goal_continuation_message().is_some() {
-                    return pause_run_with_checkpoint(
-                        state,
-                        conv_id,
-                        run_id,
-                        &goal_tracker,
-                        "The agent repeated the same action without advancing its tracked goal",
-                        None,
-                    )
-                    .await;
-                }
-                let fallback = goal_tracker.build_stuck_message();
-                let msg = Message::new(conv_id, Role::Assistant, fallback.clone());
-                persist_message(state, &msg).await?;
-                return Ok(fallback);
-            }
-
-            messages.push(Message::transient(Role::Assistant, content.clone()));
-            messages.push(Message::transient(
-                Role::System,
-                format!("[LOOP GUARD: {loop_warning}]"),
-            ));
-            previous_response_id = None;
-            continue;
-        }
-
-        goal_tracker.record_tool_calls(&tool_calls);
-
-        let tc_json = serde_json::to_value(&tool_calls)?;
-        let assistant_msg = Message::new(conv_id, Role::Assistant, content.clone())
-            .with_tool_calls(tc_json)
-            .with_response_items(response_items);
-        persist_message(state, &assistant_msg).await?;
-        messages.push(assistant_msg);
-
-        let capability_message_start = messages.len();
-        if process_work_plan_updates(
+        match process_agent_iteration_output(
             state,
             conv_id,
             run_id,
+            output.content,
+            output.tool_calls,
+            output.response_items,
             None,
-            &tool_calls,
-            &mut messages,
-            &mut goal_tracker,
-        )
-        .await?
-        {
-            chained_messages.extend_from_slice(&messages[capability_message_start..]);
-            continue;
-        }
-        if process_capability_activation(
-            state,
-            conv_id,
-            run_id,
-            None,
-            &mut toolset,
-            &tool_calls,
-            &mut messages,
-            &mut goal_tracker,
-        )
-        .await?
-        {
-            chained_messages.extend_from_slice(&messages[capability_message_start..]);
-            continue;
-        }
-
-        let prepared_calls = prepare_tool_calls_for_execution(
-            &tool_calls,
-            conv_id,
-            &last_user_msg,
-            goal_tracker.durable_goal.as_ref(),
-        );
-        let (prepared_calls, pending_actions) = partition_authorized_calls(
-            state,
-            conv_id,
-            run_id,
-            None,
-            prepared_calls,
             authorization_context.unwrap_or(&last_user_msg),
-            &messages,
+            &last_user_msg,
+            &mut messages,
+            &mut chained_messages,
+            &mut previous_response_id,
+            &mut toolset,
+            &mut goal_tracker,
+            &mut reflection_retries_remaining,
+            &mut premature_goal_finals,
         )
-        .await?;
-        let (prepared_calls, repeated_results) = goal_tracker.split_repeated_reads(prepared_calls);
-
-        for call in &prepared_calls {
-            tracing::info!(
-                "Executing tool: {} with args: {}",
-                call.name,
-                call.arguments
-            );
-            emit_stream_event(
-                state,
-                None,
-                ServerEvent::ToolStarted {
-                    conversation_id: conv_id,
-                    run_id: run_id.to_string(),
-                    call_id: call.id.clone(),
-                    tool: call.name.clone(),
-                },
-            )
-            .await;
-        }
-        let mut results = execute_tool_batch(state, conv_id, prepared_calls).await;
-        results.extend(repeated_results);
-        ensure_run_not_cancelled(state, conv_id, run_id, None).await?;
-
-        for (_, call, result) in results {
-            tracing::info!(
-                "Tool {} finished. Result preview: {:.200}...",
-                call.name,
-                result.content
-            );
-            emit_stream_event(
-                state,
-                None,
-                ServerEvent::ToolFinished {
-                    conversation_id: conv_id,
-                    run_id: run_id.to_string(),
-                    call_id: call.id.clone(),
-                    tool: call.name.clone(),
-                    result_preview: preview_text(&result.content, 220),
-                    is_error: result.is_error,
-                },
-            )
-            .await;
-            goal_tracker.record_tool_result(&call, &result);
-            let tool_msg = Message::new(conv_id, Role::Tool, result.content)
-                .with_tool_call_id(call.id.clone())
-                .with_name(call.name.clone());
-            persist_message(state, &tool_msg).await?;
-            messages.push(tool_msg.clone());
-            chained_messages.push(tool_msg);
-        }
-        if let Some(action) = pending_actions.first() {
-            emit_stream_event(
-                state,
-                None,
-                ServerEvent::RunWaitingForApproval {
-                    conversation_id: conv_id,
-                    run_id: run_id.to_string(),
-                    batch_id: action.batch_id.clone(),
-                },
-            )
-            .await;
-            return Ok(format!(
-                "I need your approval before I {}. Review the pending action to continue.",
-                action.title.to_lowercase()
-            ));
+        .await?
+        {
+            AgentIterationOutcome::Continue => continue,
+            AgentIterationOutcome::Final(response)
+            | AgentIterationOutcome::WaitingForApproval(response)
+            | AgentIterationOutcome::Paused(response) => return Ok(response),
+            AgentIterationOutcome::Cancelled => anyhow::bail!("Run cancelled"),
         }
     }
 

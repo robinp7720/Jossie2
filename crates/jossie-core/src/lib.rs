@@ -1,4 +1,5 @@
 pub mod config;
+pub mod events;
 pub mod integration;
 pub mod text;
 pub mod types;

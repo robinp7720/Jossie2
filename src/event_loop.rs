@@ -1,5 +1,9 @@
 use chrono::{DateTime, Utc};
 use croner::Cron;
+use jossie_core::events::{
+    CALENDAR_EVENT_BATCH, CALENDAR_EVENT_UPDATED, GMAIL_NEW_MESSAGE, HEARTBEAT_CHECK,
+    IntegrationEventKind, NEW_EMAIL, NEW_EMAIL_BATCH, integration_event_kind,
+};
 use jossie_core::types::{Message, Role};
 use jossie_db::IntegrationEvent;
 use jossie_server::AppState;
@@ -17,7 +21,7 @@ const STALE_PROCESSING_EVENT_TIMEOUT_SECS: i64 = 60 * 60;
 const HEARTBEAT_SETTINGS_NAMESPACE: &str = "heartbeat";
 const HEARTBEAT_LAST_RUN_KEY: &str = "last_run_at";
 const HEARTBEAT_UPCOMING_WINDOW_HOURS: i64 = 24;
-const HEARTBEAT_EVENT_TYPE: &str = "heartbeat_check";
+const HEARTBEAT_EVENT_TYPE: &str = HEARTBEAT_CHECK;
 
 include!("event_loop/worker.rs");
 include!("event_loop/events.rs");

@@ -262,10 +262,12 @@ async fn publish_goal(
         .as_deref()
         .and_then(|id| Uuid::parse_str(id).ok())
     {
-        state.publish_event(ServerEvent::GoalUpdated {
-            conversation_id,
-            goal: goal.clone(),
-        });
+        state
+            .publish_event(ServerEvent::GoalUpdated {
+                conversation_id,
+                goal: goal.clone(),
+            })
+            .await;
     }
     Ok(Json(goal))
 }

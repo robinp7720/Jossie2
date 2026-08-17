@@ -88,11 +88,12 @@ async fn maybe_send_telegram_message(
 }
 
 fn is_email_event(event: &IntegrationEvent) -> bool {
-    matches!(event.event_type.as_str(), "new_email" | "gmail_new_message")
+    integration_event_kind(&event.event_type) == IntegrationEventKind::Email
+        && event.event_type != NEW_EMAIL_BATCH
 }
 
 fn is_calendar_event(event: &IntegrationEvent) -> bool {
-    matches!(event.event_type.as_str(), "calendar_event_updated")
+    event.event_type == CALENDAR_EVENT_UPDATED
 }
 
 async fn handle_event(
@@ -267,7 +268,8 @@ async fn process_event_inner(
         conversation_id: target.conversation_id,
         source: "integration_event".to_string(),
         message: assistant_msg.content.clone(),
-    });
+    })
+    .await;
     state.db.mark_integration_event_processed(&event.id).await?;
     Ok(true)
 }
@@ -277,36 +279,13 @@ async fn handle_email_event_batch(
     target: &BackgroundTarget,
     events: &[IntegrationEvent],
 ) -> anyhow::Result<()> {
-    let mut claimed_events = Vec::new();
-    for event in events {
-        let claimed = state
-            .db
-            .mark_integration_event_processing(&event.id)
-            .await?;
-        if claimed {
-            claimed_events.push(event.clone());
-        } else {
-            tracing::debug!("Event {} already being processed, skipping", event.id);
-        }
-    }
-
+    let claimed_events = claim_event_batch(state, events).await?;
     if claimed_events.is_empty() {
         return Ok(());
     }
 
     let result = process_email_event_batch_inner(state, target, &claimed_events).await;
-    match result {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            for event in &claimed_events {
-                state
-                    .db
-                    .mark_integration_event_failed(&event.id, &e.to_string())
-                    .await?;
-            }
-            Err(e)
-        }
-    }
+    finish_event_batch(state, &claimed_events, result).await
 }
 
 async fn handle_calendar_event_batch(
@@ -314,36 +293,49 @@ async fn handle_calendar_event_batch(
     target: &BackgroundTarget,
     events: &[IntegrationEvent],
 ) -> anyhow::Result<()> {
-    let mut claimed_events = Vec::new();
-    for event in events {
-        let claimed = state
-            .db
-            .mark_integration_event_processing(&event.id)
-            .await?;
-        if claimed {
-            claimed_events.push(event.clone());
-        } else {
-            tracing::debug!("Event {} already being processed, skipping", event.id);
-        }
-    }
-
+    let claimed_events = claim_event_batch(state, events).await?;
     if claimed_events.is_empty() {
         return Ok(());
     }
 
     let result = process_calendar_event_batch_inner(state, target, &claimed_events).await;
-    match result {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            for event in &claimed_events {
-                state
-                    .db
-                    .mark_integration_event_failed(&event.id, &e.to_string())
-                    .await?;
-            }
-            Err(e)
+    finish_event_batch(state, &claimed_events, result).await
+}
+
+async fn claim_event_batch(
+    state: &Arc<AppState>,
+    events: &[IntegrationEvent],
+) -> anyhow::Result<Vec<IntegrationEvent>> {
+    let mut claimed = Vec::new();
+    for event in events {
+        if state
+            .db
+            .mark_integration_event_processing(&event.id)
+            .await?
+        {
+            claimed.push(event.clone());
+        } else {
+            tracing::debug!("Event {} already being processed, skipping", event.id);
         }
     }
+    Ok(claimed)
+}
+
+async fn finish_event_batch(
+    state: &Arc<AppState>,
+    events: &[IntegrationEvent],
+    result: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    if let Err(error) = result {
+        for event in events {
+            state
+                .db
+                .mark_integration_event_failed(&event.id, &error.to_string())
+                .await?;
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 async fn process_email_event_batch_inner(
@@ -351,73 +343,10 @@ async fn process_email_event_batch_inner(
     target: &BackgroundTarget,
     events: &[IntegrationEvent],
 ) -> anyhow::Result<()> {
-    // Enrich each event's entities before generating a combined message.
-    for event in events {
-        let entities = extract_event_entities(event);
-        for entity in &entities {
-            if let Ok(nodes) = state.db.graph_find_nodes(entity).await
-                && !nodes.is_empty()
-            {
-                tracing::info!("Enriching event with graph context for: {}", entity);
-            }
-        }
-    }
+    log_known_event_entities(state, events, "email").await;
 
     let batched_event = build_email_batch_event(events);
-    let message = match jossie_server::agent::generate_event_message(
-        state,
-        target.conversation_id,
-        &batched_event,
-    )
-    .await
-    {
-        Ok(msg) => msg,
-        Err(e) if e.to_string().contains("already being processed") => {
-            tracing::debug!(
-                "Deferring email batch - conversation {} is busy",
-                target.conversation_id
-            );
-            mark_events_new(state, events).await?;
-            return Ok(());
-        }
-        Err(e) => return Err(e),
-    };
-
-    tracing::info!("Generated batched email message: {:?}", message);
-    let Some(message) = message else {
-        mark_events_processed(state, events).await?;
-        return Ok(());
-    };
-
-    if target.telegram_chat_id.is_some() && !state.telegram.token.trim().is_empty() {
-        tracing::info!("Sending batched email message: {}", message);
-    }
-    maybe_send_telegram_message(state, target.telegram_chat_id, &message).await?;
-    if target.telegram_chat_id.is_some() && !state.telegram.token.trim().is_empty() {
-        tracing::info!("Batched email message sent: {}", message);
-    }
-
-    let assistant_msg = Message {
-        id: Uuid::new_v4(),
-        conversation_id: target.conversation_id,
-        role: Role::Assistant,
-        content: message,
-        tool_calls: None,
-        tool_call_id: None,
-        name: Some("integration_event_notification".to_string()),
-        attachments: None,
-        response_items: None,
-        created_at: Utc::now(),
-    };
-    persist_message(state, &assistant_msg).await?;
-    state.publish_event(ServerEvent::BackgroundNotification {
-        conversation_id: target.conversation_id,
-        source: "email_batch".to_string(),
-        message: assistant_msg.content.clone(),
-    });
-    mark_events_processed(state, events).await?;
-
-    Ok(())
+    generate_and_deliver_event_batch(state, target, events, &batched_event, "email_batch").await
 }
 
 async fn process_calendar_event_batch_inner(
@@ -435,33 +364,47 @@ async fn process_calendar_event_batch_inner(
         return Ok(());
     }
 
-    // Enrich each event's entities before generating a combined message.
-    for event in &reduced_events {
-        let entities = extract_event_entities(event);
-        for entity in &entities {
-            if let Ok(nodes) = state.db.graph_find_nodes(entity).await
+    log_known_event_entities(state, &reduced_events, "calendar").await;
+
+    let batched_event = build_calendar_batch_event(&reduced_events, events.len(), omitted_count);
+    generate_and_deliver_event_batch(state, target, events, &batched_event, "calendar_batch").await
+}
+
+async fn log_known_event_entities(
+    state: &Arc<AppState>,
+    events: &[IntegrationEvent],
+    batch_kind: &str,
+) {
+    for event in events {
+        for entity in extract_event_entities(event) {
+            if let Ok(nodes) = state.db.graph_find_nodes(&entity).await
                 && !nodes.is_empty()
             {
-                tracing::info!(
-                    "Enriching calendar event with graph context for: {}",
-                    entity
-                );
+                tracing::info!(batch_kind, %entity, "Event entity has graph context");
             }
         }
     }
+}
 
-    let batched_event = build_calendar_batch_event(&reduced_events, events.len(), omitted_count);
+async fn generate_and_deliver_event_batch(
+    state: &Arc<AppState>,
+    target: &BackgroundTarget,
+    events: &[IntegrationEvent],
+    batched_event: &IntegrationEvent,
+    source: &str,
+) -> anyhow::Result<()> {
     let message = match jossie_server::agent::generate_event_message(
         state,
         target.conversation_id,
-        &batched_event,
+        batched_event,
     )
     .await
     {
         Ok(msg) => msg,
-        Err(e) if e.to_string().contains("already being processed") => {
+        Err(e) if jossie_server::agent::is_conversation_busy_error(&e) => {
             tracing::debug!(
-                "Deferring calendar batch - conversation {} is busy",
+                source,
+                "Deferring event batch because conversation {} is busy",
                 target.conversation_id
             );
             mark_events_new(state, events).await?;
@@ -470,18 +413,18 @@ async fn process_calendar_event_batch_inner(
         Err(e) => return Err(e),
     };
 
-    tracing::info!("Generated batched calendar message: {:?}", message);
+    tracing::info!(source, ?message, "Generated batched event message");
     let Some(message) = message else {
         mark_events_processed(state, events).await?;
         return Ok(());
     };
 
     if target.telegram_chat_id.is_some() && !state.telegram.token.trim().is_empty() {
-        tracing::info!("Sending batched calendar message: {}", message);
+        tracing::info!(source, "Sending batched event notification");
     }
     maybe_send_telegram_message(state, target.telegram_chat_id, &message).await?;
     if target.telegram_chat_id.is_some() && !state.telegram.token.trim().is_empty() {
-        tracing::info!("Batched calendar message sent: {}", message);
+        tracing::info!(source, "Batched event notification sent");
     }
 
     let assistant_msg = Message {
@@ -499,9 +442,10 @@ async fn process_calendar_event_batch_inner(
     persist_message(state, &assistant_msg).await?;
     state.publish_event(ServerEvent::BackgroundNotification {
         conversation_id: target.conversation_id,
-        source: "calendar_batch".to_string(),
+        source: source.to_string(),
         message: assistant_msg.content.clone(),
-    });
+    })
+    .await;
     mark_events_processed(state, events).await?;
 
     Ok(())
@@ -551,7 +495,7 @@ fn build_email_batch_event(events: &[IntegrationEvent]) -> IntegrationEvent {
         id: Uuid::new_v4().to_string(),
         integration,
         account_id,
-        event_type: "new_email_batch".to_string(),
+        event_type: NEW_EMAIL_BATCH.to_string(),
         dedupe_key: format!("batch:{}:{}", sorted_events.len(), Uuid::new_v4()),
         payload: serde_json::json!({
             "count": sorted_events.len(),
@@ -605,7 +549,7 @@ fn build_calendar_batch_event(
         id: Uuid::new_v4().to_string(),
         integration,
         account_id,
-        event_type: "calendar_event_batch".to_string(),
+        event_type: CALENDAR_EVENT_BATCH.to_string(),
         dedupe_key: format!("calendar_batch:{}:{}", original_count, Uuid::new_v4()),
         payload: serde_json::json!({
             "count": events.len(),
@@ -745,7 +689,7 @@ fn extract_event_entities(event: &IntegrationEvent) -> Vec<String> {
     let mut entities = Vec::new();
 
     match event.event_type.as_str() {
-        "new_email" | "gmail_new_message" => {
+        NEW_EMAIL | GMAIL_NEW_MESSAGE => {
             extract_email_entities(&event.payload, &mut entities);
         }
         "new_email_batch" => {
@@ -757,10 +701,10 @@ fn extract_event_entities(event: &IntegrationEvent) -> Vec<String> {
                 }
             }
         }
-        "calendar_event" | "calendar_event_updated" => {
+        jossie_core::events::CALENDAR_EVENT | CALENDAR_EVENT_UPDATED => {
             extract_calendar_entities(&event.payload, &mut entities);
         }
-        "calendar_event_batch" => {
+        CALENDAR_EVENT_BATCH => {
             if let Some(items) = event.payload.get("events").and_then(|v| v.as_array()) {
                 for item in items {
                     if let Some(payload) = item.get("payload") {

@@ -1,5 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use jossie_core::config::GoogleConfig;
+use jossie_core::events::{CALENDAR_EVENT_UPDATED, GMAIL_NEW_MESSAGE};
 use jossie_core::integration::{
     EmptyToolArgs, Integration, OnboardingField, OnboardingStatus, ToolDefinition,
 };

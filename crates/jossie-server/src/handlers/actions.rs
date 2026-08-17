@@ -123,7 +123,7 @@ pub async fn decide_action_deferred(
             arguments: action.arguments.clone(),
         };
         state
-            .publish_durable_event(ServerEvent::ToolStarted {
+            .publish_event(ServerEvent::ToolStarted {
                 conversation_id: action.conversation_id,
                 run_id: action.run_id.clone(),
                 call_id: action.call_id.clone(),
@@ -143,7 +143,7 @@ pub async fn decide_action_deferred(
         persist_message(&state, &tool_message).await?;
         state.db.resolve_pending_action(&id, status, error).await?;
         state
-            .publish_durable_event(ServerEvent::ToolFinished {
+            .publish_event(ServerEvent::ToolFinished {
                 conversation_id: action.conversation_id,
                 run_id: action.run_id.clone(),
                 call_id: action.call_id.clone(),
@@ -167,7 +167,7 @@ pub async fn decide_action_deferred(
     };
 
     state
-        .publish_durable_event(ServerEvent::ActionResolved {
+        .publish_event(ServerEvent::ActionResolved {
             conversation_id: action.conversation_id,
             run_id: action.run_id.clone(),
             action_id: action.id.clone(),

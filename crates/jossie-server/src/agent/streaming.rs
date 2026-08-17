@@ -337,370 +337,43 @@ async fn run_agent_loop_streaming_inner(
         }
         previous_response_id = completed_response_id;
         chained_messages.clear();
-
-        if !tool_calls.is_empty() {
-            if let Some(loop_warning) = goal_tracker.note_tool_batch(&tool_calls) {
-                tracing::warn!(
-                    "Streaming loop guard triggered for conversation {conv_id}: {loop_warning}"
-                );
-                emit_stream_event(
-                    state,
-                    Some(&event_tx),
-                    ServerEvent::AssistantReset {
-                        conversation_id: conv_id,
-                        run_id: run_id.clone(),
-                        reason: "loop_guard".to_string(),
-                    },
-                )
-                .await;
-
-                if goal_tracker.should_stop_for_repetition() {
-                    if goal_tracker.active_goal_continuation_message().is_some() {
-                        if let Ok(partial) = pause_run_with_checkpoint(
-                            state,
-                            conv_id,
-                            &run_id,
-                            &goal_tracker,
-                            "The agent repeated the same action without advancing its tracked goal",
-                            Some(&event_tx),
-                        )
-                        .await
-                        {
-                            emit_stream_event(
-                                state,
-                                Some(&event_tx),
-                                ServerEvent::AssistantDelta {
-                                    conversation_id: conv_id,
-                                    run_id: run_id.clone(),
-                                    content: partial,
-                                },
-                            )
-                            .await;
-                        }
-                        return Ok(());
-                    }
-                    let fallback = goal_tracker.build_stuck_message();
-                    emit_stream_event(
-                        state,
-                        Some(&event_tx),
-                        ServerEvent::AssistantDelta {
-                            conversation_id: conv_id,
-                            run_id: run_id.clone(),
-                            content: fallback.clone(),
-                        },
-                    )
-                    .await;
-                    let assistant_msg = Message::new(conv_id, Role::Assistant, fallback);
-                    persist_message(state, &assistant_msg).await?;
-                    emit_stream_event(
-                        state,
-                        Some(&event_tx),
-                        ServerEvent::RunCompleted {
-                            conversation_id: conv_id,
-                            run_id: run_id.clone(),
-                        },
-                    )
-                    .await;
-                    return Ok(());
-                }
-
-                messages.push(Message::transient(Role::Assistant, full_content));
-                messages.push(Message::transient(
-                    Role::System,
-                    format!("[LOOP GUARD: {loop_warning}]"),
-                ));
-                previous_response_id = None;
-                continue;
-            }
-
-            let assistant_msg = match serde_json::to_value(&tool_calls) {
-                Ok(tc_json) => Message::new(conv_id, Role::Assistant, full_content.clone())
-                    .with_tool_calls(tc_json)
-                    .with_response_items(response_items),
-                Err(_) => Message::new(conv_id, Role::Assistant, full_content.clone()),
-            };
-            persist_message(state, &assistant_msg).await?;
-            messages.push(assistant_msg);
-
-            let capability_message_start = messages.len();
-            match process_work_plan_updates(
-                state,
-                conv_id,
-                &run_id,
-                Some(&event_tx),
-                &tool_calls,
-                &mut messages,
-                &mut goal_tracker,
-            )
-            .await
-            {
-                Ok(true) => {
-                    chained_messages.extend_from_slice(&messages[capability_message_start..]);
-                    continue;
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    emit_stream_event(
-                        state,
-                        Some(&event_tx),
-                        ServerEvent::Error {
-                            conversation_id: conv_id,
-                            run_id: Some(run_id.clone()),
-                            error: error.to_string(),
-                        },
-                    )
-                    .await;
-                    return Ok(());
-                }
-            }
-            match process_capability_activation(
-                state,
-                conv_id,
-                &run_id,
-                Some(&event_tx),
-                &mut toolset,
-                &tool_calls,
-                &mut messages,
-                &mut goal_tracker,
-            )
-            .await
-            {
-                Ok(true) => {
-                    chained_messages.extend_from_slice(&messages[capability_message_start..]);
-                    continue;
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    emit_stream_event(
-                        state,
-                        Some(&event_tx),
-                        ServerEvent::Error {
-                            conversation_id: conv_id,
-                            run_id: Some(run_id.clone()),
-                            error: error.to_string(),
-                        },
-                    )
-                    .await;
-                    return Ok(());
-                }
-            }
-
-            let prepared_calls = prepare_tool_calls_for_execution(
-                &tool_calls,
-                conv_id,
-                &last_user_msg,
-                goal_tracker.durable_goal.as_ref(),
-            );
-            let (prepared_calls, pending_actions) = match partition_authorized_calls(
-                state,
-                conv_id,
-                &run_id,
-                Some(&event_tx),
-                prepared_calls,
-                &last_user_msg,
-                &messages,
-            )
-            .await
-            {
-                Ok(partition) => partition,
-                Err(error) => {
-                    emit_stream_event(
-                        state,
-                        Some(&event_tx),
-                        ServerEvent::Error {
-                            conversation_id: conv_id,
-                            run_id: Some(run_id.clone()),
-                            error: error.to_string(),
-                        },
-                    )
-                    .await;
-                    return Ok(());
-                }
-            };
-            let (prepared_calls, repeated_results) =
-                goal_tracker.split_repeated_reads(prepared_calls);
-
-            for call in &prepared_calls {
-                emit_stream_event(
-                    state,
-                    Some(&event_tx),
-                    ServerEvent::ToolCalled {
-                        conversation_id: conv_id,
-                        run_id: run_id.clone(),
-                        call_id: call.id.clone(),
-                        tool: call.name.clone(),
-                        arguments_preview: preview_text(&call.arguments, 160),
-                    },
-                )
-                .await;
-                let started_event = ServerEvent::ToolStarted {
-                    conversation_id: conv_id,
-                    run_id: run_id.clone(),
-                    call_id: call.id.clone(),
-                    tool: call.name.clone(),
-                };
-                emit_stream_event(state, Some(&event_tx), started_event).await;
-            }
-            let mut results = execute_tool_batch(state, conv_id, prepared_calls).await;
-            results.extend(repeated_results);
-            if ensure_run_not_cancelled(state, conv_id, &run_id, Some(&event_tx))
-                .await
-                .is_err()
-            {
-                return Ok(());
-            }
-
-            for (_, call, result) in results {
-                emit_stream_event(
-                    state,
-                    Some(&event_tx),
-                    ServerEvent::ToolFinished {
-                        conversation_id: conv_id,
-                        run_id: run_id.clone(),
-                        call_id: call.id.clone(),
-                        tool: call.name.clone(),
-                        result_preview: preview_text(&result.content, 220),
-                        is_error: result.is_error,
-                    },
-                )
-                .await;
-                goal_tracker.record_tool_result(&call, &result);
-                let tool_msg = Message::new(conv_id, Role::Tool, result.content)
-                    .with_tool_call_id(call.id.clone())
-                    .with_name(call.name.clone());
-                persist_message(state, &tool_msg).await?;
-                messages.push(tool_msg.clone());
-                chained_messages.push(tool_msg);
-            }
-            if let Some(action) = pending_actions.first() {
-                emit_stream_event(
-                    state,
-                    Some(&event_tx),
-                    ServerEvent::RunWaitingForApproval {
-                        conversation_id: conv_id,
-                        run_id: run_id.clone(),
-                        batch_id: action.batch_id.clone(),
-                    },
-                )
-                .await;
-                return Ok(());
-            }
-            goal_tracker.record_tool_calls(&tool_calls);
-            continue;
-        }
-
-        if reflection_retries_remaining > 0
-            && let Some(feedback) =
-                self_reflect(state, &messages, &last_user_msg, &full_content).await
-        {
-                reflection_retries_remaining -= 1;
-                emit_stream_event(
-                    state,
-                    Some(&event_tx),
-                    ServerEvent::ReflectionRetry {
-                        conversation_id: conv_id,
-                        run_id: run_id.clone(),
-                        feedback: feedback.clone(),
-                    },
-                )
-                .await;
-                emit_stream_event(
-                    state,
-                    Some(&event_tx),
-                    ServerEvent::AssistantReset {
-                        conversation_id: conv_id,
-                        run_id: run_id.clone(),
-                        reason: "reflection_retry".to_string(),
-                    },
-                )
-                .await;
-                messages.push(
-                    Message::transient(Role::Assistant, full_content)
-                        .with_response_items(response_items),
-                );
-                let feedback_message = Message::transient(
-                    Role::System,
-                    format!(
-                        "[SELF-REFLECTION FEEDBACK: Your response needs improvement. {}. Please revise your response.]",
-                        feedback
-                    ),
-                );
-                messages.push(feedback_message.clone());
-                chained_messages.push(feedback_message);
-                continue;
-        }
-
-        if let Some(continuation) = goal_tracker.active_goal_continuation_message() {
-            premature_goal_finals += 1;
-            tracing::warn!(
-                conversation_id = %conv_id,
-                run_id = %run_id,
-                attempt = premature_goal_finals,
-                "Withholding a streamed final reply because its tracked goal is still active"
-            );
-            emit_stream_event(
-                state,
-                Some(&event_tx),
-                ServerEvent::AssistantReset {
-                    conversation_id: conv_id,
-                    run_id: run_id.clone(),
-                    reason: "active_goal_continuation".to_string(),
-                },
-            )
-            .await;
-            if premature_goal_finals >= PREMATURE_GOAL_FINAL_LIMIT {
-                if let Ok(partial) = pause_run_with_checkpoint(
-                    state,
-                    conv_id,
-                    &run_id,
-                    &goal_tracker,
-                    "The agent repeatedly stopped while its tracked goal was still active",
-                    Some(&event_tx),
-                )
-                .await
-                {
-                    emit_stream_event(
-                        state,
-                        Some(&event_tx),
-                        ServerEvent::AssistantDelta {
-                            conversation_id: conv_id,
-                            run_id: run_id.clone(),
-                            content: partial,
-                        },
-                    )
-                    .await;
-                }
-                return Ok(());
-            }
-            messages.push(
-                Message::transient(Role::Assistant, full_content)
-                    .with_response_items(response_items),
-            );
-            let continuation = Message::transient(Role::System, continuation)
-                .with_name("active_goal_continuation".to_string());
-            messages.push(continuation.clone());
-            chained_messages.push(continuation);
-            continue;
-        }
-
-        persist_final_assistant_response(
+        match process_agent_iteration_output(
             state,
             conv_id,
-            last_user_msg.clone(),
+            &run_id,
             full_content,
-        )
-        .await?;
-
-        emit_stream_event(
-            state,
+            tool_calls,
+            response_items,
             Some(&event_tx),
-            ServerEvent::RunCompleted {
-                conversation_id: conv_id,
-                run_id: run_id.clone(),
-            },
+            &last_user_msg,
+            &last_user_msg,
+            &mut messages,
+            &mut chained_messages,
+            &mut previous_response_id,
+            &mut toolset,
+            &mut goal_tracker,
+            &mut reflection_retries_remaining,
+            &mut premature_goal_finals,
         )
-        .await;
-        return Ok(());
+        .await?
+        {
+            AgentIterationOutcome::Continue => continue,
+            AgentIterationOutcome::Final(_) => {
+                emit_stream_event(
+                    state,
+                    Some(&event_tx),
+                    ServerEvent::RunCompleted {
+                        conversation_id: conv_id,
+                        run_id: run_id.clone(),
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+            AgentIterationOutcome::WaitingForApproval(_)
+            | AgentIterationOutcome::Paused(_)
+            | AgentIterationOutcome::Cancelled => return Ok(()),
+        }
     }
 
     let partial = pause_run_with_checkpoint(

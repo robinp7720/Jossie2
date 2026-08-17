@@ -3,24 +3,13 @@ pub async fn generate_event_message(
     conversation_id: Uuid,
     event: &IntegrationEvent,
 ) -> anyhow::Result<Option<String>> {
-    {
-        let mut active = state.active_conversations.write().await;
-        if !active.insert(conversation_id) {
-            anyhow::bail!(
-                "Conversation {} is already being processed",
-                conversation_id
-            );
-        }
-    }
+    claim_conversation(state, conversation_id).await?;
 
     let result = AssertUnwindSafe(generate_event_message_inner(state, conversation_id, event))
         .catch_unwind()
         .await;
 
-    {
-        let mut active = state.active_conversations.write().await;
-        active.remove(&conversation_id);
-    }
+    release_conversation(state, conversation_id).await;
 
     match result {
         Ok(result) => result,
@@ -128,7 +117,7 @@ const EVENT_NOTIFY_CONFIDENCE_THRESHOLD: f32 = 0.55;
 const EVENT_NOTIFY_INTERRUPT_THRESHOLD: f32 = 0.65;
 const EVENT_FAILED_READ_CONFIDENCE_THRESHOLD: f32 = 0.75;
 const EVENT_FAILED_READ_INTERRUPT_THRESHOLD: f32 = 0.85;
-const HEARTBEAT_EVENT_TYPE: &str = "heartbeat_check";
+const HEARTBEAT_EVENT_TYPE: &str = HEARTBEAT_CHECK;
 
 async fn generate_event_message_inner(
     state: &AppState,
@@ -373,14 +362,11 @@ fn parse_email_triage_response(content: &str) -> Option<EmailTriageResponse> {
 }
 
 fn is_email_event(event: &IntegrationEvent) -> bool {
-    matches!(
-        event.event_type.as_str(),
-        "new_email" | "gmail_new_message" | "new_email_batch"
-    )
+    integration_event_kind(&event.event_type) == IntegrationEventKind::Email
 }
 
 fn email_event_count(event: &IntegrationEvent) -> usize {
-    if event.event_type == "new_email_batch" {
+    if event.event_type == NEW_EMAIL_BATCH {
         event
             .payload
             .get("emails")
@@ -409,7 +395,7 @@ fn email_event_at_index(
     index: usize,
 ) -> anyhow::Result<IntegrationEvent> {
     anyhow::ensure!(index > 0, "Email index must be 1 or greater");
-    if event.event_type != "new_email_batch" {
+    if event.event_type != NEW_EMAIL_BATCH {
         anyhow::ensure!(index == 1, "Single email events only have index 1");
         return Ok(event.clone());
     }
@@ -426,7 +412,7 @@ fn message_ref_for_event(
     event: &IntegrationEvent,
 ) -> anyhow::Result<jossie_integration_mail::MessageRef> {
     match event.event_type.as_str() {
-        "gmail_new_message" => {
+        GMAIL_NEW_MESSAGE => {
             let message_id = event
                 .payload
                 .get("message_id")
@@ -445,7 +431,7 @@ fn message_ref_for_event(
                 native: None,
             })
         }
-        "new_email" => {
+        NEW_EMAIL => {
             let uid = event
                 .payload
                 .get("uid")
@@ -642,8 +628,8 @@ fn build_event_mode_tools(
     event: &IntegrationEvent,
 ) -> Vec<jossie_core::ToolDefinition> {
     let event_capabilities: &[CapabilityGroup] = match event.event_type.as_str() {
-        "new_email" | "gmail_new_message" | "new_email_batch" => &[],
-        "calendar_event" | "calendar_event_updated" | "calendar_event_batch" => {
+        NEW_EMAIL | GMAIL_NEW_MESSAGE | NEW_EMAIL_BATCH => &[],
+        CALENDAR_EVENT | CALENDAR_EVENT_UPDATED | CALENDAR_EVENT_BATCH => {
             &[CapabilityGroup::Calendar]
         }
         // Self-initiated check-ins get no pre-fetched context; grant a broader (still
@@ -841,7 +827,7 @@ fn build_event_context_hint(event: &IntegrationEvent) -> String {
     ];
 
     match event.event_type.as_str() {
-        "gmail_new_message" | "new_email" => {
+        GMAIL_NEW_MESSAGE | NEW_EMAIL => {
             if let Some(from) = event.payload.get("from").and_then(|v| v.as_str()) {
                 lines.push(format!("Sender: {}", from));
             }
@@ -849,7 +835,7 @@ fn build_event_context_hint(event: &IntegrationEvent) -> String {
                 lines.push(format!("Subject: {}", subject));
             }
         }
-        "new_email_batch" => {
+        NEW_EMAIL_BATCH => {
             if let Some(emails) = event.payload.get("emails").and_then(|v| v.as_array()) {
                 lines.push(format!("Email count: {}", emails.len()));
                 let mut subjects = Vec::new();
@@ -922,12 +908,12 @@ fn build_event_memory_query(event: &IntegrationEvent) -> String {
     .collect::<Vec<_>>();
 
     match event.event_type.as_str() {
-        "gmail_new_message" | "new_email" => {
+        GMAIL_NEW_MESSAGE | NEW_EMAIL => {
             push_payload_str(&event.payload, "from", &mut terms);
             push_payload_str(&event.payload, "sender", &mut terms);
             push_payload_str(&event.payload, "subject", &mut terms);
         }
-        "new_email_batch" => {
+        NEW_EMAIL_BATCH => {
             if let Some(emails) = event.payload.get("emails").and_then(|v| v.as_array()) {
                 for email in emails.iter().take(8) {
                     if let Some(payload) = email.get("payload") {
@@ -938,13 +924,13 @@ fn build_event_memory_query(event: &IntegrationEvent) -> String {
                 }
             }
         }
-        "calendar_event" | "calendar_event_updated" => {
+        CALENDAR_EVENT | CALENDAR_EVENT_UPDATED => {
             push_payload_str(&event.payload, "summary", &mut terms);
             push_payload_str(&event.payload, "organizer", &mut terms);
             push_payload_str(&event.payload, "location", &mut terms);
             push_payload_str(&event.payload, "calendar_id", &mut terms);
         }
-        "calendar_event_batch" => {
+        CALENDAR_EVENT_BATCH => {
             if let Some(events) = event.payload.get("events").and_then(|v| v.as_array()) {
                 for item in events.iter().take(8) {
                     if let Some(payload) = item.get("payload") {
@@ -978,7 +964,7 @@ fn push_payload_str(payload: &serde_json::Value, key: &str, terms: &mut Vec<Stri
 
 fn event_notification_fingerprint(event: &IntegrationEvent) -> String {
     match event.event_type.as_str() {
-        "gmail_new_message" | "new_email" => {
+        GMAIL_NEW_MESSAGE | NEW_EMAIL => {
             let message_id = event
                 .payload
                 .get("message_unique_id")
@@ -990,7 +976,7 @@ fn event_notification_fingerprint(event: &IntegrationEvent) -> String {
                 event.integration, event.account_id, event.event_type, message_id
             )
         }
-        "new_email_batch" => {
+        NEW_EMAIL_BATCH => {
             let mut ids: Vec<String> = event
                 .payload
                 .get("emails")
