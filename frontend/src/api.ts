@@ -1,4 +1,19 @@
-import type { Account, ActivityEvent, ChatImport, Conversation, Dashboard, Goal, GoalDetail, Memory, Message, OnboardingStatus, PendingAction, WorkRun, WorkRunDetail, WorkSummary } from './types'
+import type {
+  Account,
+  ActivityEvent,
+  ChatImport,
+  Conversation,
+  Dashboard,
+  Goal,
+  GoalDetail,
+  Memory,
+  Message,
+  OnboardingStatus,
+  PendingAction,
+  WorkRun,
+  WorkRunDetail,
+  WorkSummary,
+} from './types'
 
 export type ApiConfig = {
   baseUrl: string
@@ -44,7 +59,7 @@ export const request = async <T>(
   const text = await response.text()
 
   if (!response.ok) {
-    let message = (() => {
+    const message = (() => {
       if (!text) return `Request failed with status ${response.status}`
       try {
         const error = JSON.parse(text) as { error?: unknown }
@@ -77,14 +92,22 @@ export const request = async <T>(
 
 export const listConversations = (
   config: ApiConfig,
-  filters: { view?: 'active' | 'archived' | 'all'; q?: string; limit?: number; before?: string } = {},
+  filters: {
+    view?: 'active' | 'archived' | 'all'
+    q?: string
+    limit?: number
+    before?: string
+  } = {},
 ) => {
   const query = new URLSearchParams()
   if (filters.view) query.set('view', filters.view)
   if (filters.q) query.set('q', filters.q)
   if (filters.limit) query.set('limit', String(filters.limit))
   if (filters.before) query.set('before', filters.before)
-  return request<Conversation[]>(config, `/api/conversations${query.size ? `?${query}` : ''}`)
+  return request<Conversation[]>(
+    config,
+    `/api/conversations${query.size ? `?${query}` : ''}`,
+  )
 }
 
 export const createConversation = (config: ApiConfig) =>
@@ -94,9 +117,15 @@ export const updateConversation = (
   config: ApiConfig,
   conversationId: string,
   payload: { title?: string; archived?: boolean },
-) => request<Conversation>(config, `/api/conversations/${encodeURIComponent(conversationId)}`, {
-  method: 'PATCH', body: JSON.stringify(payload),
-})
+) =>
+  request<Conversation>(
+    config,
+    `/api/conversations/${encodeURIComponent(conversationId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    },
+  )
 
 export const deleteConversation = (config: ApiConfig, conversationId: string) =>
   request<{ conversation_id: string; deleted: boolean; deleted_files: number }>(
@@ -114,7 +143,10 @@ export const getMessages = (
   const query = new URLSearchParams({ limit: String(limit) })
   if (cursor.before) query.set('before', cursor.before)
   if (cursor.around) query.set('around', cursor.around)
-  return request<Message[]>(config, `/api/conversations/${conversationId}/messages?${query}`)
+  return request<Message[]>(
+    config,
+    `/api/conversations/${conversationId}/messages?${query}`,
+  )
 }
 
 export const downloadConversationExport = async (
@@ -122,15 +154,29 @@ export const downloadConversationExport = async (
   conversationId: string,
   format: 'markdown' | 'json',
 ) => {
-  const response = await fetch(buildUrl(config, `/api/conversations/${encodeURIComponent(conversationId)}/export?format=${format}`), {
-    credentials: 'include', headers: buildHeaders(config),
-  })
-  if (!response.ok) throw new Error(await response.text() || `Export failed with status ${response.status}`)
+  const response = await fetch(
+    buildUrl(
+      config,
+      `/api/conversations/${encodeURIComponent(conversationId)}/export?format=${format}`,
+    ),
+    {
+      credentials: 'include',
+      headers: buildHeaders(config),
+    },
+  )
+  if (!response.ok)
+    throw new Error(
+      (await response.text()) || `Export failed with status ${response.status}`,
+    )
   const disposition = response.headers.get('content-disposition') ?? ''
-  const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? `conversation.${format === 'markdown' ? 'md' : 'json'}`
+  const filename =
+    disposition.match(/filename="([^"]+)"/)?.[1] ??
+    `conversation.${format === 'markdown' ? 'md' : 'json'}`
   const url = URL.createObjectURL(await response.blob())
   const anchor = document.createElement('a')
-  anchor.href = url; anchor.download = filename; anchor.click()
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
   window.setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
@@ -160,18 +206,34 @@ export const uploadFile = (config: ApiConfig, file: File) => {
 }
 
 export const deleteUploadedFile = (config: ApiConfig, fileId: string) =>
-  request<void>(config, `/api/files/${encodeURIComponent(fileId)}`, { method: 'DELETE' })
-
-export const downloadUploadedFile = async (config: ApiConfig, fileId: string, fallbackName: string) => {
-  const response = await fetch(buildUrl(config, `/api/files/${encodeURIComponent(fileId)}`), {
-    credentials: 'include', headers: buildHeaders(config),
+  request<void>(config, `/api/files/${encodeURIComponent(fileId)}`, {
+    method: 'DELETE',
   })
-  if (!response.ok) throw new Error(await response.text() || `Download failed with status ${response.status}`)
+
+export const downloadUploadedFile = async (
+  config: ApiConfig,
+  fileId: string,
+  fallbackName: string,
+) => {
+  const response = await fetch(
+    buildUrl(config, `/api/files/${encodeURIComponent(fileId)}`),
+    {
+      credentials: 'include',
+      headers: buildHeaders(config),
+    },
+  )
+  if (!response.ok)
+    throw new Error(
+      (await response.text()) ||
+        `Download failed with status ${response.status}`,
+    )
   const disposition = response.headers.get('content-disposition') ?? ''
   const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? fallbackName
   const url = URL.createObjectURL(await response.blob())
   const anchor = document.createElement('a')
-  anchor.href = url; anchor.download = filename; anchor.click()
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
   window.setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
@@ -179,13 +241,17 @@ export const startChatImport = (
   config: ApiConfig,
   fileId: string,
   format: ChatImport['format'] = 'auto',
-) => request<ChatImport>(config, '/api/chat-imports', {
-  method: 'POST',
-  body: JSON.stringify({ file_id: fileId, format }),
-})
+) =>
+  request<ChatImport>(config, '/api/chat-imports', {
+    method: 'POST',
+    body: JSON.stringify({ file_id: fileId, format }),
+  })
 
 export const getChatImport = (config: ApiConfig, importId: string) =>
-  request<ChatImport>(config, `/api/chat-imports/${encodeURIComponent(importId)}`)
+  request<ChatImport>(
+    config,
+    `/api/chat-imports/${encodeURIComponent(importId)}`,
+  )
 
 export const listOnboarding = (config: ApiConfig) =>
   request<OnboardingStatus[]>(config, '/api/onboarding')
@@ -243,10 +309,10 @@ export const buildWebSocketUrl = (config: ApiConfig, path: string) => {
 }
 
 export const fetchGraph = (config: ApiConfig, limit = 500) =>
-  request<{ nodes: import('./types').GraphNode[]; edges: import('./types').GraphEdge[] }>(
-    config,
-    `/api/graph?limit=${limit}`,
-  )
+  request<{
+    nodes: import('./types').GraphNode[]
+    edges: import('./types').GraphEdge[]
+  }>(config, `/api/graph?limit=${limit}`)
 
 export const getSession = (config: ApiConfig) =>
   request<{ authenticated: boolean }>(config, '/api/auth/session')
@@ -258,12 +324,19 @@ export const login = (config: ApiConfig, password: string) =>
   })
 
 export const logout = (config: ApiConfig) =>
-  request<{ authenticated: boolean }>(config, '/api/auth/logout', { method: 'POST' })
+  request<{ authenticated: boolean }>(config, '/api/auth/logout', {
+    method: 'POST',
+  })
 
 export const getDashboard = (config: ApiConfig) =>
   request<Dashboard>(config, '/api/dashboard')
 
-export const listMemories = (config: ApiConfig, query = '', scope = 'all', limit = 50) =>
+export const listMemories = (
+  config: ApiConfig,
+  query = '',
+  scope = 'all',
+  limit = 50,
+) =>
   request<Memory[]>(
     config,
     `/api/memories?query=${encodeURIComponent(query)}&scope=${encodeURIComponent(scope)}&limit=${limit}`,
@@ -275,45 +348,91 @@ export const listActivity = (config: ApiConfig, before?: string, limit = 30) =>
     `/api/activity?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`,
   )
 
-export const listPendingActions = (config: ApiConfig, conversationId?: string) =>
+export const listPendingActions = (
+  config: ApiConfig,
+  conversationId?: string,
+) =>
   request<PendingAction[]>(
     config,
     `/api/actions/pending${conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : ''}`,
   )
 
 export const approveAction = (config: ApiConfig, actionId: string) =>
-  request<{ action_id: string; status: string }>(config, `/api/actions/${actionId}/approve`, {
-    method: 'POST',
-  })
+  request<{ action_id: string; status: string }>(
+    config,
+    `/api/actions/${actionId}/approve`,
+    {
+      method: 'POST',
+    },
+  )
 
 export const rejectAction = (config: ApiConfig, actionId: string) =>
-  request<{ action_id: string; status: string }>(config, `/api/actions/${actionId}/reject`, {
-    method: 'POST',
-  })
+  request<{ action_id: string; status: string }>(
+    config,
+    `/api/actions/${actionId}/reject`,
+    {
+      method: 'POST',
+    },
+  )
 
-export const getWork = (config: ApiConfig, conversationId?: string, includeQuiet = false) =>
-  request<WorkSummary>(config, `/api/work?include_quiet=${includeQuiet}${conversationId ? `&conversation_id=${encodeURIComponent(conversationId)}` : ''}`)
+export const getWork = (
+  config: ApiConfig,
+  conversationId?: string,
+  includeQuiet = false,
+) =>
+  request<WorkSummary>(
+    config,
+    `/api/work?include_quiet=${includeQuiet}${conversationId ? `&conversation_id=${encodeURIComponent(conversationId)}` : ''}`,
+  )
 
 export const getGoal = (config: ApiConfig, goalId: string) =>
   request<GoalDetail>(config, `/api/goals/${encodeURIComponent(goalId)}`)
 
-export const updateGoal = (config: ApiConfig, goalId: string, payload: { title?: string; archived?: boolean }) =>
-  request<Goal>(config, `/api/goals/${encodeURIComponent(goalId)}`, { method: 'PATCH', body: JSON.stringify(payload) })
+export const updateGoal = (
+  config: ApiConfig,
+  goalId: string,
+  payload: { title?: string; archived?: boolean },
+) =>
+  request<Goal>(config, `/api/goals/${encodeURIComponent(goalId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
 
-export const controlGoal = (config: ApiConfig, goalId: string, action: 'pause' | 'resume' | 'cancel') =>
-  request<Goal>(config, `/api/goals/${encodeURIComponent(goalId)}/${action}`, { method: 'POST' })
+export const controlGoal = (
+  config: ApiConfig,
+  goalId: string,
+  action: 'pause' | 'resume' | 'cancel',
+) =>
+  request<Goal>(config, `/api/goals/${encodeURIComponent(goalId)}/${action}`, {
+    method: 'POST',
+  })
 
 export const getWorkRun = (config: ApiConfig, runId: string) =>
   request<WorkRunDetail>(config, `/api/work/runs/${encodeURIComponent(runId)}`)
 
-export const listWorkRuns = (config: ApiConfig, filters: { before?: string; kind?: string; status?: string; includeQuiet?: boolean } = {}) => {
+export const listWorkRuns = (
+  config: ApiConfig,
+  filters: {
+    before?: string
+    kind?: string
+    status?: string
+    includeQuiet?: boolean
+  } = {},
+) => {
   const query = new URLSearchParams()
   if (filters.before) query.set('before', filters.before)
   if (filters.kind) query.set('kind', filters.kind)
   if (filters.status) query.set('status', filters.status)
   if (filters.includeQuiet) query.set('include_quiet', 'true')
-  return request<{ items: WorkRun[]; next_cursor: string | null }>(config, `/api/work/runs?${query.toString()}`)
+  return request<{ items: WorkRun[]; next_cursor: string | null }>(
+    config,
+    `/api/work/runs?${query.toString()}`,
+  )
 }
 
 export const cancelWorkRun = (config: ApiConfig, runId: string) =>
-  request<WorkRun>(config, `/api/work/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' })
+  request<WorkRun>(
+    config,
+    `/api/work/runs/${encodeURIComponent(runId)}/cancel`,
+    { method: 'POST' },
+  )

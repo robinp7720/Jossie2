@@ -43,15 +43,22 @@ export type {
   WorkSummary,
 }
 
-export type Conversation = BaseConversation & Partial<Pick<ConversationListItem,
-  'preview' | 'matched_message_id' | 'message_count'>>
+export type Conversation = BaseConversation &
+  Partial<
+    Pick<
+      ConversationListItem,
+      'preview' | 'matched_message_id' | 'message_count'
+    >
+  >
 
 export type FileAttachment = Attachment
 
 // The UI also constructs optimistic messages before the server has assigned all
 // persistence-only fields, so those fields stay optional at this boundary.
-export type Message = Omit<GeneratedMessage,
-  'conversation_id' | 'tool_calls' | 'tool_call_id' | 'name' | 'attachments'> & {
+export type Message = Omit<
+  GeneratedMessage,
+  'conversation_id' | 'tool_calls' | 'tool_call_id' | 'name' | 'attachments'
+> & {
   conversation_id?: string
   tool_calls?: ToolCall[] | null
   tool_call_id?: string | null

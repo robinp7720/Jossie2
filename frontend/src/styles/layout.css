@@ -1,12 +1,136 @@
-.app-frame { display: grid; grid-template-columns: 15.5rem minmax(0,1fr); min-height: 100vh; }
-.sidebar-new { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 3.6rem; padding: 2rem 1.25rem; border-right: 1px solid #252b35; background: rgba(11,13,18,.86); backdrop-filter: blur(18px); }
-.nav-list { display: grid; gap: .3rem; }
-.nav-item { display: flex; gap: .85rem; align-items: center; width: 100%; min-height: 2.8rem; padding: 0 .8rem; border: 0; border-radius: .6rem; background: transparent; color: #8992a0; font-size: .82rem; text-align: left; }
-.nav-item span { width: 1.1rem; color: #748092; text-align: center; }
-.nav-item:hover { background: #171c24; color: #edf0e8; }
-.nav-item.selected { background: #202733; color: #eaf3cf; box-shadow: inset 2px 0 #c8ee76; }
-.nav-item.selected span { color: #cbef7a; }
-.sidebar-foot { display: grid; gap: 1rem; margin-top: auto; padding: 1rem .8rem .2rem; border-top: 1px solid #252b35; }
-.status-line { color: #8992a0; font-size: .69rem; }.status-line i,.ready-dot,.idle-dot { display:inline-block; width:.45rem; height:.45rem; margin-right:.45rem; border-radius:50%; background:#c7ee76; box-shadow:0 0 .6rem #c7ee76; }.idle-dot { background:#697382; box-shadow:none; }
-.text-button { border: 0; padding: 0; background: transparent; color: #aeb8c7; font-size: .73rem; text-align: left; }.text-button:hover { color: #d7ef95; }.danger:hover { color: #ff9689; }
-.main-stage { min-width: 0; padding: clamp(1.5rem,4vw,4rem); }.page { max-width: 92rem; margin: 0 auto; animation: fadein .25s ease-out; }.page-head { display:flex; align-items:flex-start; justify-content:space-between; gap:2rem; margin-bottom:2.35rem; }.page-head .muted-copy { max-width: 42rem; }.overview-head { align-items:center; }.overview-head h1 { font-size: clamp(3rem,5vw,5.2rem); }.toast-error { display:flex; justify-content:space-between; gap:1rem; max-width:92rem; margin:0 auto 1.25rem; padding:.8rem 1rem; border:1px solid #793a39; border-radius:.65rem; background:#291819; color:#ffb6ae; font-size:.8rem; }.toast-error button { border:0;background:transparent;color:inherit;font-size:1.1rem; }
+.app-frame {
+  display: grid;
+  grid-template-columns: 15.5rem minmax(0, 1fr);
+  min-height: 100vh;
+}
+.sidebar-new {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 3.6rem;
+  padding: 2rem 1.25rem;
+  border-right: 1px solid #252b35;
+  background: rgba(11, 13, 18, 0.86);
+  backdrop-filter: blur(18px);
+}
+.nav-list {
+  display: grid;
+  gap: 0.3rem;
+}
+.nav-item {
+  display: flex;
+  gap: 0.85rem;
+  align-items: center;
+  width: 100%;
+  min-height: 2.8rem;
+  padding: 0 0.8rem;
+  border: 0;
+  border-radius: 0.6rem;
+  background: transparent;
+  color: #8992a0;
+  font-size: 0.82rem;
+  text-align: left;
+}
+.nav-item span {
+  width: 1.1rem;
+  color: #748092;
+  text-align: center;
+}
+.nav-item:hover {
+  background: #171c24;
+  color: #edf0e8;
+}
+.nav-item.selected {
+  background: #202733;
+  color: #eaf3cf;
+  box-shadow: inset 2px 0 #c8ee76;
+}
+.nav-item.selected span {
+  color: #cbef7a;
+}
+.sidebar-foot {
+  display: grid;
+  gap: 1rem;
+  margin-top: auto;
+  padding: 1rem 0.8rem 0.2rem;
+  border-top: 1px solid #252b35;
+}
+.status-line {
+  color: #8992a0;
+  font-size: 0.69rem;
+}
+.status-line i,
+.ready-dot,
+.idle-dot {
+  display: inline-block;
+  width: 0.45rem;
+  height: 0.45rem;
+  margin-right: 0.45rem;
+  border-radius: 50%;
+  background: #c7ee76;
+  box-shadow: 0 0 0.6rem #c7ee76;
+}
+.idle-dot {
+  background: #697382;
+  box-shadow: none;
+}
+.text-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #aeb8c7;
+  font-size: 0.73rem;
+  text-align: left;
+}
+.text-button:hover {
+  color: #d7ef95;
+}
+.danger:hover {
+  color: #ff9689;
+}
+.main-stage {
+  min-width: 0;
+  padding: clamp(1.5rem, 4vw, 4rem);
+}
+.page {
+  max-width: 92rem;
+  margin: 0 auto;
+  animation: fadein 0.25s ease-out;
+}
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 2rem;
+  margin-bottom: 2.35rem;
+}
+.page-head .muted-copy {
+  max-width: 42rem;
+}
+.overview-head {
+  align-items: center;
+}
+.overview-head h1 {
+  font-size: clamp(3rem, 5vw, 5.2rem);
+}
+.toast-error {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  max-width: 92rem;
+  margin: 0 auto 1.25rem;
+  padding: 0.8rem 1rem;
+  border: 1px solid #793a39;
+  border-radius: 0.65rem;
+  background: #291819;
+  color: #ffb6ae;
+  font-size: 0.8rem;
+}
+.toast-error button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 1.1rem;
+}

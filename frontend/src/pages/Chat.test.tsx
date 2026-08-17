@@ -15,15 +15,24 @@ describe('Chat conversation workspace', () => {
   beforeEach(() => vi.mocked(apiModule.listConversations).mockClear())
 
   it('offers search and separate active and archived thread views', async () => {
-    render(<Chat conversations={[]} onRefresh={vi.fn().mockResolvedValue(undefined)} />)
+    render(
+      <Chat
+        conversations={[]}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+      />,
+    )
 
-    expect(screen.getByRole('button', { name: 'New conversation' })).toBeTruthy()
+    expect(
+      screen.getByRole('button', { name: 'New conversation' }),
+    ).toBeTruthy()
     expect(screen.getByLabelText('Search conversations')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Archived' }))
 
-    await waitFor(() => expect(apiModule.listConversations).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ view: 'archived' }),
-    ))
+    await waitFor(() =>
+      expect(apiModule.listConversations).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ view: 'archived' }),
+      ),
+    )
   })
 })

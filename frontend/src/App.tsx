@@ -8,10 +8,14 @@ export default function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null)
 
   useEffect(() => {
-    getSession(api).then((session) => setAuthenticated(session.authenticated)).catch(() => setAuthenticated(false))
+    getSession(api)
+      .then((session) => setAuthenticated(session.authenticated))
+      .catch(() => setAuthenticated(false))
   }, [])
 
-  if (authenticated === null) return <div className="boot-screen">Loading Jossie…</div>
-  if (!authenticated) return <Login onAuthenticated={() => setAuthenticated(true)} />
+  if (authenticated === null)
+    return <div className="boot-screen">Loading Jossie…</div>
+  if (!authenticated)
+    return <Login onAuthenticated={() => setAuthenticated(true)} />
   return <Workspace onLogout={() => setAuthenticated(false)} />
 }

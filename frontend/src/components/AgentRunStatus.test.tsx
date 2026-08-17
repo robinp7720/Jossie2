@@ -4,11 +4,20 @@ import { AgentRunStatus } from './AgentRunStatus'
 import type { PendingAction } from '../types'
 
 const action: PendingAction = {
-  id: 'action-1', batch_id: 'batch-1', conversation_id: 'conversation-1', run_id: 'run-1',
-  call_id: 'call-1', tool_name: 'mail_send', title: 'Send email',
+  id: 'action-1',
+  batch_id: 'batch-1',
+  conversation_id: 'conversation-1',
+  run_id: 'run-1',
+  call_id: 'call-1',
+  tool_name: 'mail_send',
+  title: 'Send email',
   summary: 'To ada@example.com — Status update\nThe migration is complete.',
-  effect: 'external_write', status: 'pending', created_at: '2026-08-02T12:00:00Z',
-  updated_at: '2026-08-02T12:00:00Z', result_error: null, resolved_at: null,
+  effect: 'external_write',
+  status: 'pending',
+  created_at: '2026-08-02T12:00:00Z',
+  updated_at: '2026-08-02T12:00:00Z',
+  result_error: null,
+  resolved_at: null,
 }
 
 afterEach(cleanup)
@@ -23,30 +32,51 @@ describe('AgentRunStatus', () => {
   })
 
   it('renders progress and uncertain outcomes without decision buttons', () => {
-    render(<AgentRunStatus
-      steps={[{ id: 'one', label: 'Using mail search', status: 'done' }]}
-      actions={[{ ...action, status: 'uncertain', result_error: 'Outcome unknown' }]}
-      onDecision={() => undefined}
-    />)
+    render(
+      <AgentRunStatus
+        steps={[{ id: 'one', label: 'Using mail search', status: 'done' }]}
+        actions={[
+          { ...action, status: 'uncertain', result_error: 'Outcome unknown' },
+        ]}
+        onDecision={() => undefined}
+      />,
+    )
     expect(screen.getByText('Using mail search')).toBeTruthy()
-    expect(screen.getByText('Verify this action manually before retrying.')).toBeTruthy()
+    expect(
+      screen.getByText('Verify this action manually before retrying.'),
+    ).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
   })
 
   it('restores persisted run progress after a refresh', () => {
-    render(<AgentRunStatus
-      steps={[]}
-      runs={[{
-        id: 'run-1', conversation_id: 'conversation-1', kind: 'chat', status: 'running',
-        goal_id: null, task_id: null, source_type: null, source_id: null,
-        summary: 'Conversation request', current_phase: 'Checking the calendar',
-        visibility: 'significant', cancel_requested: false,
-        error: null, started_at: '2026-08-07T12:00:00Z', finished_at: null,
-        created_at: '2026-08-07T12:00:00Z', updated_at: '2026-08-07T12:00:01Z',
-      }]}
-      actions={[]}
-      onDecision={() => undefined}
-    />)
+    render(
+      <AgentRunStatus
+        steps={[]}
+        runs={[
+          {
+            id: 'run-1',
+            conversation_id: 'conversation-1',
+            kind: 'chat',
+            status: 'running',
+            goal_id: null,
+            task_id: null,
+            source_type: null,
+            source_id: null,
+            summary: 'Conversation request',
+            current_phase: 'Checking the calendar',
+            visibility: 'significant',
+            cancel_requested: false,
+            error: null,
+            started_at: '2026-08-07T12:00:00Z',
+            finished_at: null,
+            created_at: '2026-08-07T12:00:00Z',
+            updated_at: '2026-08-07T12:00:01Z',
+          },
+        ]}
+        actions={[]}
+        onDecision={() => undefined}
+      />,
+    )
     expect(screen.getByText('Checking the calendar')).toBeTruthy()
     expect(screen.getByText('Working')).toBeTruthy()
   })
