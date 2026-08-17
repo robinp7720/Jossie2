@@ -1,7 +1,7 @@
 use anyhow::{Context, ensure};
 use futures::{StreamExt, stream};
 use jossie_core::types::{Message, Role};
-use jossie_db::{ChatImport, Database};
+use jossie_db::{ChatImport, Database, WorkRunStatus};
 use jossie_llm::{LlmClient, LlmRequestOptions, StructuredOutputFormat};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -135,7 +135,7 @@ impl ChatExportImporter {
             .db
             .update_work_run(
                 &run_id,
-                "running",
+                WorkRunStatus::Running,
                 Some("Reading and validating the export"),
                 None,
             )
@@ -165,7 +165,12 @@ impl ChatExportImporter {
             {
                 let _ = self
                     .db
-                    .update_work_run(&run_id, "cancelled", Some("Import cancelled"), None)
+                    .update_work_run(
+                        &run_id,
+                        WorkRunStatus::Cancelled,
+                        Some("Import cancelled"),
+                        None,
+                    )
                     .await;
                 let _ = self
                     .db
@@ -184,7 +189,7 @@ impl ChatExportImporter {
                     .db
                     .update_work_run(
                         &run_id,
-                        "failed",
+                        WorkRunStatus::Failed,
                         Some("Import needs attention"),
                         Some(&error_message),
                     )
@@ -205,7 +210,12 @@ impl ChatExportImporter {
         } else {
             let _ = self
                 .db
-                .update_work_run(&run_id, "completed", Some("Import completed"), None)
+                .update_work_run(
+                    &run_id,
+                    WorkRunStatus::Completed,
+                    Some("Import completed"),
+                    None,
+                )
                 .await;
             let _ = self
                 .db
@@ -267,7 +277,7 @@ impl ChatExportImporter {
         self.db
             .update_work_run(
                 &run_id,
-                "running",
+                WorkRunStatus::Running,
                 Some(&format!(
                     "Analyzing {analyzed_messages} of {} messages",
                     parsed.messages.len()
@@ -306,7 +316,7 @@ impl ChatExportImporter {
         self.db
             .update_work_run(
                 &run_id,
-                "running",
+                WorkRunStatus::Running,
                 Some("Saving durable memories and connections"),
                 None,
             )

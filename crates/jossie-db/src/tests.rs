@@ -26,6 +26,21 @@ async fn create_and_get_conversation() {
     assert_eq!(fetched.title.as_deref(), Some("Test"));
 }
 
+#[test]
+fn conversation_titles_are_truncated_by_unicode_characters() {
+    let exactly_72 = "🦀".repeat(72);
+    let longer = "🦀".repeat(73);
+
+    assert_eq!(
+        Database::conversation_title_from_content(&exactly_72),
+        Some(exactly_72)
+    );
+    assert_eq!(
+        Database::conversation_title_from_content(&longer),
+        Some(format!("{}...", "🦀".repeat(72)))
+    );
+}
+
 #[tokio::test]
 async fn list_conversations_ordering() {
     let db = test_db().await;

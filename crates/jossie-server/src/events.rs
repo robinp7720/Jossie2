@@ -1,5 +1,6 @@
 use crate::state::AppState;
 use jossie_core::types::Message;
+use jossie_db::WorkRunStatus;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -246,8 +247,13 @@ pub async fn persist_work_event(db: &jossie_db::Database, event: &ServerEvent) -
                     visibility: "significant",
                 })
                 .await?;
-                db.update_work_run(run_id, "running", Some("Planning the next step"), None)
-                    .await?;
+                db.update_work_run(
+                    run_id,
+                    WorkRunStatus::Running,
+                    Some("Planning the next step"),
+                    None,
+                )
+                .await?;
                 if let Some(run) = db.get_work_run(run_id).await? {
                     derived.push(ServerEvent::WorkRunUpdated {
                         conversation_id: Some(*conversation_id),
@@ -262,7 +268,7 @@ pub async fn persist_work_event(db: &jossie_db::Database, event: &ServerEvent) -
             } => {
                 db.update_work_run(
                     run_id,
-                    "running",
+                    WorkRunStatus::Running,
                     Some(if *iteration == 0 {
                         "Understanding the request"
                     } else {
@@ -304,7 +310,7 @@ pub async fn persist_work_event(db: &jossie_db::Database, event: &ServerEvent) -
                 tool,
             } => {
                 let label = format!("Using {}", tool.replace('_', " "));
-                db.update_work_run(run_id, "running", Some(&label), None)
+                db.update_work_run(run_id, WorkRunStatus::Running, Some(&label), None)
                     .await?;
                 let step = db
                     .create_work_run_step(run_id, Some(call_id), "capability", &label)
@@ -354,7 +360,7 @@ pub async fn persist_work_event(db: &jossie_db::Database, event: &ServerEvent) -
                 }
                 db.update_work_run(
                     run_id,
-                    "running",
+                    WorkRunStatus::Running,
                     Some(&format!("Finished using {}", tool.replace('_', " "))),
                     None,
                 )
@@ -384,8 +390,13 @@ pub async fn persist_work_event(db: &jossie_db::Database, event: &ServerEvent) -
                 run_id,
                 action,
             } => {
-                db.update_work_run(run_id, "waiting_for_approval", Some(&action.title), None)
-                    .await?;
+                db.update_work_run(
+                    run_id,
+                    WorkRunStatus::WaitingForApproval,
+                    Some(&action.title),
+                    None,
+                )
+                .await?;
                 if let Some(run) = db.get_work_run(run_id).await? {
                     derived.push(ServerEvent::WorkRunUpdated {
                         conversation_id: Some(*conversation_id),
@@ -414,9 +425,9 @@ pub async fn persist_work_event(db: &jossie_db::Database, event: &ServerEvent) -
                 db.update_work_run(
                     run_id,
                     if batch_resolved {
-                        "completed"
+                        WorkRunStatus::Completed
                     } else {
-                        "waiting_for_approval"
+                        WorkRunStatus::WaitingForApproval
                     },
                     Some(&phase),
                     (status == "failed").then_some("Approved action failed"),
@@ -436,7 +447,7 @@ pub async fn persist_work_event(db: &jossie_db::Database, event: &ServerEvent) -
             } => {
                 db.update_work_run(
                     run_id,
-                    "waiting_for_approval",
+                    WorkRunStatus::WaitingForApproval,
                     Some("Waiting for your approval"),
                     None,
                 )
@@ -452,7 +463,7 @@ pub async fn persist_work_event(db: &jossie_db::Database, event: &ServerEvent) -
                 conversation_id,
                 run_id,
             } => {
-                db.update_work_run(run_id, "completed", Some("Finished"), None)
+                db.update_work_run(run_id, WorkRunStatus::Completed, Some("Finished"), None)
                     .await?;
                 if let Some(run) = db.get_work_run(run_id).await? {
                     derived.push(ServerEvent::WorkRunUpdated {
@@ -467,7 +478,7 @@ pub async fn persist_work_event(db: &jossie_db::Database, event: &ServerEvent) -
                 reason,
                 ..
             } => {
-                db.update_work_run(run_id, "paused", Some(reason), None)
+                db.update_work_run(run_id, WorkRunStatus::Paused, Some(reason), None)
                     .await?;
                 if let Some(run) = db.get_work_run(run_id).await? {
                     derived.push(ServerEvent::WorkRunUpdated {
@@ -480,7 +491,7 @@ pub async fn persist_work_event(db: &jossie_db::Database, event: &ServerEvent) -
                 conversation_id,
                 run_id,
             } => {
-                db.update_work_run(run_id, "cancelled", Some("Cancelled"), None)
+                db.update_work_run(run_id, WorkRunStatus::Cancelled, Some("Cancelled"), None)
                     .await?;
                 if let Some(run) = db.get_work_run(run_id).await? {
                     derived.push(ServerEvent::WorkRunUpdated {
@@ -496,7 +507,7 @@ pub async fn persist_work_event(db: &jossie_db::Database, event: &ServerEvent) -
             } => {
                 db.update_work_run(
                     run_id,
-                    "failed",
+                    WorkRunStatus::Failed,
                     Some("Needs attention"),
                     Some(&preview_text(error, 240)),
                 )

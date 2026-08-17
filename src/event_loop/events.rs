@@ -132,7 +132,7 @@ async fn handle_event(
         .db
         .update_work_run(
             &work_run_id,
-            "running",
+            WorkRunStatus::Running,
             Some("Reviewing whether this needs attention"),
             None,
         )
@@ -159,7 +159,7 @@ async fn handle_event(
                 .db
                 .update_work_run(
                     &work_run_id,
-                    "completed",
+                    WorkRunStatus::Completed,
                     Some(if surfaced {
                         "Update surfaced"
                     } else {
@@ -192,7 +192,7 @@ async fn handle_event(
                 .db
                 .update_work_run(
                     &work_run_id,
-                    "failed",
+                    WorkRunStatus::Failed,
                     Some("Event review failed"),
                     Some(&e.to_string()),
                 )

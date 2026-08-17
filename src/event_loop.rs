@@ -5,7 +5,7 @@ use jossie_core::events::{
     IntegrationEventKind, NEW_EMAIL, NEW_EMAIL_BATCH, integration_event_kind,
 };
 use jossie_core::types::{Message, Role};
-use jossie_db::IntegrationEvent;
+use jossie_db::{IntegrationEvent, WorkRunStatus};
 use jossie_server::AppState;
 use jossie_server::events::{ServerEvent, persist_message};
 use std::collections::HashMap;

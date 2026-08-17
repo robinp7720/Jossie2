@@ -1,128 +1,10 @@
 use super::Database;
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, QueryBuilder, Sqlite};
+use sqlx::{QueryBuilder, Sqlite};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ts_rs::TS)]
-pub struct Goal {
-    pub id: String,
-    pub conversation_id: Option<String>,
-    pub title: String,
-    pub objective: String,
-    pub status: String,
-    pub blocker: Option<String>,
-    pub archived_at: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ts_rs::TS)]
-pub struct GoalTask {
-    pub id: String,
-    pub goal_id: String,
-    pub position: i64,
-    pub title: String,
-    pub status: String,
-    pub summary: Option<String>,
-    pub blocker: Option<String>,
-    pub source_type: Option<String>,
-    pub source_id: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-pub struct GoalWithTasks {
-    #[serde(flatten)]
-    pub goal: Goal,
-    pub tasks: Vec<GoalTask>,
-    pub completed_tasks: usize,
-    pub total_tasks: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ts_rs::TS)]
-pub struct WorkRun {
-    pub id: String,
-    pub goal_id: Option<String>,
-    pub task_id: Option<String>,
-    pub conversation_id: Option<String>,
-    pub kind: String,
-    pub source_type: Option<String>,
-    pub source_id: Option<String>,
-    pub status: String,
-    pub summary: String,
-    pub current_phase: Option<String>,
-    pub error: Option<String>,
-    pub visibility: String,
-    pub cancel_requested: bool,
-    pub started_at: Option<String>,
-    pub finished_at: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ts_rs::TS)]
-pub struct WorkRunStep {
-    pub id: String,
-    pub run_id: String,
-    pub sequence: i64,
-    pub kind: String,
-    pub label: String,
-    pub status: String,
-    pub summary: Option<String>,
-    pub error: Option<String>,
-    pub started_at: String,
-    pub finished_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-pub struct WorkRunDetail {
-    #[serde(flatten)]
-    pub run: WorkRun,
-    pub steps: Vec<WorkRunStep>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct WorkRunCheckpoint {
-    pub run_id: String,
-    pub goal_id: String,
-    pub task_id: Option<String>,
-    pub conversation_id: String,
-    pub state_json: String,
-    pub partial_response: String,
-    pub status: String,
-    pub resumed_by_run_id: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ts_rs::TS)]
-pub struct WorkerStatus {
-    pub worker_key: String,
-    pub label: String,
-    pub status: String,
-    pub current_run_id: Option<String>,
-    pub detail: Option<String>,
-    pub last_started_at: Option<String>,
-    pub last_success_at: Option<String>,
-    pub last_error_at: Option<String>,
-    pub last_error: Option<String>,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct NewWorkRun<'a> {
-    pub id: Option<&'a str>,
-    pub goal_id: Option<&'a str>,
-    pub task_id: Option<&'a str>,
-    pub conversation_id: Option<Uuid>,
-    pub kind: &'a str,
-    pub source_type: Option<&'a str>,
-    pub source_id: Option<&'a str>,
-    pub summary: &'a str,
-    pub visibility: &'a str,
-}
+mod models;
+pub use models::*;
 
 impl Database {
     pub async fn create_goal(
@@ -636,22 +518,18 @@ impl Database {
     pub async fn update_work_run(
         &self,
         id: &str,
-        status: &str,
+        status: WorkRunStatus,
         phase: Option<&str>,
         error: Option<&str>,
     ) -> anyhow::Result<bool> {
         let now = Utc::now().to_rfc3339();
-        let terminal = matches!(
-            status,
-            "completed" | "failed" | "cancelled" | "interrupted" | "paused"
-        );
-        let started = (status == "running").then_some(now.clone());
-        let finished = terminal.then_some(now.clone());
+        let started = (status == WorkRunStatus::Running).then_some(now.clone());
+        let finished = status.is_terminal().then_some(now.clone());
         Ok(sqlx::query(
             "UPDATE work_runs SET status = ?, current_phase = ?, error = ?,
              started_at = COALESCE(started_at, ?), finished_at = COALESCE(?, finished_at), updated_at = ?
              WHERE id = ?",
-        ).bind(status).bind(phase).bind(error).bind(started).bind(finished).bind(&now).bind(id)
+        ).bind(status.as_str()).bind(phase).bind(error).bind(started).bind(finished).bind(&now).bind(id)
         .execute(&self.pool).await?.rows_affected() == 1)
     }
 
@@ -1097,9 +975,14 @@ mod tests {
             })
             .await
             .unwrap();
-        db.update_work_run(&run.id, "running", Some("Building the Work page"), None)
-            .await
-            .unwrap();
+        db.update_work_run(
+            &run.id,
+            WorkRunStatus::Running,
+            Some("Building the Work page"),
+            None,
+        )
+        .await
+        .unwrap();
         let step = db
             .create_work_run_step(&run.id, Some("step-one"), "capability", "Build frontend")
             .await
@@ -1107,7 +990,7 @@ mod tests {
         db.finish_work_run_step(&step.id, "completed", Some("Build passed"), None)
             .await
             .unwrap();
-        db.update_work_run(&run.id, "completed", Some("Finished"), None)
+        db.update_work_run(&run.id, WorkRunStatus::Completed, Some("Finished"), None)
             .await
             .unwrap();
         let detail = db.get_work_run_detail(&run.id).await.unwrap().unwrap();
@@ -1132,7 +1015,7 @@ mod tests {
             })
             .await
             .unwrap();
-        db.update_work_run(&run.id, "running", Some("Checking"), None)
+        db.update_work_run(&run.id, WorkRunStatus::Running, Some("Checking"), None)
             .await
             .unwrap();
         assert_eq!(db.mark_running_work_interrupted().await.unwrap(), 1);
@@ -1273,9 +1156,14 @@ mod tests {
             })
             .await
             .unwrap();
-        db.update_work_run(&run.id, "running", Some("Reading messages"), None)
-            .await
-            .unwrap();
+        db.update_work_run(
+            &run.id,
+            WorkRunStatus::Running,
+            Some("Reading messages"),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(db.mark_running_work_interrupted().await.unwrap(), 1);
         assert_eq!(db.pause_goals_with_interrupted_runs().await.unwrap(), 1);
@@ -1364,7 +1252,7 @@ mod tests {
             })
             .await
             .unwrap();
-        db.update_work_run(&interrupted.id, "running", None, None)
+        db.update_work_run(&interrupted.id, WorkRunStatus::Running, None, None)
             .await
             .unwrap();
         assert_eq!(db.mark_running_work_interrupted().await.unwrap(), 1);
@@ -1383,9 +1271,14 @@ mod tests {
             })
             .await
             .unwrap();
-        db.update_work_run(&completed.id, "completed", Some("Finished"), None)
-            .await
-            .unwrap();
+        db.update_work_run(
+            &completed.id,
+            WorkRunStatus::Completed,
+            Some("Finished"),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(db.pause_goals_with_interrupted_runs().await.unwrap(), 0);
         assert_eq!(

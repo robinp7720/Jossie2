@@ -69,7 +69,7 @@ async fn maybe_run_heartbeat(state: &Arc<AppState>) -> anyhow::Result<()> {
         .db
         .update_work_run(
             &work_run_id,
-            "running",
+            WorkRunStatus::Running,
             Some("Checking whether anything needs attention"),
             None,
         )
@@ -89,7 +89,7 @@ async fn maybe_run_heartbeat(state: &Arc<AppState>) -> anyhow::Result<()> {
                     .db
                     .update_work_run(
                         &work_run_id,
-                        "cancelled",
+                        WorkRunStatus::Cancelled,
                         Some("Deferred because the conversation is busy"),
                         None,
                     )
@@ -113,7 +113,7 @@ async fn maybe_run_heartbeat(state: &Arc<AppState>) -> anyhow::Result<()> {
                     .db
                     .update_work_run(
                         &work_run_id,
-                        "failed",
+                        WorkRunStatus::Failed,
                         Some("Heartbeat failed"),
                         Some(&e.to_string()),
                     )
@@ -128,7 +128,7 @@ async fn maybe_run_heartbeat(state: &Arc<AppState>) -> anyhow::Result<()> {
             .db
             .update_work_run(
                 &work_run_id,
-                "completed",
+                WorkRunStatus::Completed,
                 Some("Nothing needed attention"),
                 None,
             )
@@ -173,7 +173,7 @@ async fn maybe_run_heartbeat(state: &Arc<AppState>) -> anyhow::Result<()> {
         .db
         .update_work_run(
             &work_run_id,
-            "completed",
+            WorkRunStatus::Completed,
             Some("Proactive update surfaced"),
             None,
         )

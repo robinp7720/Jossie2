@@ -228,7 +228,12 @@ async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
             .await?;
         state
             .db
-            .update_work_run(&work_run_id, "running", Some("Delivering an update"), None)
+            .update_work_run(
+                &work_run_id,
+                WorkRunStatus::Running,
+                Some("Delivering an update"),
+                None,
+            )
             .await?;
 
         // Resolve chat id for the specific conversation (cached for this batch).
@@ -260,7 +265,7 @@ async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
                             .db
                             .update_work_run(
                                 &work_run_id,
-                                "failed",
+                                WorkRunStatus::Failed,
                                 Some("Delivery failed"),
                                 Some(&e.to_string()),
                             )
@@ -300,7 +305,12 @@ async fn process_oob_messages(state: &Arc<AppState>) -> anyhow::Result<()> {
         state.db.mark_oob_message_sent(&msg.id).await?;
         state
             .db
-            .update_work_run(&work_run_id, "completed", Some("Delivered"), None)
+            .update_work_run(
+                &work_run_id,
+                WorkRunStatus::Completed,
+                Some("Delivered"),
+                None,
+            )
             .await?;
     }
 

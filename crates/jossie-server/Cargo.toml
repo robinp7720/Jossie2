@@ -8,13 +8,10 @@ jossie-core = { workspace = true }
 jossie-llm = { workspace = true }
 jossie-db = { workspace = true }
 jossie-integration-google = { workspace = true }
-jossie-integration-email = { workspace = true }
 jossie-integration-mail = { workspace = true }
-jossie-integration-browser = { workspace = true }
 jossie-integration-files = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
@@ -25,7 +22,6 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
-urlencoding = { workspace = true }
 url = { workspace = true }
 regex = { workspace = true }
 subtle = { workspace = true }
@@ -33,3 +29,6 @@ argon2 = { workspace = true }
 sha2 = { workspace = true }
 ts-rs = { workspace = true }
 schemars = { workspace = true }
+
+[dev-dependencies]
+jossie-integration-email = { workspace = true }

@@ -1885,7 +1885,6 @@ dependencies = [
  "jossie-db",
  "lettre",
  "mailparse",
- "serde",
  "serde_json",
  "tokio",
  "tokio-util",
@@ -1898,7 +1897,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "chrono",
  "futures",
  "jossie-core",
  "jossie-db",
@@ -1955,7 +1953,6 @@ dependencies = [
  "axum",
  "base64",
  "jossie-core",
- "regex",
  "reqwest",
  "schemars 1.2.0",
  "serde",
@@ -1977,7 +1974,6 @@ dependencies = [
  "schemars 1.2.0",
  "serde",
  "serde_json",
- "tracing",
 ]
 
 [[package]]
@@ -1993,7 +1989,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "totp-rs",
- "tracing",
 ]
 
 [[package]]
@@ -2009,8 +2004,6 @@ dependencies = [
  "schemars 1.2.0",
  "serde",
  "serde_json",
- "tokio",
- "tracing",
  "uuid",
 ]
 
@@ -2019,7 +2012,6 @@ name = "jossie-llm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "axum",
  "base64",
  "chrono",
@@ -2030,7 +2022,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tokio-stream",
  "tracing",
  "uuid",
 ]
@@ -2046,7 +2037,6 @@ dependencies = [
  "futures",
  "jossie-core",
  "jossie-db",
- "jossie-integration-browser",
  "jossie-integration-email",
  "jossie-integration-files",
  "jossie-integration-google",
@@ -2059,14 +2049,12 @@ dependencies = [
  "sha2",
  "subtle",
  "tokio",
- "tokio-stream",
  "tokio-util",
  "tower",
  "tower-http",
  "tracing",
  "ts-rs",
  "url",
- "urlencoding",
  "uuid",
 ]
 
@@ -2076,12 +2064,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "chrono",
  "jossie-core",
  "jossie-db",
- "jossie-llm",
  "jossie-server",
- "serde",
  "serde_json",
  "teloxide",
  "tokio",

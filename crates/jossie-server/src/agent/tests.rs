@@ -206,7 +206,7 @@ mod tests {
                 },
             ),
         ];
-        compact_tool_batch(&mut results, 8_000);
+        compact_tool_batch(&mut results, 6_000);
         assert!(
             results
                 .iter()

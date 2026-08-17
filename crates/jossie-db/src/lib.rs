@@ -27,8 +27,9 @@ impl Database {
             return None;
         }
 
-        let mut title = trimmed.chars().take(72).collect::<String>();
-        if trimmed.len() > 72 {
+        let mut characters = trimmed.chars();
+        let mut title = characters.by_ref().take(72).collect::<String>();
+        if characters.next().is_some() {
             title.push_str("...");
         }
         Some(title)
@@ -526,10 +527,6 @@ struct GraphNodeRow {
     #[sqlx(rename = "type")]
     node_type: String,
     properties: String,
-    #[allow(dead_code)]
-    created_at: String,
-    #[allow(dead_code)]
-    updated_at: String,
 }
 
 impl From<GraphNodeRow> for GraphNode {
@@ -554,10 +551,6 @@ struct GraphEdgeRow {
     relation: String,
     weight: f64,
     properties: String,
-    #[allow(dead_code)]
-    created_at: String,
-    #[allow(dead_code)]
-    updated_at: String,
 }
 
 impl From<GraphEdgeRow> for GraphEdge {
@@ -580,8 +573,6 @@ impl From<GraphEdgeRow> for GraphEdge {
 struct GraphNeighborRow {
     edge_id: String,
     relation: String,
-    #[allow(dead_code)]
-    weight: f64,
     node_id: String,
     label: String,
     node_type: String,
@@ -594,8 +585,6 @@ struct GraphContextNeighborRow {
     direction: String,
     edge_id: String,
     relation: String,
-    #[allow(dead_code)]
-    weight: f64,
     node_id: String,
     label: String,
     node_type: String,

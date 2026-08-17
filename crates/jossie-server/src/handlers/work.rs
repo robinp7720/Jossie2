@@ -4,6 +4,7 @@ use axum::{
     extract::{Path, Query, State},
 };
 use jossie_core::types::{Message, Role};
+use jossie_db::WorkRunStatus;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -340,7 +341,7 @@ pub async fn cancel_run(
             .await?;
         state
             .db
-            .update_work_run(&id, "cancelled", Some("Cancelled"), None)
+            .update_work_run(&id, WorkRunStatus::Cancelled, Some("Cancelled"), None)
             .await?;
     }
     if let Some(conversation_id) = run

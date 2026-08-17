@@ -52,7 +52,8 @@ impl Database {
         let now_str = Utc::now().to_rfc3339();
 
         let existing = sqlx::query_as::<_, GraphEdgeRow>(
-            "SELECT * FROM graph_edges WHERE source_id = ? AND target_id = ? AND relation = ?",
+            "SELECT id, source_id, target_id, relation, weight, properties
+             FROM graph_edges WHERE source_id = ? AND target_id = ? AND relation = ?",
         )
         .bind(source_id)
         .bind(target_id)
@@ -124,17 +125,19 @@ impl Database {
     }
 
     pub async fn graph_get_node(&self, id: &str) -> anyhow::Result<Option<GraphNode>> {
-        let row = sqlx::query_as::<_, GraphNodeRow>("SELECT * FROM graph_nodes WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query_as::<_, GraphNodeRow>(
+            "SELECT id, label, type, properties FROM graph_nodes WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.map(Into::into))
     }
 
     pub async fn graph_find_nodes(&self, query: &str) -> anyhow::Result<Vec<GraphNode>> {
         let search = format!("%{}%", query);
         let rows = sqlx::query_as::<_, GraphNodeRow>(
-            "SELECT * FROM graph_nodes WHERE label LIKE ? LIMIT 20",
+            "SELECT id, label, type, properties FROM graph_nodes WHERE label LIKE ? LIMIT 20",
         )
         .bind(search)
         .fetch_all(&self.pool)
@@ -150,7 +153,9 @@ impl Database {
         if queries.is_empty() {
             return Ok(Vec::new());
         }
-        let mut builder = QueryBuilder::<Sqlite>::new("SELECT * FROM graph_nodes WHERE ");
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT id, label, type, properties FROM graph_nodes WHERE ",
+        );
         {
             let mut separated = builder.separated(" OR ");
             for query in queries {
@@ -172,7 +177,7 @@ impl Database {
         // Outgoing edges
         let outgoing = sqlx::query_as::<_, GraphNeighborRow>(
             r#"
-            SELECT e.id as edge_id, e.relation, e.weight, 
+            SELECT e.id as edge_id, e.relation,
                    n.id as node_id, n.label, n.type as node_type, n.properties as node_properties
             FROM graph_edges e
             JOIN graph_nodes n ON e.target_id = n.id
@@ -186,7 +191,7 @@ impl Database {
         // Incoming edges
         let incoming = sqlx::query_as::<_, GraphNeighborRow>(
             r#"
-            SELECT e.id as edge_id, e.relation, e.weight, 
+            SELECT e.id as edge_id, e.relation,
                    n.id as node_id, n.label, n.type as node_type, n.properties as node_properties
             FROM graph_edges e
             JOIN graph_nodes n ON e.source_id = n.id
@@ -275,7 +280,7 @@ impl Database {
             ")), ranked AS (\n\
              SELECT *, ROW_NUMBER() OVER (PARTITION BY root_id ORDER BY weight DESC, updated_at DESC) AS rank\n\
              FROM neighbors)\n\
-             SELECT root_id, direction, edge_id, relation, weight, node_id, label, node_type, node_properties\n\
+             SELECT root_id, direction, edge_id, relation, node_id, label, node_type, node_properties\n\
              FROM ranked WHERE rank <= ",
         );
         builder.push_bind(per_node_limit.clamp(1, 20) as i64);
@@ -295,7 +300,7 @@ impl Database {
     pub async fn graph_list_nodes(&self, limit: usize) -> anyhow::Result<Vec<GraphNode>> {
         let limit = limit.clamp(1, 5000);
         let rows = sqlx::query_as::<_, GraphNodeRow>(
-            "SELECT * FROM graph_nodes ORDER BY updated_at DESC LIMIT ?",
+            "SELECT id, label, type, properties FROM graph_nodes ORDER BY updated_at DESC LIMIT ?",
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -307,7 +312,8 @@ impl Database {
     pub async fn graph_list_edges(&self, limit: usize) -> anyhow::Result<Vec<GraphEdge>> {
         let limit = limit.clamp(1, 5000);
         let rows = sqlx::query_as::<_, GraphEdgeRow>(
-            "SELECT * FROM graph_edges ORDER BY updated_at DESC LIMIT ?",
+            "SELECT id, source_id, target_id, relation, weight, properties
+             FROM graph_edges ORDER BY updated_at DESC LIMIT ?",
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -322,7 +328,8 @@ impl Database {
         node_type: &str,
     ) -> anyhow::Result<Vec<GraphNode>> {
         let rows = sqlx::query_as::<_, GraphNodeRow>(
-            "SELECT * FROM graph_nodes WHERE type = ? ORDER BY updated_at DESC LIMIT 50",
+            "SELECT id, label, type, properties
+             FROM graph_nodes WHERE type = ? ORDER BY updated_at DESC LIMIT 50",
         )
         .bind(node_type)
         .fetch_all(&self.pool)
@@ -338,7 +345,9 @@ impl Database {
         if node_types.is_empty() {
             return Ok(Vec::new());
         }
-        let mut builder = QueryBuilder::<Sqlite>::new("SELECT * FROM graph_nodes WHERE type IN (");
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT id, label, type, properties FROM graph_nodes WHERE type IN (",
+        );
         {
             let mut separated = builder.separated(", ");
             for node_type in node_types {
@@ -365,16 +374,12 @@ impl Database {
             #[sqlx(rename = "type")]
             node_type: String,
             properties: String,
-            #[allow(dead_code)]
-            created_at: String,
-            #[allow(dead_code)]
-            updated_at: String,
             connection_count: i64,
         }
 
         let rows = sqlx::query_as::<_, CentralNodeRow>(
             r#"
-            SELECT n.*, COUNT(e.id) as connection_count
+            SELECT n.id, n.label, n.type, n.properties, COUNT(e.id) as connection_count
             FROM graph_nodes n
             LEFT JOIN graph_edges e ON e.source_id = n.id OR e.target_id = n.id
             GROUP BY n.id

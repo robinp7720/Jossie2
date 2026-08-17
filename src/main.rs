@@ -1,6 +1,6 @@
 use anyhow::Result;
 use jossie_core::integration::IntegrationRegistry;
-use jossie_db::Database;
+use jossie_db::{Database, WorkRunStatus};
 use jossie_integration_http::HttpIntegration;
 use jossie_integration_memory::MemoryIntegration;
 use jossie_integration_scheduler::SchedulerIntegration;
@@ -298,7 +298,7 @@ async fn run_work_watchdog(state: Arc<AppState>) {
                 .db
                 .update_work_run(
                     &run.id,
-                    "failed",
+                    WorkRunStatus::Failed,
                     Some("Stopped after making no progress"),
                     Some("Run exceeded the stalled-operation deadline"),
                 )
