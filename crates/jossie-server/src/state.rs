@@ -1,7 +1,6 @@
 use crate::events::ServerEvent;
 use jossie_core::integration::IntegrationRegistry;
 use jossie_db::Database;
-use jossie_integration_google::GoogleIntegration;
 use jossie_integration_mail::MailIntegration;
 use jossie_llm::LlmClient;
 use std::collections::{HashMap, HashSet};
@@ -10,7 +9,8 @@ use tokio::sync::{RwLock, broadcast};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-pub struct PendingGoogleOAuth {
+pub struct PendingOAuth {
+    pub provider: String,
     pub account_name: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -63,12 +63,10 @@ pub struct AppState {
     pub web: WebRuntimeConfig,
     pub telegram: TelegramRuntimeConfig,
     pub background: BackgroundRuntimeConfig,
-    pub google_config: jossie_core::config::GoogleConfig,
-    pub google_integration: Option<Arc<GoogleIntegration>>,
     pub active_conversations: Arc<RwLock<HashSet<Uuid>>>,
     pub cancelled_conversations: Arc<RwLock<HashSet<Uuid>>>,
     pub run_cancellations: Arc<RwLock<HashMap<Uuid, CancellationToken>>>,
-    pub pending_google_oauth: Arc<RwLock<HashMap<String, PendingGoogleOAuth>>>,
+    pub pending_oauth: Arc<RwLock<HashMap<String, PendingOAuth>>>,
     pub event_tx: broadcast::Sender<ServerEvent>,
 }
 

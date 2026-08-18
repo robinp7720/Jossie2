@@ -55,6 +55,22 @@ struct GoogleAccountArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct ContactsSearchArgs {
+    account_id: String,
+    query: String,
+    #[schemars(required)]
+    page_size: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ContactReadArgs {
+    account_id: String,
+    resource_name: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct CalendarListEventsArgs {
     account_id: String,
     #[schemars(required)]
@@ -183,6 +199,7 @@ include!("google/calendar_provider.rs");
 include!("google/mail.rs");
 include!("google/drive.rs");
 include!("google/calendar.rs");
+include!("google/personal.rs");
 include!("google/polling.rs");
 include!("google/payload.rs");
 include!("google/integration.rs");

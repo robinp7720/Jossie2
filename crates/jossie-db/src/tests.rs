@@ -721,6 +721,33 @@ async fn test_integration_accounts() {
 }
 
 #[tokio::test]
+async fn integration_account_credentials_are_encrypted_when_configured() {
+    let db = Database::new_with_encryption_key("sqlite::memory:", Some("test encryption key"))
+        .await
+        .unwrap();
+    db.migrate().await.unwrap();
+    let id = db
+        .add_integration_account(
+            "spotify",
+            "Music",
+            &serde_json::json!({"access_token":"top-secret"}),
+        )
+        .await
+        .unwrap();
+
+    let raw: String = sqlx::query_scalar("SELECT data FROM integration_accounts WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert!(raw.starts_with("enc:v1:"));
+    assert!(!raw.contains("top-secret"));
+
+    let account = db.get_integration_account(&id).await.unwrap().unwrap();
+    assert!(account.data.contains("top-secret"));
+}
+
+#[tokio::test]
 async fn integration_event_dedupe_and_processing() {
     let db = test_db().await;
     let payload = serde_json::json!({"foo": "bar"});

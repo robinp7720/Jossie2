@@ -1,6 +1,12 @@
+use aes_gcm::{
+    AeadCore, Aes256Gcm, KeyInit,
+    aead::{Aead, OsRng},
+};
 use anyhow::Context;
+use base64::Engine;
 use chrono::{Duration, Utc};
 use jossie_core::types::{Conversation, Message, Role};
+use sha2::{Digest, Sha256};
 use sqlx::QueryBuilder;
 use sqlx::Row;
 use sqlx::sqlite::{Sqlite, SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
@@ -17,6 +23,7 @@ pub use work::*;
 pub struct Database {
     pool: SqlitePool,
     url: String,
+    account_cipher: Option<Aes256Gcm>,
 }
 
 impl Database {
@@ -36,15 +43,66 @@ impl Database {
     }
 
     pub async fn new(url: &str) -> anyhow::Result<Self> {
+        Self::new_with_encryption_key(url, None).await
+    }
+
+    pub async fn new_with_encryption_key(
+        url: &str,
+        encryption_key: Option<&str>,
+    ) -> anyhow::Result<Self> {
         let options = SqliteConnectOptions::from_str(url)?.foreign_keys(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(options)
             .await?;
+        let account_cipher = encryption_key
+            .filter(|key| !key.trim().is_empty())
+            .map(|key| {
+                let digest = Sha256::digest(key.as_bytes());
+                Aes256Gcm::new_from_slice(&digest)
+                    .expect("SHA-256 always produces a valid AES-256 key")
+            });
         Ok(Self {
             pool,
             url: url.to_string(),
+            account_cipher,
         })
+    }
+
+    fn protect_account_data(&self, plaintext: &str) -> anyhow::Result<String> {
+        let Some(cipher) = &self.account_cipher else {
+            return Ok(plaintext.to_string());
+        };
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let ciphertext = cipher
+            .encrypt(&nonce, plaintext.as_bytes())
+            .map_err(|_| anyhow::anyhow!("Unable to encrypt integration credentials"))?;
+        let mut payload = nonce.to_vec();
+        payload.extend(ciphertext);
+        Ok(format!(
+            "enc:v1:{}",
+            base64::engine::general_purpose::STANDARD.encode(payload)
+        ))
+    }
+
+    fn unprotect_account_data(&self, stored: &str) -> anyhow::Result<String> {
+        let Some(encoded) = stored.strip_prefix("enc:v1:") else {
+            return Ok(stored.to_string());
+        };
+        let cipher = self.account_cipher.as_ref().ok_or_else(|| anyhow::anyhow!("Integration credentials are encrypted but database.encryption_key is not configured"))?;
+        let payload = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+        anyhow::ensure!(
+            payload.len() > 12,
+            "Encrypted integration credential payload is invalid"
+        );
+        let plaintext = cipher
+            .decrypt((&payload[..12]).into(), &payload[12..])
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Unable to decrypt integration credentials; check database.encryption_key"
+                )
+            })?;
+        Ok(String::from_utf8(plaintext)?)
     }
 
     pub async fn migrate(&self) -> anyhow::Result<()> {

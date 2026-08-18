@@ -17,7 +17,7 @@ pub struct AccountConfig {
 
 #[derive(Deserialize)]
 pub struct AddAccountRequest {
-    pub integration: String, // "google" or "email"
+    pub integration: String,
     pub name: String,
     pub config: serde_json::Value,
 }
@@ -90,6 +90,7 @@ fn merge_account_config(
 }
 
 fn validate_account_config(
+    state: &AppState,
     integration: &str,
     config: &serde_json::Value,
     require_secret: bool,
@@ -97,41 +98,37 @@ fn validate_account_config(
     let config = config.as_object().ok_or_else(|| {
         AppError::bad_request(anyhow::anyhow!("Account configuration must be an object"))
     })?;
-    let required: &[&str] = match integration {
-        "email" => &["username", "imap_host", "smtp_host"],
-        "google" => &[],
-        _ => {
-            return Err(AppError::bad_request(anyhow::anyhow!(
+    let spec = state
+        .registry
+        .connection_specs()
+        .into_iter()
+        .find(|spec| spec.integration == integration)
+        .ok_or_else(|| {
+            AppError::bad_request(anyhow::anyhow!(
                 "Unsupported integration type: {integration}"
-            )));
-        }
-    };
-    for key in required {
+            ))
+        })?;
+    for field in spec
+        .fields
+        .iter()
+        .filter(|field| field.required && (!field.secret || require_secret))
+    {
+        let key = &field.name;
         if config
-            .get(*key)
+            .get(key)
             .and_then(serde_json::Value::as_str)
             .is_none_or(|value| value.trim().is_empty())
         {
             return Err(AppError::bad_request(anyhow::anyhow!("{key} is required")));
         }
     }
-    if require_secret {
-        let secret = if integration == "email" {
-            "password"
-        } else {
-            "refresh_token"
-        };
-        if config
-            .get(secret)
-            .and_then(serde_json::Value::as_str)
-            .is_none_or(|value| value.trim().is_empty())
-        {
-            return Err(AppError::bad_request(anyhow::anyhow!(
-                "{secret} is required when adding an account"
-            )));
-        }
-    }
     Ok(())
+}
+
+pub async fn list_integration_types(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<jossie_core::integration::ConnectionSpec>> {
+    Json(state.registry.connection_specs())
 }
 
 pub async fn list_accounts(
@@ -139,23 +136,10 @@ pub async fn list_accounts(
 ) -> Result<Json<Vec<AccountConfig>>, AppError> {
     let mut accounts = Vec::new();
 
-    // List Google Accounts
-    let google_accounts = state.db.list_integration_accounts("google").await?;
-    for acc in google_accounts {
+    for acc in state.db.list_all_integration_accounts().await? {
         accounts.push(AccountConfig {
             id: acc.id,
-            integration: "google".to_string(),
-            name: acc.name,
-            details: sanitize_account_details(&acc.data),
-        });
-    }
-
-    // List Email Accounts
-    let email_accounts = state.db.list_integration_accounts("email").await?;
-    for acc in email_accounts {
-        accounts.push(AccountConfig {
-            id: acc.id,
-            integration: "email".to_string(),
+            integration: acc.integration,
             name: acc.name,
             details: sanitize_account_details(&acc.data),
         });
@@ -168,7 +152,7 @@ pub async fn add_account(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AddAccountRequest>,
 ) -> Result<Json<String>, AppError> {
-    validate_account_config(&req.integration, &req.config, true)?;
+    validate_account_config(&state, &req.integration, &req.config, true)?;
     let id = state
         .db
         .add_integration_account(&req.integration, &req.name, &req.config)
@@ -196,7 +180,7 @@ pub async fn update_account(
         AppError::bad_request(anyhow::anyhow!("Stored account configuration is invalid"))
     })?;
     let merged = merge_account_config(existing, req.config);
-    validate_account_config(&account.integration, &merged, false)?;
+    validate_account_config(&state, &account.integration, &merged, false)?;
     if !state
         .db
         .update_integration_account(&id, req.name.trim(), &merged)

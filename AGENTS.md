@@ -31,6 +31,7 @@ Jossie2/
     jossie-integration-http/   # outbound HTTP requests with guardrails
     jossie-integration-scheduler/ # scheduled tasks + out-of-band messages
     jossie-integration-files/  # uploaded files and chat-export imports
+    jossie-integration-personal/ # Tasks, Home Assistant, Notion, and Spotify
 ```
 
 ## Workspace Summary
@@ -50,6 +51,7 @@ Jossie2/
 | `integration-browser` | page fetch/render via headless Chrome, DDG-style search |
 | `integration-http` | generic HTTP requests with SSRF-style blocking and domain controls |
 | `integration-scheduler` | one-shot/recurring tasks, cancel/list, out-of-band notifications |
+| `integration-personal` | Google Tasks/Todoist, Home Assistant, Notion, and Spotify tools |
 | `frontend` | React chat UI, onboarding/accounts UI, knowledge graph view |
 
 ## Core Architecture
@@ -184,6 +186,9 @@ Current top-level config sections are defined in `crates/jossie-core/src/config.
 - `[google]`
 - `[http]`
 - `[heartbeat]`
+- `[todoist]`
+- `[notion]`
+- `[spotify]`
 
 Environment overrides are implemented in `src/main.rs`:
 
@@ -205,6 +210,10 @@ Environment overrides are implemented in `src/main.rs`:
 - `JOSSIE_GOOGLE_CLIENT_ID`
 - `JOSSIE_GOOGLE_CLIENT_SECRET`
 - `JOSSIE_GOOGLE_REFRESH_TOKEN`
+- `JOSSIE_DATABASE_ENCRYPTION_KEY`
+- `JOSSIE_TODOIST_CLIENT_ID`, `JOSSIE_TODOIST_CLIENT_SECRET`
+- `JOSSIE_NOTION_CLIENT_ID`, `JOSSIE_NOTION_CLIENT_SECRET`
+- `JOSSIE_SPOTIFY_CLIENT_ID`, `JOSSIE_SPOTIFY_CLIENT_SECRET`
 
 Other runtime knobs worth knowing:
 

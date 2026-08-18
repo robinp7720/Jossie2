@@ -72,3 +72,21 @@ export type GraphResponse = { nodes: GraphNode[]; edges: GraphEdge[] }
 export type Memory = MemoryEntryWithMetadata
 export type Goal = GoalWithTasks
 export type Dashboard = DashboardResponse
+
+export type ConnectionField = {
+  name: string
+  label: string
+  input_type: string
+  required: boolean
+  secret: boolean
+  description?: string | null
+  default_value?: string | null
+}
+
+export type ConnectionSpec = {
+  integration: string
+  display_name: string
+  description: string
+  fields: ConnectionField[]
+  oauth_available: boolean
+}

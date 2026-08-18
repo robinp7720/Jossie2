@@ -30,6 +30,10 @@ async fn setup_app() -> axum::Router {
         Arc::new(EmailIntegration::new(&Default::default())),
         None,
     ));
+    let mut registry = IntegrationRegistry::new();
+    registry
+        .register(Arc::new(EmailIntegration::new(&Default::default())))
+        .unwrap();
     let state = Arc::new(AppState {
         db: db.clone(),
         llm: llm.clone(),
@@ -37,7 +41,7 @@ async fn setup_app() -> axum::Router {
         chat_export_importer: Arc::new(jossie_integration_files::ChatExportImporter::new(
             db, llm, false,
         )),
-        registry: Arc::new(IntegrationRegistry::new()),
+        registry: Arc::new(registry),
         mail_integration,
         agent: AgentRuntimeConfig {
             system_prompt: "test prompt".to_string(),
@@ -72,17 +76,10 @@ async fn setup_app() -> axum::Router {
             heartbeat_enabled: false,
             heartbeat_interval_secs: 14_400,
         },
-        google_config: jossie_core::config::GoogleConfig {
-            client_id: "".to_string(),
-            client_secret: "".to_string(),
-            refresh_token: "".to_string(),
-            debug_gmail_payload: false,
-        },
-        google_integration: None,
         active_conversations: Arc::new(RwLock::new(HashSet::new())),
         cancelled_conversations: Arc::new(RwLock::new(HashSet::new())),
         run_cancellations: Arc::new(RwLock::new(HashMap::new())),
-        pending_google_oauth: Arc::new(RwLock::new(HashMap::new())),
+        pending_oauth: Arc::new(RwLock::new(HashMap::new())),
         event_tx,
     });
 
@@ -118,6 +115,34 @@ async fn test_health_check() {
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "ok");
+}
+
+#[tokio::test]
+async fn integration_types_are_provider_declared_and_authenticated() {
+    let app = setup_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/config/integration-types")
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let specs: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(specs[0]["integration"], "email");
+    assert!(
+        specs[0]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field["name"] == "imap_host")
+    );
 }
 
 #[tokio::test]

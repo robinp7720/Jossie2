@@ -3,6 +3,7 @@ import type {
   ActivityEvent,
   ChatImport,
   Conversation,
+  ConnectionSpec,
   Dashboard,
   Goal,
   GoalDetail,
@@ -258,6 +259,9 @@ export const listOnboarding = (config: ApiConfig) =>
 
 export const listAccounts = (config: ApiConfig) =>
   request<Account[]>(config, '/api/config/accounts')
+
+export const listIntegrationTypes = (config: ApiConfig) =>
+  request<ConnectionSpec[]>(config, '/api/config/integration-types')
 
 export const addAccount = (
   config: ApiConfig,

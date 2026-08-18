@@ -241,6 +241,10 @@ You can override any config value with environment variables:
 - `JOSSIE_LLM_TRANSCRIPTION_MODEL`, `JOSSIE_LLM_MAX_ATTACHMENT_BYTES_PER_REQUEST`
 - `JOSSIE_EMAIL_USERNAME`, `JOSSIE_EMAIL_PASSWORD`
 - `JOSSIE_GOOGLE_CLIENT_ID`, `JOSSIE_GOOGLE_CLIENT_SECRET`
+- `JOSSIE_DATABASE_ENCRYPTION_KEY`
+- `JOSSIE_TODOIST_CLIENT_ID`, `JOSSIE_TODOIST_CLIENT_SECRET`
+- `JOSSIE_NOTION_CLIENT_ID`, `JOSSIE_NOTION_CLIENT_SECRET`
+- `JOSSIE_SPOTIFY_CLIENT_ID`, `JOSSIE_SPOTIFY_CLIENT_SECRET`
 
 ## 🔌 Available Integrations
 
@@ -271,7 +275,7 @@ You can override any config value with environment variables:
 
 ### Google (`jossie-integration-google`)
 - **Tools**: `google_list_accounts`, `drive_search`, `drive_read`, `drive_list_files`, `calendar_list_calendars`, `calendar_list_events`, `calendar_create_event`, `calendar_update_event`
-- **Description**: Gmail, Google Calendar, and Google Drive
+- **Description**: Gmail, Google Calendar, Google Drive, Google Tasks, and read-only Google Contacts
 - **Mail access**: Gmail messages are exposed through the provider-neutral `mail_*` tools
 - **OAuth**: Setup via `/setup/google` endpoint
 - **Multi-account**: Supports multiple Google accounts
@@ -296,6 +300,16 @@ You can override any config value with environment variables:
 - **One-time tasks**: Run at a specific time (ISO 8601 format)
 - **Recurring tasks**: Run at intervals (in seconds)
 - **Out-of-band messages**: Send proactive notifications to the user
+
+### Personal services (`jossie-integration-personal`)
+- **Tasks**: Provider-neutral task tools across Google Tasks and Todoist; Todoist due items can trigger quiet background triage
+- **Todoist webhooks**: Configure the provider callback as `/api/integrations/webhooks/todoist`; deliveries are HMAC-verified and deduplicated
+- **Home Assistant**: Entity state, history, service discovery, and approved service calls; sensitive entities are hidden by default
+- **Home monitoring**: Optional comma-separated entity IDs are polled for proactive, quiet state-change triage
+- **Notion**: Search/read selected pages plus approved page creation and append operations
+- **Spotify**: Search, playback state, queue access, and approved playback or playlist actions
+- **Connections**: Provider-declared setup forms and generic OAuth routing
+- **Credential storage**: Optional AES-256-GCM encryption through `database.encryption_key` or `JOSSIE_DATABASE_ENCRYPTION_KEY`
 
 ## 🌐 API Documentation
 
@@ -397,6 +411,7 @@ See [AGENTS.md](AGENTS.md) for detailed development guidelines.
 - ✅ Core agent loop with tool calling
 - ✅ Memory (FTS5) and knowledge graph
 - ✅ Gmail, Calendar, Drive integrations
+- ✅ Google Tasks, Todoist, Google Contacts, Home Assistant, Notion, and Spotify integrations
 - ✅ Web browsing and HTTP requests
 - ✅ Agent scheduling and autonomous tasks
 - ✅ Telegram bot frontend
@@ -406,9 +421,8 @@ See [AGENTS.md](AGENTS.md) for detailed development guidelines.
 
 ### Planned
 - 🔲 Discord/Slack integrations
-- 🔲 Notion/Obsidian integrations
+- 🔲 Obsidian integration
 - 🔲 GitHub/GitLab integrations
-- 🔲 Home Assistant integration
 - 🔲 Voice interface (STT/TTS)
 - 🔲 Multimodal vision support
 - 🔲 Local filesystem access

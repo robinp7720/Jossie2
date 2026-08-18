@@ -11,12 +11,17 @@ pub const CALENDAR_EVENT: &str = "calendar_event";
 pub const CALENDAR_EVENT_UPDATED: &str = "calendar_event_updated";
 pub const CALENDAR_EVENT_BATCH: &str = "calendar_event_batch";
 pub const HEARTBEAT_CHECK: &str = "heartbeat_check";
+pub const TASK_DUE: &str = "task_due";
+pub const TASK_CHANGED: &str = "task_changed";
+pub const HOME_STATE_CHANGED: &str = "home_state_changed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegrationEventKind {
     Email,
     Calendar,
     Heartbeat,
+    Task,
+    Home,
     Other,
 }
 
@@ -27,6 +32,8 @@ pub fn integration_event_kind(event_type: &str) -> IntegrationEventKind {
             IntegrationEventKind::Calendar
         }
         HEARTBEAT_CHECK => IntegrationEventKind::Heartbeat,
+        TASK_DUE | TASK_CHANGED => IntegrationEventKind::Task,
+        HOME_STATE_CHANGED => IntegrationEventKind::Home,
         _ => IntegrationEventKind::Other,
     }
 }

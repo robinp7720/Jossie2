@@ -4,6 +4,26 @@ impl Integration for EmailIntegration {
         "email"
     }
 
+    fn connection_spec(&self) -> Option<jossie_core::integration::ConnectionSpec> {
+        use jossie_core::integration::{ConnectionField, ConnectionSpec};
+        let field = |name: &str, label: &str, input_type: &str, secret: bool, default_value: Option<&str>| ConnectionField {
+            name: name.into(), label: label.into(), input_type: input_type.into(), required: true, secret,
+            description: None, default_value: default_value.map(str::to_string),
+        };
+        Some(ConnectionSpec {
+            integration: "email".into(), display_name: "Email (IMAP/SMTP)".into(),
+            description: "Provider-neutral mail access for non-Google accounts".into(), oauth_available: false,
+            fields: vec![
+                field("username", "Email or username", "text", false, None),
+                field("password", "Password", "password", true, None),
+                field("imap_host", "IMAP host", "text", false, None),
+                field("imap_port", "IMAP port", "number", false, Some("993")),
+                field("smtp_host", "SMTP host", "text", false, None),
+                field("smtp_port", "SMTP port", "number", false, Some("587")),
+            ],
+        })
+    }
+
     async fn check_onboarding(&self) -> anyhow::Result<OnboardingStatus> {
         // If default config exists, we are good.
         if self.default_config.is_some() {

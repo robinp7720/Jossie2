@@ -213,12 +213,24 @@ Current supported `integration` values:
 
 - `email`
 - `google`
+- `todoist`
+- `home_assistant`
+- `notion`
+- `spotify`
 
 Response:
 
 ```json
 "generated-account-id"
 ```
+
+`GET /api/config/integration-types` returns the provider-declared connection
+fields and whether OAuth setup is available. OAuth providers start at
+`GET /setup/{provider}` and return to `/oauth/callback`.
+
+`POST /api/integrations/webhooks/{provider}` is the unauthenticated provider
+callback surface. Each provider must cryptographically verify its own request;
+Todoist validates `X-Todoist-Hmac-SHA256` and deduplicates deliveries.
 
 #### `DELETE /api/config/accounts/{id}`
 

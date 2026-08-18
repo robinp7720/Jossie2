@@ -222,6 +222,11 @@ max_attachment_bytes_per_request = 26214400
 # The database file will be created if it doesn't exist
 url = "sqlite:jossie.db?mode=rwc"
 
+# Encrypt integration account credentials before writing them to SQLite.
+# Prefer JOSSIE_DATABASE_ENCRYPTION_KEY in production. Keep this stable: losing
+# it makes already-encrypted provider credentials unreadable.
+encryption_key = ""
+
 # ----------------------------------------------------------------------------
 # TELEGRAM BOT CONFIGURATION (Optional)
 # ----------------------------------------------------------------------------
@@ -265,7 +270,7 @@ password = "your-password"
 # ----------------------------------------------------------------------------
 # GOOGLE INTEGRATION CONFIGURATION (Optional)
 # ----------------------------------------------------------------------------
-# Supports Gmail, Google Calendar, and Google Drive
+# Supports Gmail, Google Calendar, Drive, Tasks, and read-only Contacts
 # Setup:
 #   1. Create a project in Google Cloud Console
 #   2. Enable Gmail API, Calendar API, and Drive API
@@ -285,6 +290,20 @@ client_secret = ""
 
 # Optional: Enable debug logging for Gmail payload (for troubleshooting)
 # debug_gmail_payload = false
+
+# OAuth application credentials for optional personal integrations. Accounts
+# can also be added with provider tokens from the Connections screen.
+[todoist]
+client_id = ""
+client_secret = ""
+
+[notion]
+client_id = ""
+client_secret = ""
+
+[spotify]
+client_id = ""
+client_secret = ""
 
 # ----------------------------------------------------------------------------
 # HTTP INTEGRATION CONFIGURATION (Optional)
@@ -325,7 +344,7 @@ interval_seconds = 14400
 #    - Generate a strong auth_token with: openssl rand -hex 32
 #
 # 2. MULTI-ACCOUNT SUPPORT:
-#    - Google and Email integrations support multiple accounts
+#    - All connected providers support multiple accounts
 #    - Add accounts via the API: POST /api/config/accounts
 #    - Or use the web UI onboarding flow
 #
@@ -338,6 +357,10 @@ interval_seconds = 14400
 #    - JOSSIE_TELEGRAM_BOT_TOKEN
 #    - JOSSIE_EMAIL_USERNAME, JOSSIE_EMAIL_PASSWORD
 #    - JOSSIE_GOOGLE_CLIENT_ID, JOSSIE_GOOGLE_CLIENT_SECRET
+#    - JOSSIE_DATABASE_ENCRYPTION_KEY
+#    - JOSSIE_TODOIST_CLIENT_ID, JOSSIE_TODOIST_CLIENT_SECRET
+#    - JOSSIE_NOTION_CLIENT_ID, JOSSIE_NOTION_CLIENT_SECRET
+#    - JOSSIE_SPOTIFY_CLIENT_ID, JOSSIE_SPOTIFY_CLIENT_SECRET
 #
 # 4. TIMEZONE:
 #    - Runtime prompts include the server's local date/time for scheduling and triage

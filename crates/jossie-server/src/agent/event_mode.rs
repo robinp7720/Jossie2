@@ -642,6 +642,15 @@ fn build_event_mode_tools(
             CapabilityGroup::Calendar,
             CapabilityGroup::Scheduler,
         ],
+        jossie_core::events::TASK_DUE | jossie_core::events::TASK_CHANGED => &[
+            CapabilityGroup::Tasks,
+            CapabilityGroup::Calendar,
+            CapabilityGroup::Scheduler,
+        ],
+        jossie_core::events::HOME_STATE_CHANGED => &[
+            CapabilityGroup::Home,
+            CapabilityGroup::Scheduler,
+        ],
         _ => &[],
     };
     let mut tools: Vec<jossie_core::ToolDefinition> = state

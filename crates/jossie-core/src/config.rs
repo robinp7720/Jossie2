@@ -16,6 +16,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub google: GoogleConfig,
     #[serde(default)]
+    pub todoist: TodoistConfig,
+    #[serde(default)]
+    pub notion: NotionConfig,
+    #[serde(default)]
+    pub spotify: SpotifyConfig,
+    #[serde(default)]
     pub http: HttpConfig,
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
@@ -273,6 +279,8 @@ fn default_max_iterations() -> usize {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub url: String,
+    #[serde(default)]
+    pub encryption_key: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -332,4 +340,28 @@ pub struct GoogleConfig {
     pub refresh_token: String,
     #[serde(default)]
     pub debug_gmail_payload: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TodoistConfig {
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NotionConfig {
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SpotifyConfig {
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
 }

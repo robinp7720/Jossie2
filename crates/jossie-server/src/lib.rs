@@ -128,6 +128,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(handlers::config::list_accounts).post(handlers::config::add_account),
         )
         .route(
+            "/api/config/integration-types",
+            get(handlers::config::list_integration_types),
+        )
+        .route(
             "/api/config/accounts/{id}",
             patch(handlers::config::update_account).delete(handlers::config::delete_account),
         )
@@ -142,8 +146,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     // Setup routes (Auth protected)
     let setup = Router::new()
         .route(
-            "/setup/google",
-            get(handlers::integrations::setup_google_handler),
+            "/setup/{provider}",
+            get(handlers::integrations::setup_provider_handler),
         )
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
@@ -156,6 +160,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/oauth/callback",
             get(handlers::integrations::oauth_callback_handler),
+        )
+        .route(
+            "/api/integrations/webhooks/{provider}",
+            post(handlers::integrations::webhook_handler),
         )
         .route("/api/health", get(handlers::health::health_handler))
         .with_state(state.clone());

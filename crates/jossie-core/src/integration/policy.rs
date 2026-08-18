@@ -12,10 +12,15 @@ pub enum CapabilityGroup {
     Drive,
     Web,
     Scheduler,
+    Tasks,
+    Contacts,
+    Home,
+    Notes,
+    Media,
 }
 
 impl CapabilityGroup {
-    pub const ACTIVATABLE: [Self; 7] = [
+    pub const ACTIVATABLE: [Self; 12] = [
         Self::Knowledge,
         Self::Files,
         Self::Mail,
@@ -23,6 +28,11 @@ impl CapabilityGroup {
         Self::Drive,
         Self::Web,
         Self::Scheduler,
+        Self::Tasks,
+        Self::Contacts,
+        Self::Home,
+        Self::Notes,
+        Self::Media,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -36,6 +46,11 @@ impl CapabilityGroup {
             Self::Drive => "drive",
             Self::Web => "web",
             Self::Scheduler => "scheduler",
+            Self::Tasks => "tasks",
+            Self::Contacts => "contacts",
+            Self::Home => "home",
+            Self::Notes => "notes",
+            Self::Media => "media",
         }
     }
 }
@@ -54,6 +69,11 @@ impl std::str::FromStr for CapabilityGroup {
             "drive" => Ok(Self::Drive),
             "web" => Ok(Self::Web),
             "scheduler" => Ok(Self::Scheduler),
+            "tasks" => Ok(Self::Tasks),
+            "contacts" => Ok(Self::Contacts),
+            "home" => Ok(Self::Home),
+            "notes" => Ok(Self::Notes),
+            "media" => Ok(Self::Media),
             _ => Err(format!("Unknown capability group: {value}")),
         }
     }
@@ -136,6 +156,13 @@ pub fn tool_metadata(tool_name: &str, arguments: &str) -> ToolMetadata {
         | "browser_navigate"
         | "browser_search" => Some(CapabilityGroup::Web),
         "list_scheduled_tasks" => Some(CapabilityGroup::Scheduler),
+        "task_list_accounts" | "task_list_projects" | "task_list" => Some(CapabilityGroup::Tasks),
+        "contacts_search" | "contacts_read" => Some(CapabilityGroup::Contacts),
+        "home_list_entities" | "home_get_state" | "home_get_history" | "home_list_services" => {
+            Some(CapabilityGroup::Home)
+        }
+        "notes_search" | "notes_read" => Some(CapabilityGroup::Notes),
+        "media_search" | "media_now_playing" | "media_get_queue" => Some(CapabilityGroup::Media),
         _ => None,
     };
     if let Some(capability) = read {
@@ -170,6 +197,18 @@ pub fn tool_metadata(tool_name: &str, arguments: &str) -> ToolMetadata {
         }
         "cancel_scheduled_task" => {
             ToolMetadata::action(CapabilityGroup::Scheduler, ToolEffect::Destructive)
+        }
+        "task_create" | "task_update" | "task_complete" => {
+            ToolMetadata::action(CapabilityGroup::Tasks, ToolEffect::ExternalWrite)
+        }
+        "home_call_service" => {
+            ToolMetadata::action(CapabilityGroup::Home, ToolEffect::ExternalWrite)
+        }
+        "notes_create_page" | "notes_append" => {
+            ToolMetadata::action(CapabilityGroup::Notes, ToolEffect::ExternalWrite)
+        }
+        "media_play" | "media_pause" | "media_add_to_queue" | "media_create_playlist" => {
+            ToolMetadata::action(CapabilityGroup::Media, ToolEffect::ExternalWrite)
         }
         "http_request" => {
             let method = serde_json::from_str::<serde_json::Value>(arguments)

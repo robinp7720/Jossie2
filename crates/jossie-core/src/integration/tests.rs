@@ -83,6 +83,25 @@ fn built_in_tool_metadata_separates_reads_from_actions() {
 }
 
 #[test]
+fn personal_tool_metadata_requires_approval_for_external_mutations() {
+    let task_read = tool_metadata("task_list", "{}");
+    assert_eq!(task_read.capability, CapabilityGroup::Tasks);
+    assert_eq!(task_read.effect, ToolEffect::Read);
+
+    for (tool, capability) in [
+        ("task_complete", CapabilityGroup::Tasks),
+        ("home_call_service", CapabilityGroup::Home),
+        ("notes_append", CapabilityGroup::Notes),
+        ("media_play", CapabilityGroup::Media),
+    ] {
+        let metadata = tool_metadata(tool, "{}");
+        assert_eq!(metadata.capability, capability);
+        assert_eq!(metadata.effect, ToolEffect::ExternalWrite);
+        assert!(metadata.effect.requires_explicit_authorization());
+    }
+}
+
+#[test]
 fn http_effect_depends_on_method() {
     assert_eq!(
         tool_metadata("http_request", r#"{"method":"GET"}"#).effect,

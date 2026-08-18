@@ -1,367 +1,79 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import {
-  addAccount,
-  deleteAccount,
-  listAccounts,
-  listOnboarding,
-  updateAccount,
-} from '../api'
+import { addAccount, deleteAccount, listAccounts, listIntegrationTypes, listOnboarding, updateAccount } from '../api'
 import { Empty, Panel } from '../components/Shared'
 import { api } from '../config'
-import type { Account, OnboardingStatus } from '../types'
+import type { Account, ConnectionSpec, OnboardingStatus } from '../types'
 
-type AccountForm = {
-  integration: 'email' | 'google'
-  name: string
-  email: string
-  username: string
-  password: string
-  imapHost: string
-  imapPort: string
-  smtpHost: string
-  smtpPort: string
-  refreshToken: string
-}
-
-const emptyAccountForm = (
-  integration: AccountForm['integration'] = 'email',
-): AccountForm => ({
-  integration,
-  name: '',
-  email: '',
-  username: '',
-  password: '',
-  imapHost: '',
-  imapPort: '993',
-  smtpHost: '',
-  smtpPort: '587',
-  refreshToken: '',
-})
-
-const accountValue = (account: Account, key: string) => {
-  const details = account.details
-  const value =
-    details && typeof details === 'object' && !Array.isArray(details)
-      ? details[key]
-      : undefined
-  return typeof value === 'string' || typeof value === 'number'
-    ? String(value)
-    : ''
-}
+const detailsOf = (account: Account) =>
+  account.details && typeof account.details === 'object' && !Array.isArray(account.details)
+    ? (account.details as Record<string, unknown>)
+    : {}
 
 export function Connections() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [onboarding, setOnboarding] = useState<OnboardingStatus[]>([])
-  const [form, setForm] = useState<AccountForm>(emptyAccountForm())
-  const [editingAccount, setEditingAccount] = useState<Account | null>(null)
+  const [specs, setSpecs] = useState<ConnectionSpec[]>([])
+  const [integration, setIntegration] = useState('email')
+  const [name, setName] = useState('')
+  const [values, setValues] = useState<Record<string, string>>({})
+  const [editing, setEditing] = useState<Account | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
-  const refresh = () =>
-    Promise.all([
-      listAccounts(api).then(setAccounts),
-      listOnboarding(api).then(setOnboarding),
-    ])
+  const spec = useMemo(() => specs.find((item) => item.integration === integration), [specs, integration])
 
-  useEffect(() => {
-    void refresh()
-  }, [])
+  const refresh = () => Promise.all([
+    listAccounts(api).then(setAccounts),
+    listOnboarding(api).then(setOnboarding),
+    listIntegrationTypes(api).then((items) => {
+      setSpecs(items)
+      if (items.length && !items.some((item) => item.integration === integration)) setIntegration(items[0].integration)
+    }),
+  ])
+  useEffect(() => { void refresh() }, [])
 
-  const startNew = (integration: AccountForm['integration'] = 'email') => {
-    setEditingAccount(null)
-    setForm(emptyAccountForm(integration))
-    setError(null)
+  const reset = (next = specs[0]?.integration ?? 'email') => {
+    setEditing(null); setIntegration(next); setName(''); setError(null)
+    const nextSpec = specs.find((item) => item.integration === next)
+    setValues(Object.fromEntries((nextSpec?.fields ?? []).map((field) => [field.name, field.default_value ?? ''])))
   }
-
   const startEdit = (account: Account) => {
-    const integration = account.integration as AccountForm['integration']
-    setEditingAccount(account)
-    setForm({
-      integration,
-      name: account.name,
-      email: accountValue(account, 'email'),
-      username: accountValue(account, 'username'),
-      password: '',
-      imapHost: accountValue(account, 'imap_host'),
-      imapPort: accountValue(account, 'imap_port') || '993',
-      smtpHost: accountValue(account, 'smtp_host'),
-      smtpPort: accountValue(account, 'smtp_port') || '587',
-      refreshToken: '',
-    })
-    setError(null)
+    setEditing(account); setIntegration(account.integration); setName(account.name); setError(null)
+    const details = detailsOf(account)
+    const accountSpec = specs.find((item) => item.integration === account.integration)
+    setValues(Object.fromEntries((accountSpec?.fields ?? []).map((field) => {
+      const value = details[field.name]
+      return [field.name, field.secret || value === '[REDACTED]' ? '' : value == null ? field.default_value ?? '' : String(value)]
+    })))
   }
-
   const submit = async (event: FormEvent) => {
-    event.preventDefault()
-    setSaving(true)
-    setError(null)
-    const config =
-      form.integration === 'email'
-        ? {
-            username: form.username.trim(),
-            password: form.password,
-            imap_host: form.imapHost.trim(),
-            imap_port: Number(form.imapPort),
-            smtp_host: form.smtpHost.trim(),
-            smtp_port: Number(form.smtpPort),
-          }
-        : { email: form.email.trim(), refresh_token: form.refreshToken }
+    event.preventDefault(); if (!spec) return; setSaving(true); setError(null)
+    const config = Object.fromEntries(spec.fields.map((field) => [field.name, field.input_type === 'number' ? Number(values[field.name]) : values[field.name] ?? '']))
     try {
-      if (editingAccount) {
-        await updateAccount(api, editingAccount.id, {
-          name: form.name.trim(),
-          config,
-        })
-      } else {
-        await addAccount(api, {
-          integration: form.integration,
-          name: form.name.trim() || `${form.integration} account`,
-          config,
-        })
-      }
-      startNew()
-      await refresh()
-    } catch (reason) {
-      setError(
-        reason instanceof Error
-          ? reason.message
-          : 'Unable to save the account.',
-      )
-    } finally {
-      setSaving(false)
-    }
+      if (editing) await updateAccount(api, editing.id, { name: name.trim(), config })
+      else await addAccount(api, { integration, name: name.trim() || spec.display_name, config })
+      reset(); await refresh()
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to save the account.') }
+    finally { setSaving(false) }
   }
 
-  const field = <K extends keyof AccountForm>(key: K, value: AccountForm[K]) =>
-    setForm((current) => ({ ...current, [key]: value }))
-  const isEmail = form.integration === 'email'
-
-  return (
-    <section className="page">
-      <header className="page-head">
-        <div>
-          <p className="eyebrow">CONNECTED SERVICES</p>
-          <h1>Connections.</h1>
-          <p className="muted-copy">
-            Manage the services that let Jossie do useful work beyond the
-            conversation.
-          </p>
-        </div>
-        <button
-          className="button primary"
-          onClick={() => window.open('/setup/google', '_blank')}
-        >
-          Connect Google with OAuth
-        </button>
-      </header>
-      <div className="connections-grid">
-        <Panel title="Connection status">
-          <div className="integration-list">
-            {onboarding.map((item) => (
-              <div key={item.name} className="integration-row">
-                <span
-                  className={
-                    item.status === 'Configured' ? 'ready-dot' : 'idle-dot'
-                  }
-                />
-                <div>
-                  <strong>{item.name}</strong>
-                  <small>
-                    {item.status === 'Configured' ? 'Ready' : 'Setup required'}
-                  </small>
-                </div>
-              </div>
-            ))}
-          </div>
-        </Panel>
-        <Panel title="Saved accounts">
-          <div className="account-list">
-            {accounts.length ? (
-              accounts.map((account) => (
-                <div className="account-row" key={account.id}>
-                  <div>
-                    <strong>{account.name}</strong>
-                    <small>
-                      {account.integration}
-                      {accountValue(account, 'email')
-                        ? ` · ${accountValue(account, 'email')}`
-                        : ''}
-                    </small>
-                  </div>
-                  <div className="account-actions">
-                    <button
-                      className="text-button"
-                      onClick={() => startEdit(account)}
-                    >
-                      Edit
-                    </button>
-                    <button
-                      className="text-button danger"
-                      onClick={async () => {
-                        await deleteAccount(api, account.id)
-                        if (editingAccount?.id === account.id) startNew()
-                        await refresh()
-                      }}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-              ))
-            ) : (
-              <Empty copy="No accounts configured." />
-            )}
-          </div>
-        </Panel>
-        <Panel
-          title={editingAccount ? `Edit ${editingAccount.name}` : 'Add account'}
-          className="add-account"
-        >
-          <form
-            className="connection-form typed-account-form"
-            onSubmit={submit}
-          >
-            {!editingAccount && (
-              <label>
-                Account type
-                <select
-                  value={form.integration}
-                  onChange={(e) =>
-                    startNew(e.target.value as AccountForm['integration'])
-                  }
-                >
-                  <option value="email">Email (IMAP / SMTP)</option>
-                  <option value="google">Google (manual token)</option>
-                </select>
-              </label>
-            )}
-            <label>
-              Display name
-              <input
-                required
-                value={form.name}
-                onChange={(e) => field('name', e.target.value)}
-                placeholder={isEmail ? 'Work inbox' : 'Google account'}
-              />
-            </label>
-            {isEmail ? (
-              <>
-                <label>
-                  Email or username
-                  <input
-                    required
-                    value={form.username}
-                    onChange={(e) => field('username', e.target.value)}
-                    placeholder="me@example.com"
-                    autoComplete="username"
-                  />
-                </label>
-                <label>
-                  Password
-                  <input
-                    required={!editingAccount}
-                    type="password"
-                    value={form.password}
-                    onChange={(e) => field('password', e.target.value)}
-                    placeholder={
-                      editingAccount
-                        ? 'Leave blank to keep the current password'
-                        : 'App password'
-                    }
-                    autoComplete="new-password"
-                  />
-                </label>
-                <label>
-                  IMAP host
-                  <input
-                    required
-                    value={form.imapHost}
-                    onChange={(e) => field('imapHost', e.target.value)}
-                    placeholder="imap.example.com"
-                  />
-                </label>
-                <label>
-                  IMAP port
-                  <input
-                    required
-                    inputMode="numeric"
-                    value={form.imapPort}
-                    onChange={(e) => field('imapPort', e.target.value)}
-                  />
-                </label>
-                <label>
-                  SMTP host
-                  <input
-                    required
-                    value={form.smtpHost}
-                    onChange={(e) => field('smtpHost', e.target.value)}
-                    placeholder="smtp.example.com"
-                  />
-                </label>
-                <label>
-                  SMTP port
-                  <input
-                    required
-                    inputMode="numeric"
-                    value={form.smtpPort}
-                    onChange={(e) => field('smtpPort', e.target.value)}
-                  />
-                </label>
-              </>
-            ) : (
-              <>
-                <label>
-                  Email address <span className="optional-label">optional</span>
-                  <input
-                    type="email"
-                    value={form.email}
-                    onChange={(e) => field('email', e.target.value)}
-                    placeholder="me@gmail.com"
-                  />
-                </label>
-                <label className="form-span">
-                  Refresh token
-                  <input
-                    required={!editingAccount}
-                    type="password"
-                    value={form.refreshToken}
-                    onChange={(e) => field('refreshToken', e.target.value)}
-                    placeholder={
-                      editingAccount
-                        ? 'Leave blank to keep the current token'
-                        : 'Paste a Google refresh token'
-                    }
-                    autoComplete="new-password"
-                  />
-                </label>
-                <p className="form-hint form-span">
-                  Prefer the OAuth button above. Use a refresh token only for
-                  manual setup.
-                </p>
-              </>
-            )}
-            {error && <p className="form-error form-span">{error}</p>}
-            <div className="form-actions form-span">
-              <button className="button secondary" disabled={saving}>
-                {saving
-                  ? 'Saving…'
-                  : editingAccount
-                    ? 'Save changes'
-                    : 'Add account'}
-              </button>
-              {editingAccount && (
-                <button
-                  type="button"
-                  className="text-button"
-                  onClick={() => startNew()}
-                >
-                  Cancel
-                </button>
-              )}
-            </div>
-          </form>
-        </Panel>
-      </div>
-    </section>
-  )
+  return <section className="page">
+    <header className="page-head"><div><p className="eyebrow">CONNECTED SERVICES</p><h1>Connections.</h1><p className="muted-copy">Manage the services that let Jossie do useful work beyond the conversation.</p></div>
+      {spec?.oauth_available && <button className="button primary" onClick={() => window.open(`/setup/${encodeURIComponent(spec.integration)}`, '_blank')}>Connect {spec.display_name} with OAuth</button>}
+    </header>
+    <div className="connections-grid">
+      <Panel title="Connection status"><div className="integration-list">{onboarding.map((item) => <div key={item.name} className="integration-row"><span className={item.status === 'Configured' ? 'ready-dot' : 'idle-dot'} /><div><strong>{item.name}</strong><small>{item.status === 'Configured' ? 'Ready' : 'Setup required'}</small></div></div>)}</div></Panel>
+      <Panel title="Saved accounts"><div className="account-list">{accounts.length ? accounts.map((account) => <div className="account-row" key={account.id}><div><strong>{account.name}</strong><small>{account.integration}</small></div><div className="account-actions"><button className="text-button" onClick={() => startEdit(account)}>Edit</button><button className="text-button danger" onClick={async () => { await deleteAccount(api, account.id); if (editing?.id === account.id) reset(); await refresh() }}>Remove</button></div></div>) : <Empty copy="No accounts configured." />}</div></Panel>
+      <Panel title={editing ? `Edit ${editing.name}` : 'Add account'} className="add-account">
+        <form className="connection-form typed-account-form" onSubmit={submit}>
+          {!editing && <label>Account type<select value={integration} onChange={(event) => reset(event.target.value)}>{specs.map((item) => <option key={item.integration} value={item.integration}>{item.display_name}</option>)}</select></label>}
+          <label>Display name<input required value={name} onChange={(event) => setName(event.target.value)} placeholder={spec?.display_name ?? 'Account'} /></label>
+          {spec?.fields.map((field) => <label key={field.name} className={spec.fields.length === 1 ? 'form-span' : undefined}>{field.label}{!field.required && <span className="optional-label"> optional</span>}<input type={field.input_type} required={field.required && (!editing || !field.secret)} value={values[field.name] ?? ''} onChange={(event) => setValues((current) => ({ ...current, [field.name]: event.target.value }))} placeholder={editing && field.secret ? 'Leave blank to keep the current value' : field.description ?? ''} autoComplete={field.secret ? 'new-password' : undefined} />{field.description && <small>{field.description}</small>}</label>)}
+          {spec?.oauth_available && !editing && <p className="form-hint form-span">{spec.fields.length ? 'OAuth is preferred. Manual credentials are available for self-hosted or development setups.' : 'Use the OAuth button above to add this provider.'}</p>}
+          {error && <p className="form-error form-span">{error}</p>}
+          <div className="form-actions form-span"><button className="button secondary" disabled={saving || (!editing && (spec?.fields.length ?? 0) === 0)}>{saving ? 'Saving…' : editing ? 'Save changes' : 'Add account'}</button>{editing && <button type="button" className="text-button" onClick={() => reset()}>Cancel</button>}</div>
+        </form>
+      </Panel>
+    </div>
+  </section>
 }

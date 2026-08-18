@@ -61,6 +61,32 @@ pub struct OnboardingField {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+pub struct ConnectionField {
+    pub name: String,
+    pub label: String,
+    pub input_type: String,
+    pub required: bool,
+    pub secret: bool,
+    pub description: Option<String>,
+    pub default_value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+pub struct ConnectionSpec {
+    pub integration: String,
+    pub display_name: String,
+    pub description: String,
+    pub fields: Vec<ConnectionField>,
+    pub oauth_available: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct OAuthAccount {
+    pub name: String,
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(tag = "status", content = "details")]
 pub enum OnboardingStatus {
     Configured,
@@ -78,6 +104,30 @@ pub trait Integration: Send + Sync {
     }
     fn show_in_onboarding(&self) -> bool {
         true
+    }
+    fn connection_spec(&self) -> Option<ConnectionSpec> {
+        None
+    }
+    fn oauth_authorization_url(
+        &self,
+        _redirect_uri: &str,
+        _state: &str,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+    async fn oauth_exchange(
+        &self,
+        _code: &str,
+        _redirect_uri: &str,
+    ) -> anyhow::Result<OAuthAccount> {
+        anyhow::bail!("{} does not support OAuth", self.name())
+    }
+    async fn handle_webhook(
+        &self,
+        _headers: &std::collections::HashMap<String, String>,
+        _body: &[u8],
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("{} does not support webhooks", self.name())
     }
     async fn execute(&self, tool_name: &str, _arguments: &str) -> anyhow::Result<String> {
         anyhow::bail!("Unknown {} tool: {tool_name}", self.name())
@@ -192,6 +242,27 @@ impl IntegrationRegistry {
 
     pub fn get_integrations(&self) -> &[Arc<dyn Integration>] {
         &self.integrations
+    }
+
+    pub fn get_integration(&self, name: &str) -> Option<&Arc<dyn Integration>> {
+        self.integrations
+            .iter()
+            .find(|integration| integration.name() == name)
+    }
+
+    pub fn get_integration_for_connection(&self, provider: &str) -> Option<&Arc<dyn Integration>> {
+        self.integrations.iter().find(|integration| {
+            integration
+                .connection_spec()
+                .is_some_and(|spec| spec.integration == provider)
+        })
+    }
+
+    pub fn connection_specs(&self) -> Vec<ConnectionSpec> {
+        self.integrations
+            .iter()
+            .filter_map(|integration| integration.connection_spec())
+            .collect()
     }
 
     pub async fn execute(&self, call: &ToolCall) -> ToolResult {

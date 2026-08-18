@@ -68,6 +68,11 @@ impl GoogleIntegration {
             .filter(|token| !token.trim().is_empty())
     }
 
+    fn refresh_token_fingerprint(token: &str) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(token.as_bytes()))
+    }
+
     async fn clear_account_pause_state(
         &self,
         db: &Arc<Database>,
@@ -113,7 +118,8 @@ impl GoogleIntegration {
                 &Self::account_paused_refresh_key(&acc.id),
             )
             .await?;
-        let current_refresh = Self::get_account_refresh_token(acc);
+        let current_refresh = Self::get_account_refresh_token(acc)
+            .map(|token| Self::refresh_token_fingerprint(&token));
         if let (Some(paused), Some(current)) = (paused_refresh, current_refresh)
             && !paused.is_empty()
             && paused != current
@@ -154,7 +160,9 @@ impl GoogleIntegration {
         )
         .await?;
 
-        let refresh = Self::get_account_refresh_token(acc).unwrap_or_default();
+        let refresh = Self::get_account_refresh_token(acc)
+            .map(|token| Self::refresh_token_fingerprint(&token))
+            .unwrap_or_default();
         db.set_integration_setting(
             GOOGLE_INTEGRATION,
             &Self::account_paused_refresh_key(&acc.id),
@@ -215,17 +223,21 @@ impl GoogleIntegration {
             "https://www.googleapis.com/auth/drive",
             "https://www.googleapis.com/auth/gmail.send",
             "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/tasks",
+            "https://www.googleapis.com/auth/contacts.readonly",
         ]
         .join(" ");
 
         let mut url = format!(
             "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent",
-            config.client_id, redirect_uri, scopes
+            urlencoding::encode(&config.client_id),
+            urlencoding::encode(redirect_uri),
+            urlencoding::encode(&scopes),
         );
 
         if let Some(state) = state {
             url.push_str("&state=");
-            url.push_str(state);
+            url.push_str(&urlencoding::encode(state));
         }
 
         url

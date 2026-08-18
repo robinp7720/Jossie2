@@ -1,14 +1,14 @@
 use crate::errors::AppError;
-use crate::state::{AppState, PendingGoogleOAuth};
+use crate::state::{AppState, PendingOAuth};
 use axum::{
     Json,
-    extract::{Query, State},
-    http::HeaderMap,
+    body::Bytes,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
 };
 use chrono::{Duration, Utc};
 use jossie_core::integration::OnboardingStatus;
-use jossie_integration_google::GoogleIntegration;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use url::Url;
@@ -38,21 +38,53 @@ pub async fn onboarding_status_handler(
     Ok(Json(statuses))
 }
 
-pub async fn setup_google_handler(
+pub async fn webhook_handler(
     State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
     headers: HeaderMap,
-    Query(query): Query<GoogleSetupQuery>,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    let integration = state
+        .registry
+        .get_integration_for_connection(&provider)
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("Unknown webhook provider")))?;
+    let normalized = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
+        })
+        .collect();
+    integration
+        .handle_webhook(&normalized, &body)
+        .await
+        .map_err(AppError::bad_request)?;
+    Ok(StatusCode::OK)
+}
+
+pub async fn setup_provider_handler(
+    State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<ProviderSetupQuery>,
 ) -> Result<axum::response::Redirect, AppError> {
     let base_url = resolve_public_base_url(&state, &headers)?;
     let redirect_uri = format!("{base_url}/oauth/callback");
+    let integration = state
+        .registry
+        .get_integration_for_connection(&provider)
+        .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("Unknown integration: {provider}")))?;
 
     let oauth_state = Uuid::new_v4().to_string();
     {
-        let mut pending = state.pending_google_oauth.write().await;
+        let mut pending = state.pending_oauth.write().await;
         prune_expired_oauth_states(&mut pending);
         pending.insert(
             oauth_state.clone(),
-            PendingGoogleOAuth {
+            PendingOAuth {
+                provider: provider.clone(),
                 account_name: query
                     .account_name
                     .as_ref()
@@ -63,16 +95,16 @@ pub async fn setup_google_handler(
         );
     }
 
-    let url = GoogleIntegration::generate_auth_url(
-        &state.google_config,
-        &redirect_uri,
-        Some(&oauth_state),
-    );
+    let url = integration
+        .oauth_authorization_url(&redirect_uri, &oauth_state)?
+        .ok_or_else(|| {
+            AppError::bad_request(anyhow::anyhow!("{provider} OAuth is not configured"))
+        })?;
     Ok(axum::response::Redirect::to(&url))
 }
 
 #[derive(Deserialize)]
-pub struct GoogleSetupQuery {
+pub struct ProviderSetupQuery {
     account_name: Option<String>,
 }
 
@@ -89,7 +121,10 @@ pub async fn oauth_callback_handler(
     Query(query): Query<CallbackQuery>,
 ) -> impl IntoResponse {
     if let Some(error) = query.error {
-        return Html(format!("<h1>Google Auth Error</h1><p>{}</p>", error));
+        return Html(format!(
+            "<h1>OAuth Error</h1><p>{}</p>",
+            escape_html(&error)
+        ));
     }
 
     let Some(code) = query.code else {
@@ -111,7 +146,7 @@ pub async fn oauth_callback_handler(
     };
 
     let pending_state = {
-        let mut pending = state.pending_google_oauth.write().await;
+        let mut pending = state.pending_oauth.write().await;
         prune_expired_oauth_states(&mut pending);
         pending.remove(oauth_state)
     };
@@ -121,25 +156,18 @@ pub async fn oauth_callback_handler(
     };
 
     let account_name = pending_state.account_name;
+    let provider = pending_state.provider;
+    let Some(integration) = state.registry.get_integration_for_connection(&provider) else {
+        return Html("<h1>OAuth Error</h1><p>Integration is no longer available.</p>".to_string());
+    };
 
     let account_id = Uuid::new_v4().to_string();
-    let account_label =
-        account_name.unwrap_or_else(|| format!("Google Account {}", &account_id[..8]));
-
-    match GoogleIntegration::exchange_code(&state.google_config, &code, &redirect_uri).await {
-        Ok(token) => {
+    match integration.oauth_exchange(&code, &redirect_uri).await {
+        Ok(account) => {
+            let account_label = account_name.unwrap_or(account.name);
             if let Err(e) = state
                 .db
-                .upsert_integration_account(
-                    &account_id,
-                    "google",
-                    &account_label,
-                    &serde_json::json!({
-                        "refresh_token": token,
-                        "email": "",
-                        "source": "oauth"
-                    }),
-                )
+                .upsert_integration_account(&account_id, &provider, &account_label, &account.data)
                 .await
             {
                 return Html(format!("<h1>Error Saving Account</h1><p>{}</p>", e));
@@ -147,20 +175,32 @@ pub async fn oauth_callback_handler(
             Html(
                 r#"
                 <h1>Success!</h1>
-                <p>Google integration configured successfully.</p>
+                <p>Integration configured successfully.</p>
                 <p>You can close this window.</p>
                 <script>setTimeout(() => window.close(), 3000);</script>
                 "#
                 .to_string(),
             )
         }
-        Err(e) => Html(format!("<h1>Exchange Error</h1><p>{}</p>", e)),
+        Err(e) => Html(format!(
+            "<h1>Exchange Error</h1><p>{}</p>",
+            escape_html(&e.to_string())
+        )),
     }
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 const GOOGLE_OAUTH_STATE_TTL_MINUTES: i64 = 15;
 
-fn prune_expired_oauth_states(pending: &mut std::collections::HashMap<String, PendingGoogleOAuth>) {
+fn prune_expired_oauth_states(pending: &mut std::collections::HashMap<String, PendingOAuth>) {
     let cutoff = Utc::now() - Duration::minutes(GOOGLE_OAUTH_STATE_TTL_MINUTES);
     pending.retain(|_, state| state.created_at >= cutoff);
 }

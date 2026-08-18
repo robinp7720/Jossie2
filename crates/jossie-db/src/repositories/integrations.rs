@@ -112,7 +112,7 @@ impl Database {
         data: &serde_json::Value,
     ) -> anyhow::Result<String> {
         let id = Uuid::new_v4().to_string();
-        let data_str = serde_json::to_string(data)?;
+        let data_str = self.protect_account_data(&serde_json::to_string(data)?)?;
         sqlx::query(
             "INSERT INTO integration_accounts (id, integration, name, data) VALUES (?, ?, ?, ?)",
         )
@@ -132,7 +132,7 @@ impl Database {
         name: &str,
         data: &serde_json::Value,
     ) -> anyhow::Result<()> {
-        let data_str = serde_json::to_string(data)?;
+        let data_str = self.protect_account_data(&serde_json::to_string(data)?)?;
         sqlx::query("INSERT OR REPLACE INTO integration_accounts (id, integration, name, data) VALUES (?, ?, ?, ?)")
             .bind(id)
             .bind(integration)
@@ -149,7 +149,7 @@ impl Database {
         name: &str,
         data: &serde_json::Value,
     ) -> anyhow::Result<bool> {
-        let data_str = serde_json::to_string(data)?;
+        let data_str = self.protect_account_data(&serde_json::to_string(data)?)?;
         let result = sqlx::query("UPDATE integration_accounts SET name = ?, data = ? WHERE id = ?")
             .bind(name)
             .bind(data_str)
@@ -169,7 +169,11 @@ impl Database {
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row)
+        row.map(|mut account| {
+            account.data = self.unprotect_account_data(&account.data)?;
+            Ok(account)
+        })
+        .transpose()
     }
 
     pub async fn list_integration_accounts(
@@ -180,7 +184,26 @@ impl Database {
             .bind(integration)
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows)
+        rows.into_iter()
+            .map(|mut account| {
+                account.data = self.unprotect_account_data(&account.data)?;
+                Ok(account)
+            })
+            .collect()
+    }
+
+    pub async fn list_all_integration_accounts(&self) -> anyhow::Result<Vec<IntegrationAccount>> {
+        let rows = sqlx::query_as::<_, IntegrationAccount>(
+            "SELECT id, integration, name, data, created_at FROM integration_accounts ORDER BY integration, created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|mut account| {
+                account.data = self.unprotect_account_data(&account.data)?;
+                Ok(account)
+            })
+            .collect()
     }
 
     pub async fn delete_integration_account(&self, id: &str) -> anyhow::Result<()> {

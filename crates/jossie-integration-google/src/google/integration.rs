@@ -38,6 +38,14 @@ impl Integration for GoogleIntegration {
                 "calendar_update_event",
                 "Modify an existing Google Calendar event by exact event ID. Use calendar_list_events first when the event ID is unknown or the user request could match multiple events. Only change fields the user asked to change; unspecified fields remain unchanged. Defaults to not notifying guests unless send_updates is explicitly set.",
             ),
+            ToolDefinition::for_args::<ContactsSearchArgs>(
+                "contacts_search",
+                "Search the user's Google contacts by name, email, phone number, or organization. Contact data is returned on demand and is not automatically saved to memory.",
+            ),
+            ToolDefinition::for_args::<ContactReadArgs>(
+                "contacts_read",
+                "Read one Google contact by its exact People API resource name.",
+            ),
         ]
     }
 
@@ -130,6 +138,14 @@ impl Integration for GoogleIntegration {
                 )
                 .await
             }
+            "contacts_search" => {
+                let args: ContactsSearchArgs = serde_json::from_str(arguments)?;
+                self.contacts_search(&args.account_id, &args.query, args.page_size).await
+            }
+            "contacts_read" => {
+                let args: ContactReadArgs = serde_json::from_str(arguments)?;
+                self.contact_read(&args.account_id, &args.resource_name).await
+            }
             _ => anyhow::bail!("Unknown google tool: {tool_name}"),
         }
     }
@@ -153,6 +169,37 @@ impl Integration for GoogleIntegration {
                 value: Some(url),
                 description: Some("Click to authorize Jossie with Google".to_string()),
             }],
+        })
+    }
+
+    fn connection_spec(&self) -> Option<jossie_core::integration::ConnectionSpec> {
+        Some(jossie_core::integration::ConnectionSpec {
+            integration: "google".to_string(),
+            display_name: "Google".to_string(),
+            description: "Gmail, Calendar, Drive, Tasks, and Contacts".to_string(),
+            fields: vec![
+                jossie_core::integration::ConnectionField {
+                    name: "email".to_string(), label: "Email address".to_string(), input_type: "email".to_string(),
+                    required: false, secret: false, description: Some("Optional account label for manual setup".to_string()), default_value: None,
+                },
+                jossie_core::integration::ConnectionField {
+                    name: "refresh_token".to_string(), label: "Refresh token".to_string(), input_type: "password".to_string(),
+                    required: true, secret: true, description: Some("Prefer OAuth unless you already have a Google refresh token".to_string()), default_value: None,
+                },
+            ],
+            oauth_available: !self.config.client_id.trim().is_empty(),
+        })
+    }
+
+    fn oauth_authorization_url(&self, redirect_uri: &str, state: &str) -> anyhow::Result<Option<String>> {
+        Ok(Some(Self::generate_auth_url(&self.config, redirect_uri, Some(state))))
+    }
+
+    async fn oauth_exchange(&self, code: &str, redirect_uri: &str) -> anyhow::Result<jossie_core::integration::OAuthAccount> {
+        let refresh_token = Self::exchange_code(&self.config, code, redirect_uri).await?;
+        Ok(jossie_core::integration::OAuthAccount {
+            name: "Google account".to_string(),
+            data: serde_json::json!({"refresh_token": refresh_token, "email": "", "source": "oauth"}),
         })
     }
 

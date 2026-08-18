@@ -3,6 +3,9 @@ use jossie_core::integration::IntegrationRegistry;
 use jossie_db::{Database, WorkRunStatus};
 use jossie_integration_http::HttpIntegration;
 use jossie_integration_memory::MemoryIntegration;
+use jossie_integration_personal::{
+    HomeIntegration, NotionIntegration, SpotifyIntegration, TasksIntegration,
+};
 use jossie_integration_scheduler::SchedulerIntegration;
 use jossie_llm::LlmClient;
 use jossie_server::{
@@ -33,7 +36,17 @@ async fn main() -> Result<()> {
     let config = config::load("config.toml")?;
 
     tracing::info!("Connecting to database...");
-    let db = Database::new(&config.database.url).await?;
+    let db = Database::new_with_encryption_key(
+        &config.database.url,
+        (!config.database.encryption_key.trim().is_empty())
+            .then_some(config.database.encryption_key.as_str()),
+    )
+    .await?;
+    if config.database.encryption_key.trim().is_empty() {
+        tracing::warn!(
+            "database.encryption_key is unset; integration credentials are not encrypted at rest"
+        );
+    }
     db.migrate().await?;
     let interrupted_runs = db.mark_running_work_interrupted().await?;
     if interrupted_runs > 0 {
@@ -136,6 +149,19 @@ async fn main() -> Result<()> {
     registry.register(mail_integration.clone())?;
     tracing::info!("Registered mail integration");
 
+    registry.register(Arc::new(TasksIntegration::new(
+        db.clone(),
+        google_integration.clone(),
+        &config.todoist,
+    )))?;
+    registry.register(Arc::new(HomeIntegration::new(db.clone())))?;
+    registry.register(Arc::new(NotionIntegration::new(db.clone(), &config.notion)))?;
+    registry.register(Arc::new(SpotifyIntegration::new(
+        db.clone(),
+        &config.spotify,
+    )))?;
+    tracing::info!("Registered personal integrations");
+
     // Browser Integration
     registry.register(Arc::new(
         jossie_integration_browser::BrowserIntegration::new(),
@@ -219,14 +245,12 @@ async fn main() -> Result<()> {
             heartbeat_enabled: config.heartbeat.enabled,
             heartbeat_interval_secs: config.heartbeat.interval_seconds,
         },
-        google_config: config.google.clone(),
-        google_integration,
         active_conversations: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         cancelled_conversations: Arc::new(tokio::sync::RwLock::new(
             std::collections::HashSet::new(),
         )),
         run_cancellations: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        pending_google_oauth: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        pending_oauth: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         event_tx,
     });
 

@@ -147,6 +147,9 @@ fn override_config_from_env(config: &mut AppConfig) {
             Some(trimmed.to_string())
         };
     }
+    if let Ok(val) = env::var("JOSSIE_DATABASE_ENCRYPTION_KEY") {
+        config.database.encryption_key = val;
+    }
     if let Ok(val) = env::var("JOSSIE_LLM_API_KEY") {
         config.llm.api_key = val;
     }
@@ -231,6 +234,24 @@ fn override_config_from_env(config: &mut AppConfig) {
     }
     if let Ok(val) = env::var("JOSSIE_GOOGLE_REFRESH_TOKEN") {
         config.google.refresh_token = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_TODOIST_CLIENT_ID") {
+        config.todoist.client_id = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_TODOIST_CLIENT_SECRET") {
+        config.todoist.client_secret = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_NOTION_CLIENT_ID") {
+        config.notion.client_id = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_NOTION_CLIENT_SECRET") {
+        config.notion.client_secret = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_SPOTIFY_CLIENT_ID") {
+        config.spotify.client_id = val;
+    }
+    if let Ok(val) = env::var("JOSSIE_SPOTIFY_CLIENT_SECRET") {
+        config.spotify.client_secret = val;
     }
 }
 
