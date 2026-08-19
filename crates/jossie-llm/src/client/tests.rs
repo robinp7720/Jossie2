@@ -584,9 +584,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rate_limit_retry_schedule_fits_within_ten_minute_timeout() {
+        let headers = reqwest::header::HeaderMap::new();
+        let total_delay: std::time::Duration = (0..MAX_RATE_LIMIT_RETRIES)
+            .map(|retry_count| rate_limit_retry_delay(&headers, retry_count))
+            .sum();
+
+        assert!(total_delay < std::time::Duration::from_secs(600));
+        assert!(total_delay >= std::time::Duration::from_secs(540));
+    }
+
     #[tokio::test]
-    async fn non_streaming_completion_retries_rate_limits_transparently() {
-        let (address, attempts) = spawn_rate_limited_responses_server(2).await;
+    async fn non_streaming_completion_recovers_after_extended_rate_limits() {
+        let (address, attempts) = spawn_rate_limited_responses_server(6).await;
         let client = LlmClient::new(&format!("http://{address}/v1"), "test", "model");
 
         let output = client
@@ -595,12 +606,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(output.content, "recovered");
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(attempts.load(Ordering::SeqCst), 7);
     }
 
     #[tokio::test]
-    async fn streaming_completion_retries_before_emitting_events() {
-        let (address, attempts) = spawn_rate_limited_responses_server(2).await;
+    async fn streaming_completion_recovers_after_extended_rate_limits() {
+        let (address, attempts) = spawn_rate_limited_responses_server(6).await;
         let client = LlmClient::new(&format!("http://{address}/v1"), "test", "model");
         let (tx, mut rx) = mpsc::channel(8);
 
@@ -609,7 +620,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(attempts.load(Ordering::SeqCst), 7);
         assert!(matches!(rx.recv().await, Some(StreamEvent::Delta(text)) if text == "recovered"));
         assert!(matches!(
             rx.recv().await,
@@ -617,5 +628,19 @@ mod tests {
                 if response_id.as_deref() == Some("resp_retry")
         ));
         assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn non_streaming_completion_returns_final_rate_limit_after_retry_exhaustion() {
+        let (address, attempts) = spawn_rate_limited_responses_server(usize::MAX).await;
+        let client = LlmClient::new(&format!("http://{address}/v1"), "test", "model");
+
+        let error = client
+            .complete(&[make_message(Role::User, "hello")], &[])
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("429 Too Many Requests"));
+        assert_eq!(attempts.load(Ordering::SeqCst), MAX_RATE_LIMIT_RETRIES + 1);
     }
 }

@@ -1,4 +1,7 @@
-const MAX_RATE_LIMIT_RETRIES: usize = 5;
+// Flex processing can be unavailable for sustained periods. Thirteen retries
+// keep the exponential schedule bounded below the ten-minute request timeout:
+// 2 + 4 + 8 + 16 + 32 + (8 * 60) seconds, plus sub-second jitter.
+const MAX_RATE_LIMIT_RETRIES: usize = 13;
 const BASE_RETRY_DELAY_SECS: u64 = 2;
 const MAX_RETRY_DELAY_SECS: u64 = 60;
 

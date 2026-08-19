@@ -200,7 +200,8 @@ context_keep_recent_dialogue_messages = 12
 # Interactive work pauses with a resumable checkpoint after this budget.
 interactive_run_budget_seconds = 600
 # Bound individual model and tool operations so a single await cannot stall a run.
-llm_request_timeout_seconds = 120
+# The model timeout allows Flex retries to wait through temporary capacity shortages.
+llm_request_timeout_seconds = 600
 tool_call_timeout_seconds = 90
 # Bound model-visible and persisted tool output, individually and per batch.
 max_tool_result_chars = 32000

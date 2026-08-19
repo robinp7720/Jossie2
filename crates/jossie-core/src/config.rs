@@ -168,7 +168,7 @@ fn default_interactive_run_budget_seconds() -> u64 {
 }
 
 fn default_llm_request_timeout_seconds() -> u64 {
-    120
+    600
 }
 
 fn default_tool_call_timeout_seconds() -> u64 {
