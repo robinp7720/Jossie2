@@ -59,19 +59,20 @@ impl std::str::FromStr for CapabilityGroup {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
+        let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+        match normalized.as_str() {
             "core" => Ok(Self::Core),
             "memory" => Ok(Self::Memory),
             "knowledge" => Ok(Self::Knowledge),
             "files" => Ok(Self::Files),
-            "mail" => Ok(Self::Mail),
+            "mail" | "email" => Ok(Self::Mail),
             "calendar" => Ok(Self::Calendar),
             "drive" => Ok(Self::Drive),
-            "web" => Ok(Self::Web),
+            "web" | "browser" => Ok(Self::Web),
             "scheduler" => Ok(Self::Scheduler),
             "tasks" => Ok(Self::Tasks),
             "contacts" => Ok(Self::Contacts),
-            "home" => Ok(Self::Home),
+            "home" | "smart_home" | "home_assistant" => Ok(Self::Home),
             "notes" => Ok(Self::Notes),
             "media" => Ok(Self::Media),
             _ => Err(format!("Unknown capability group: {value}")),

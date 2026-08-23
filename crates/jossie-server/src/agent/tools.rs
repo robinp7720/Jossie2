@@ -133,6 +133,17 @@ impl RunToolset {
                 " Unavailable or unconfigured: {}. Check Connections before relying on them.",
                 unavailable.join(", ")
             ));
+            if !activated.is_empty() {
+                content.push_str(&format!(
+                    " Note: {} may be an invalid capability name. Valid names: {}.",
+                    unavailable.join(", "),
+                    CapabilityGroup::ACTIVATABLE
+                        .iter()
+                        .map(|group| group.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
         }
         (
             jossie_core::ToolResult {
@@ -146,10 +157,30 @@ impl RunToolset {
 }
 
 fn capability_activation_tool() -> jossie_core::ToolDefinition {
-    jossie_core::ToolDefinition::for_args::<CapabilityActivationArgs>(
+    let mut definition = jossie_core::ToolDefinition::for_args::<CapabilityActivationArgs>(
         "activate_capabilities",
         "Enable only the capability groups needed for the current task. Activate groups before attempting their tools; activation is cumulative for this run.",
-    )
+    );
+    if let Some(properties) = definition
+        .parameters
+        .get_mut("properties")
+        .and_then(|properties| properties.as_object_mut())
+        && let Some(capabilities) = properties.get_mut("capabilities")
+    {
+        *capabilities = serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": CapabilityGroup::ACTIVATABLE
+                    .iter()
+                    .map(|group| group.as_str().to_string())
+                    .collect::<Vec<_>>()
+            },
+            "description": "Capability group names to activate.",
+            "maxItems": CapabilityGroup::ACTIVATABLE.len()
+        });
+    }
+    definition
 }
 
 fn work_plan_tool() -> jossie_core::ToolDefinition {
