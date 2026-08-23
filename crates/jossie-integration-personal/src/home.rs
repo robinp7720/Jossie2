@@ -11,18 +11,18 @@ pub struct HomeIntegration {
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AccountArgs {
-    account_id: String,
+    account_id: Option<String>,
 }
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct StateArgs {
-    account_id: String,
+    account_id: Option<String>,
     entity_id: String,
 }
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct EntityListArgs {
-    account_id: String,
+    account_id: Option<String>,
     #[schemars(required)]
     domain: Option<String>,
     #[schemars(required)]
@@ -31,7 +31,7 @@ struct EntityListArgs {
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct HistoryArgs {
-    account_id: String,
+    account_id: Option<String>,
     entity_id: String,
     start_time: String,
     #[schemars(required)]
@@ -40,7 +40,7 @@ struct HistoryArgs {
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ServiceArgs {
-    account_id: String,
+    account_id: Option<String>,
     domain: String,
     service: String,
     #[schemars(required)]
@@ -54,16 +54,42 @@ impl HomeIntegration {
             client: reqwest::Client::new(),
         }
     }
-    async fn auth(&self, id: &str) -> anyhow::Result<(String, String)> {
-        let account = self
-            .db
-            .get_integration_account(id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Home Assistant account not found"))?;
+    async fn resolve_account(
+        &self,
+        account_id: Option<&str>,
+    ) -> anyhow::Result<jossie_db::IntegrationAccount> {
+        let mut accounts = self.db.list_integration_accounts("home_assistant").await?;
+        if let Some(id) = account_id.map(str::trim).filter(|id| !id.is_empty()) {
+            return accounts
+                .into_iter()
+                .find(|account| account.id == id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Home Assistant account '{id}' not found. Omit account_id to use the only connected account, or use one of the available ids."
+                    )
+                });
+        }
         anyhow::ensure!(
-            account.integration == "home_assistant",
-            "Account is not Home Assistant"
+            !accounts.is_empty(),
+            "No Home Assistant account is connected. Add one under Connections first."
         );
+        if accounts.len() > 1 {
+            anyhow::bail!(
+                "Multiple Home Assistant accounts are connected; pass the exact account_id. Available: {}",
+                accounts
+                    .iter()
+                    .map(|account| account.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        Ok(accounts.remove(0))
+    }
+    async fn auth(
+        &self,
+        account_id: Option<&str>,
+    ) -> anyhow::Result<(jossie_db::IntegrationAccount, String, String)> {
+        let account = self.resolve_account(account_id).await?;
         let data = account_data(&account)?;
         let base = data
             .get("base_url")
@@ -84,10 +110,14 @@ impl HomeIntegration {
             "Home Assistant base URL must be HTTP(S) without embedded credentials"
         );
         anyhow::ensure!(!token.is_empty(), "Home Assistant token is missing");
-        Ok((base, token))
+        Ok((account, base, token))
     }
-    async fn get(&self, id: &str, path: &str) -> anyhow::Result<serde_json::Value> {
-        let (base, token) = self.auth(id).await?;
+    async fn get(
+        &self,
+        account_id: Option<&str>,
+        path: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let (_, base, token) = self.auth(account_id).await?;
         response_json(
             self.client
                 .get(format!("{base}{path}"))
@@ -99,13 +129,11 @@ impl HomeIntegration {
         .await
     }
 
-    async fn monitored_entities(&self, id: &str) -> anyhow::Result<Vec<String>> {
-        let account = self
-            .db
-            .get_integration_account(id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Home Assistant account not found"))?;
-        let data = account_data(&account)?;
+    async fn monitored_entities(
+        &self,
+        account: &jossie_db::IntegrationAccount,
+    ) -> anyhow::Result<Vec<String>> {
+        let data = account_data(account)?;
         Ok(match data.get("monitored_entities") {
             Some(serde_json::Value::Array(values)) => values
                 .iter()
@@ -125,10 +153,10 @@ impl HomeIntegration {
     }
 
     async fn poll_account(&self, account: &jossie_db::IntegrationAccount) -> anyhow::Result<()> {
-        for entity_id in self.monitored_entities(&account.id).await? {
+        for entity_id in self.monitored_entities(account).await? {
             let state = self
                 .get(
-                    &account.id,
+                    Some(&account.id),
                     &format!("/api/states/{}", urlencoding::encode(&entity_id)),
                 )
                 .await?;
@@ -174,23 +202,23 @@ impl Integration for HomeIntegration {
         vec![
             ToolDefinition::for_args::<EntityListArgs>(
                 "home_list_entities",
-                "List Home Assistant entities. Presence, cameras, locks, and alarms are hidden unless include_sensitive is true.",
+                "List Home Assistant entities. Presence, cameras, locks, and alarms are hidden unless include_sensitive is true. Omit account_id when only one Home Assistant account is connected.",
             ),
             ToolDefinition::for_args::<StateArgs>(
                 "home_get_state",
-                "Read the current state of one exact Home Assistant entity.",
+                "Read the current state of one exact Home Assistant entity. Omit account_id when only one Home Assistant account is connected.",
             ),
             ToolDefinition::for_args::<HistoryArgs>(
                 "home_get_history",
-                "Read recent history for one exact Home Assistant entity.",
+                "Read recent history for one exact Home Assistant entity. Omit account_id when only one Home Assistant account is connected.",
             ),
             ToolDefinition::for_args::<AccountArgs>(
                 "home_list_services",
-                "List available Home Assistant service domains and actions.",
+                "List available Home Assistant service domains and actions. Omit account_id when only one Home Assistant account is connected.",
             ),
             ToolDefinition::for_args::<ServiceArgs>(
                 "home_call_service",
-                "Invoke one exact Home Assistant service. All service calls require explicit approval; locks, alarms, doors, cameras, and climate deserve extra scrutiny.",
+                "Invoke one exact Home Assistant service. All service calls require explicit approval; locks, alarms, doors, cameras, and climate deserve extra scrutiny. Omit account_id when only one Home Assistant account is connected.",
             ),
         ]
     }
@@ -243,7 +271,7 @@ impl Integration for HomeIntegration {
             "home_list_entities" => {
                 let args: EntityListArgs = serde_json::from_str(arguments)?;
                 let mut states = self
-                    .get(&args.account_id, "/api/states")
+                    .get(args.account_id.as_deref(), "/api/states")
                     .await?
                     .as_array()
                     .cloned()
@@ -278,14 +306,14 @@ impl Integration for HomeIntegration {
             "home_get_state" => {
                 let a: StateArgs = serde_json::from_str(arguments)?;
                 self.get(
-                    &a.account_id,
+                    a.account_id.as_deref(),
                     &format!("/api/states/{}", urlencoding::encode(&a.entity_id)),
                 )
                 .await?
             }
             "home_get_history" => {
                 let a: HistoryArgs = serde_json::from_str(arguments)?;
-                let (base, token) = self.auth(&a.account_id).await?;
+                let (_, base, token) = self.auth(a.account_id.as_deref()).await?;
                 let mut req = self
                     .client
                     .get(format!(
@@ -301,7 +329,7 @@ impl Integration for HomeIntegration {
             }
             "home_list_services" => {
                 let a: AccountArgs = serde_json::from_str(arguments)?;
-                self.get(&a.account_id, "/api/services").await?
+                self.get(a.account_id.as_deref(), "/api/services").await?
             }
             "home_call_service" => {
                 let a: ServiceArgs = serde_json::from_str(arguments)?;
@@ -312,7 +340,7 @@ impl Integration for HomeIntegration {
                             .all(|c| c.is_ascii_lowercase() || c == '_'),
                     "Invalid service name"
                 );
-                let (base, token) = self.auth(&a.account_id).await?;
+                let (_, base, token) = self.auth(a.account_id.as_deref()).await?;
                 response_json(
                     self.client
                         .post(format!("{base}/api/services/{}/{}", a.domain, a.service))
