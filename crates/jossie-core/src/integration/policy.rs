@@ -90,7 +90,7 @@ pub enum ToolEffect {
 }
 
 impl ToolEffect {
-    pub fn requires_explicit_authorization(self) -> bool {
+    const fn requires_approval_by_default(self) -> bool {
         matches!(self, Self::ExternalWrite | Self::Destructive)
     }
 }
@@ -99,6 +99,7 @@ impl ToolEffect {
 pub struct ToolMetadata {
     pub capability: CapabilityGroup,
     pub effect: ToolEffect,
+    pub requires_approval: bool,
     pub concurrent: bool,
     pub retry_transient: bool,
 }
@@ -108,6 +109,7 @@ impl ToolMetadata {
         Self {
             capability,
             effect: ToolEffect::Read,
+            requires_approval: false,
             concurrent: true,
             retry_transient: true,
         }
@@ -117,6 +119,7 @@ impl ToolMetadata {
         Self {
             capability,
             effect: ToolEffect::LocalWrite,
+            requires_approval: false,
             concurrent: false,
             retry_transient: false,
         }
@@ -126,6 +129,17 @@ impl ToolMetadata {
         Self {
             capability,
             effect,
+            requires_approval: effect.requires_approval_by_default(),
+            concurrent: false,
+            retry_transient: false,
+        }
+    }
+
+    const fn action_without_approval(capability: CapabilityGroup, effect: ToolEffect) -> Self {
+        Self {
+            capability,
+            effect,
+            requires_approval: false,
             concurrent: false,
             retry_transient: false,
         }
@@ -203,7 +217,7 @@ pub fn tool_metadata(tool_name: &str, arguments: &str) -> ToolMetadata {
             ToolMetadata::action(CapabilityGroup::Tasks, ToolEffect::ExternalWrite)
         }
         "home_call_service" => {
-            ToolMetadata::action(CapabilityGroup::Home, ToolEffect::ExternalWrite)
+            ToolMetadata::action_without_approval(CapabilityGroup::Home, ToolEffect::ExternalWrite)
         }
         "notes_create_page" | "notes_append" => {
             ToolMetadata::action(CapabilityGroup::Notes, ToolEffect::ExternalWrite)

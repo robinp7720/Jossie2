@@ -79,26 +79,30 @@ fn built_in_tool_metadata_separates_reads_from_actions() {
 
     let delete = tool_metadata("memory_delete", r#"{"key":"old"}"#);
     assert_eq!(delete.effect, ToolEffect::LocalWrite);
-    assert!(!delete.effect.requires_explicit_authorization());
+    assert!(!delete.requires_approval);
 }
 
 #[test]
-fn personal_tool_metadata_requires_approval_for_external_mutations() {
+fn personal_tool_metadata_has_expected_approval_policy() {
     let task_read = tool_metadata("task_list", "{}");
     assert_eq!(task_read.capability, CapabilityGroup::Tasks);
     assert_eq!(task_read.effect, ToolEffect::Read);
 
     for (tool, capability) in [
         ("task_complete", CapabilityGroup::Tasks),
-        ("home_call_service", CapabilityGroup::Home),
         ("notes_append", CapabilityGroup::Notes),
         ("media_play", CapabilityGroup::Media),
     ] {
         let metadata = tool_metadata(tool, "{}");
         assert_eq!(metadata.capability, capability);
         assert_eq!(metadata.effect, ToolEffect::ExternalWrite);
-        assert!(metadata.effect.requires_explicit_authorization());
+        assert!(metadata.requires_approval);
     }
+
+    let home_action = tool_metadata("home_call_service", "{}");
+    assert_eq!(home_action.capability, CapabilityGroup::Home);
+    assert_eq!(home_action.effect, ToolEffect::ExternalWrite);
+    assert!(!home_action.requires_approval);
 }
 
 #[test]

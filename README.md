@@ -304,7 +304,7 @@ You can override any config value with environment variables:
 ### Personal services (`jossie-integration-personal`)
 - **Tasks**: Provider-neutral task tools across Google Tasks and Todoist; Todoist due items can trigger quiet background triage
 - **Todoist webhooks**: Configure the provider callback as `/api/integrations/webhooks/todoist`; deliveries are HMAC-verified and deduplicated
-- **Home Assistant**: Entity state, history, service discovery, and approved service calls; sensitive entities are hidden by default
+- **Home Assistant**: Entity state, history, service discovery, and direct service calls; sensitive entities are hidden by default
 - **Home monitoring**: Optional comma-separated entity IDs are polled for proactive, quiet state-change triage
 - **Notion**: Search/read selected pages plus approved page creation and append operations
 - **Spotify**: Search, playback state, queue access, and approved playback or playlist actions

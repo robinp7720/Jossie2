@@ -112,11 +112,7 @@ impl HomeIntegration {
         anyhow::ensure!(!token.is_empty(), "Home Assistant token is missing");
         Ok((account, base, token))
     }
-    async fn get(
-        &self,
-        account_id: Option<&str>,
-        path: &str,
-    ) -> anyhow::Result<serde_json::Value> {
+    async fn get(&self, account_id: Option<&str>, path: &str) -> anyhow::Result<serde_json::Value> {
         let (_, base, token) = self.auth(account_id).await?;
         response_json(
             self.client
@@ -218,7 +214,7 @@ impl Integration for HomeIntegration {
             ),
             ToolDefinition::for_args::<ServiceArgs>(
                 "home_call_service",
-                "Invoke one exact Home Assistant service. All service calls require explicit approval; locks, alarms, doors, cameras, and climate deserve extra scrutiny. Omit account_id when only one Home Assistant account is connected.",
+                "Invoke one exact Home Assistant service without a separate approval step. Omit account_id when only one Home Assistant account is connected.",
             ),
         ]
     }
@@ -226,7 +222,7 @@ impl Integration for HomeIntegration {
         Some(spec(
             "home_assistant",
             "Home Assistant",
-            "Local home state, sensors, and approved service calls",
+            "Local home state, sensors, and service calls",
             vec![
                 ConnectionField {
                     name: "base_url".into(),

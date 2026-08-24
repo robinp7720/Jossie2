@@ -963,7 +963,7 @@ async fn partition_authorized_calls(
 
     for call in calls {
         let metadata = state.registry.metadata_for(&call);
-        if !metadata.effect.requires_explicit_authorization()
+        if !metadata.requires_approval
             || action_is_explicitly_authorized(&call, latest_user_message, messages)
         {
             executable.push(call);
