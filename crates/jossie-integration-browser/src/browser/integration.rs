@@ -14,7 +14,7 @@ impl Integration for BrowserIntegration {
             ToolDefinition::for_args::<BrowserClickArgs>("browser_click", "Click a visible link, button, or submit control in an interactive browser session. Use `selector` when available, otherwise use a visible `text` snippet."),
             ToolDefinition::for_args::<BrowserSelectOptionArgs>("browser_select_option", "Choose an option in a visible `<select>` element in an interactive browser session."),
             ToolDefinition::for_args::<BrowserCloseSessionArgs>("browser_close_session", "Close an interactive browser session and discard its cookies and page state."),
-            ToolDefinition::for_args::<BrowserSearchArgs>("browser_search", "Searches the web for a query using multiple search providers."),
+            ToolDefinition::for_args::<BrowserSearchArgs>("browser_search", "Searches the web. Omit provider for the existing search chain, or select parallel for free, keyless Parallel Search MCP."),
         ]
     }
 
@@ -71,7 +71,10 @@ impl Integration for BrowserIntegration {
             }
             "browser_search" => {
                 let args: BrowserSearchArgs = serde_json::from_value(args)?;
-                self.browser_search(&args.query).await
+                match args.provider.unwrap_or(BrowserSearchProvider::Auto) {
+                    BrowserSearchProvider::Auto => self.browser_search(&args.query).await,
+                    BrowserSearchProvider::Parallel => self.parallel.search(&args.query).await,
+                }
             }
             _ => anyhow::bail!("Unknown tool: {}", tool_name),
         }

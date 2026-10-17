@@ -41,6 +41,7 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "multipart"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
+rmcp = { version = "3.5.1", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest-native-tls"] }
 httpdate = "1"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }

@@ -8,6 +8,7 @@ impl BrowserIntegration {
 
         Self {
             client,
+            parallel: parallel::ParallelSearch::default(),
             browser: Arc::new(RwLock::new(None)),
             sessions: Arc::new(RwLock::new(HashMap::new())),
         }

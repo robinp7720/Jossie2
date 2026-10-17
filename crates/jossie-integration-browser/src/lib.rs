@@ -224,6 +224,16 @@ struct BrowserMutationResult {
 struct BrowserSearchArgs {
     /// The search query.
     query: String,
+    /// Omit for the existing search chain. Select parallel for anonymous Parallel Search MCP.
+    #[serde(default)]
+    provider: Option<BrowserSearchProvider>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum BrowserSearchProvider {
+    Auto,
+    Parallel,
 }
 
 fn default_interaction_wait_ms() -> u64 {
@@ -383,6 +393,7 @@ fn collect_instant_answer_topics(items: &[serde_json::Value], out: &mut Vec<Sear
 
 pub struct BrowserIntegration {
     client: reqwest::Client,
+    parallel: parallel::ParallelSearch,
     browser: Arc<RwLock<Option<Browser>>>,
     sessions: Arc<RwLock<HashMap<String, Arc<Tab>>>>,
 }
@@ -391,5 +402,6 @@ include!("browser/lifecycle.rs");
 include!("browser/sessions.rs");
 include!("browser/pages.rs");
 include!("browser/search.rs");
+mod parallel;
 include!("browser/integration.rs");
 include!("browser/tests.rs");

@@ -287,6 +287,21 @@ You can override any config value with environment variables:
 - **Features**: Extracts content from any website, even JavaScript-heavy sites
 - **Format**: Returns markdown-formatted content
 
+`browser_search` also supports optional [Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp)
+for free web search without an account or API key. Anonymous search uses Fast mode.
+Ask Jossie to use Parallel for a search; the tool call selects it with
+`{"query": "Rust programming language documentation", "provider": "parallel"}`.
+Results include the source URLs and excerpts returned by Parallel. This uses the
+hosted `https://search.parallel.ai/mcp` endpoint and does not launch Chrome.
+
+Omitting `provider`, passing `null`, or selecting `"auto"` keeps the existing
+DuckDuckGo Lite → Brave → DuckDuckGo Instant Answer chain. Selecting `"parallel"`
+reports Parallel errors directly instead of falling back to another provider.
+Each Parallel attempt has a 30-second deadline; the existing tool dispatcher may
+retry transient failures. Searches use the same Web capability controls as other
+browser tools. Free service limits apply; use `browser_read_page` for
+the existing browser-based page reading behavior.
+
 ### HTTP (`jossie-integration-http`)
 - **Tools**: `http_request`
 - **Description**: Make custom HTTP API calls
